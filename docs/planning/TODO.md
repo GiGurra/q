@@ -10,9 +10,6 @@ The persistent backlog for `q`. Mirrors the in-session task list so a fresh conv
 
 ### High-impact gaps in the public surface
 
-- [ ] **#16 — Multi-LHS from a single q.\***: `v, w := q.Try(call())` where we'd want q.Try to split a multi-result producer. Requires new runtime helpers `q.Try2[T1, T2]` / `q.Try3` and corresponding rewrite templates. The hoisting infrastructure handles *incidental* multi-LHS (where the RHS call itself returns multi, and a q.* is nested in its args) — see the hoist fixture's `multiLHS` case. This item is strictly the shape where q.* IS the multi-result producer.
-
-
 - [ ] **#15 — Add `q.Check` (or final-named) for error-only returns.** Public-surface gap: `q.Try` requires `(T, error)`. For functions returning only `error` (`file.Close()`, `db.Ping()`, `validate(input)`), the user has to hand-write `if err := f(); err != nil { return ..., err }`.
   - Proposed name: `q.Check(fn())` (Johan suggested `q.TryValidate`; alternatives `Bail` / `OnErr`). Plus chain entry `q.CheckE(fn()).Wrapf` / `.Err` / `.ErrF` / `.Catch`.
   - `Catch`'s fn signature is `func(error) error` (nil = suppress and continue, non-nil = bubble) since there's no value to recover.
@@ -31,6 +28,8 @@ The persistent backlog for `q`. Mirrors the in-session task list so a fresh conv
 ### Future / parking lot
 
 - [ ] **#11 — `q.<X>` for is-nil-as-failure / comma-ok / etc.** Open question from design discussion: a counterpart helper for cases where the bubble-trigger isn't `(T, error)` or `*T == nil`. Possible shapes: `q.IfNil(x)` — bubble when x is nil; `q.Ok(v, ok)` — bubble when ok is false (comma-ok pattern); `q.Recv(ch)` — bubble on channel close. Get exact semantic from user before designing.
+
+- [ ] **#16 — Multi-LHS from a single q.\*** (deferred). `v, w := q.Try(call())` where we'd want q.Try to split a multi-result producer. Requires new runtime helpers `q.Try2[T1, T2]` / `q.Try3` and matching rewrite templates. The hoist infrastructure already handles *incidental* multi-LHS (where the RHS call itself returns multi, and a q.* is nested in its args — see `multiLHS` in the hoist fixture). This parking-lot item is strictly the shape where q.* IS the multi-result producer; deprioritised in favour of #15 / #17.
 
 ## Done
 
