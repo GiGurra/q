@@ -1,0 +1,4 @@
+pipeline.ok: 10
+pipeline.midbad: parsing "abc": strconv.Atoi: parsing "abc": invalid syntax
+pipeline.lastbad: q: nil value
+shortcircuit: err=strconv.Atoi: parsing "abc": invalid syntax atoiCalls=1

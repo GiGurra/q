@@ -1,0 +1,7 @@
+1 <nil>
+0 empty
+hello <nil>
+ empty
+42 <nil>
+0 boom
+ok <nil>

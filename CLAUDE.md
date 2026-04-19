@@ -14,6 +14,7 @@
 
 - [`README.md`](README.md) — user-facing API tour, install, smallest end-to-end example.
 - [`docs/design.md`](docs/design.md) — authoritative design: link-gate mechanism, the four entry helpers, the chain method semantics, and the rewriter's contract.
+- [`docs/planning/TODO.md`](docs/planning/TODO.md) — **persistent backlog. The resume-point for any new session.** Mirrors the in-session task list; updated in the same commit as task creation / completion. If picking up a fresh chat, scan this first.
 
 ## Current implementation state
 

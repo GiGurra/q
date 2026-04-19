@@ -6,8 +6,11 @@ package preprocessor
 // fixtures cost ~half a second each because they invoke `go build`.
 
 import (
+	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -139,6 +142,156 @@ func myFn(e error) (int, error)              { return 0, nil }
 		if !strings.Contains(got, w) {
 			t.Errorf("missing %q.\n--- output:\n%s", w, got)
 		}
+	}
+}
+
+func TestRewriteInsideNestedBlocks(t *testing.T) {
+	// Regression: q.* inside if-bodies, for/range bodies, switch
+	// cases, etc. must be scanned (not just top-level statements).
+	// The shape mirrors the generics_run_ok fixture's firstNonNil.
+	src := `package p
+
+import "github.com/GiGurra/q/pkg/q"
+
+func first[T any](items []*T) (T, error) {
+	for _, item := range items {
+		if item != nil {
+			v := q.NotNil(item)
+			return *v, nil
+		}
+	}
+	return *new(T), nil
+}
+`
+	got := mustRewrite(t, src)
+	t.Logf("rewritten:\n%s", got)
+	if !strings.Contains(got, "if v == nil {") {
+		t.Errorf("expected the q.NotNil rewrite to land inside the nested if-body.\n--- output:\n%s", got)
+	}
+}
+
+func TestRewriteFixtureSource_NoExceptions(t *testing.T) {
+	// Run the rewriter against every checked-in fixture's *.go file
+	// and assert it produces a syntactically valid Go file with no
+	// surprises (no `c` variable artefacts, no leftover q.* calls,
+	// no orphan _qErr/_qVal references). Cheaper than the full e2e
+	// build for catching common output-shape regressions.
+	cases, err := os.ReadDir("testdata/cases")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range cases {
+		if !e.IsDir() {
+			continue
+		}
+		caseDir := filepath.Join("testdata", "cases", e.Name())
+		entries, err := os.ReadDir(caseDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range entries {
+			if !strings.HasSuffix(f.Name(), ".go") {
+				continue
+			}
+			path := filepath.Join(caseDir, f.Name())
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Run(e.Name()+"/"+f.Name(), func(t *testing.T) {
+				fset := token.NewFileSet()
+				file, err := parser.ParseFile(fset, path, data, parser.ParseComments)
+				if err != nil {
+					t.Fatalf("parse: %v", err)
+				}
+				if qImportAlias(file) == "" {
+					t.Skip("no q import")
+				}
+				shapes, diags, err := scanFile(fset, path, file)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(diags) > 0 {
+					t.Fatalf("unexpected scan diagnostics: %v", diags)
+				}
+				if len(shapes) == 0 {
+					t.Skip("no shapes to rewrite")
+				}
+				alias := qImportAlias(file)
+				out, _, err := rewriteFile(fset, file, data, shapes, alias)
+				if err != nil {
+					t.Fatalf("rewrite: %v", err)
+				}
+				// Must still parse as valid Go.
+				rewritten, err := parser.ParseFile(token.NewFileSet(), path, out, parser.ParseComments)
+				if err != nil {
+					t.Fatalf("rewritten output failed to parse: %v\n--- output:\n%s", err, out)
+				}
+				// AST walk: no q.<entry>(...) call expressions should
+				// survive in the rewritten output. The appended sentinel
+				// `var _ = <alias>.ErrNil` is an ident *value* reference,
+				// not a call, so it's invisible to a CallExpr walk.
+				ast.Inspect(rewritten, func(n ast.Node) bool {
+					call, ok := n.(*ast.CallExpr)
+					if !ok {
+						return true
+					}
+					sel, ok := call.Fun.(*ast.SelectorExpr)
+					if !ok {
+						return true
+					}
+					x, ok := sel.X.(*ast.Ident)
+					if !ok {
+						return true
+					}
+					if x.Name != alias {
+						return true
+					}
+					// One of the four entry helpers surviving the
+					// rewrite is a bug — chain calls (q.TryE(...).Method())
+					// also count: their outer .Method() is a CallExpr
+					// whose Fun is a SelectorExpr whose X is the
+					// q.TryE(...) sub-call, which we'd catch on this
+					// inner pass.
+					switch sel.Sel.Name {
+					case "Try", "TryE", "NotNil", "NotNilE":
+						t.Errorf("rewriter left a q.%s call un-erased at %s",
+							sel.Sel.Name, fset.Position(call.Pos()))
+					}
+					return true
+				})
+			})
+		}
+	}
+}
+
+func TestRewriteMethodOnGenericReceiver(t *testing.T) {
+	// Regression: q.Try inside a method on a generic type. The
+	// rewriter pulls the result type T from the enclosing FuncDecl;
+	// methods on Box[T] must work the same as plain generic functions.
+	src := `package p
+
+import "github.com/GiGurra/q/pkg/q"
+
+type Box[T any] struct {
+	v   T
+	err error
+}
+
+func (b Box[T]) read() (T, error) { return b.v, b.err }
+
+func (b Box[T]) Get() (T, error) {
+	v := q.Try(b.read())
+	return v, nil
+}
+`
+	got := mustRewrite(t, src)
+	t.Logf("rewritten:\n%s", got)
+	if !strings.Contains(got, "v, _qErr1 := b.read()") {
+		t.Errorf("Box[T].Get rewrite missing.\n--- output:\n%s", got)
+	}
+	if !strings.Contains(got, "*new(T)") {
+		t.Errorf("expected *new(T) zero-value with the type-parameter name.\n--- output:\n%s", got)
 	}
 }
 

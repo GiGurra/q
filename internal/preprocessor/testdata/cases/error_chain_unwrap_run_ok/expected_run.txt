@@ -1,0 +1,7 @@
+Wrapf+Is(io.EOF): true
+Wrap+Is(io.EOF):  true
+Wrapf+As(*SyntaxErr): token=[bad]
+Wrap+As(*SyntaxErr):  token=[bad]
+Wrapf message: processing "anon": anonymous failure
+Wrap message:  processing: anonymous failure
+Wrapf success: n=42 err=<nil>
