@@ -43,6 +43,19 @@ const (
 	familyNotNilE
 )
 
+// form is the syntactic position of a recognised q.* call:
+//
+//	formDefine  -> v   := q.Try(call())   (declares LHS via :=)
+//	formAssign  -> v    = q.Try(call())   (assigns to existing LHS)
+//	formDiscard -> 	      q.Try(call())   (ExprStmt; bubbles, drops T/p)
+type form int
+
+const (
+	formDefine form = iota
+	formAssign
+	formDiscard
+)
+
 // callShape describes one recognised q.* call site, captured at scan
 // time so the rewriter can emit the inlined replacement without
 // re-walking the AST.
@@ -52,8 +65,15 @@ type callShape struct {
 	// the function stays intact.
 	Stmt ast.Stmt
 
-	// LHSName is the single LHS identifier of the := assignment.
-	LHSName string
+	// Form is the syntactic position — define, assign, or discard.
+	Form form
+
+	// LHSExpr is the AST node for the LHS in formDefine / formAssign;
+	// nil for formDiscard. Resolved to source text by the rewriter
+	// using its source-byte buffer (same flow as InnerExpr). For
+	// formDefine the AST node is always *ast.Ident; for formAssign
+	// it can be any addressable expression (ident, selector, index).
+	LHSExpr ast.Expr
 
 	// Family identifies the source-monad entry — Try, TryE, etc.
 	Family family
@@ -110,7 +130,7 @@ func scanFile(fset *token.FileSet, path string, file *ast.File) ([]callShape, []
 			continue
 		}
 		for _, stmt := range fn.Body.List {
-			shape, ok, err := matchAssignStmt(stmt, alias, fn)
+			shape, ok, err := matchStatement(fset, stmt, alias, fn)
 			if err != nil {
 				diags = append(diags, diagAt(fset, path, stmt.Pos(), err.Error()))
 				continue
@@ -127,7 +147,7 @@ func scanFile(fset *token.FileSet, path string, file *ast.File) ([]callShape, []
 			// flag it.
 			if pos := findQReference(stmt, alias); pos.IsValid() {
 				diags = append(diags, diagAt(fset, path, pos,
-					fmt.Sprintf("unsupported q.* call shape; the rewriter currently handles `v := %s.Try(call(...))` and `v := %s.TryE(call(...)).<Method>(...)`", alias, alias)))
+					fmt.Sprintf("unsupported q.* call shape; supported: `v := %s.Try/NotNil(...)`, `v = %s.Try/NotNil(...)`, `%s.Try/NotNil(...)` (discard), with optional .Err / .ErrF / .Catch / .Wrap / .Wrapf chain methods on the *E entries", alias, alias, alias)))
 			}
 		}
 	}
@@ -156,57 +176,93 @@ func qImportAlias(file *ast.File) string {
 	return ""
 }
 
-// matchAssignStmt tests whether stmt is one of the recognised shapes:
+// matchStatement dispatches on the statement form (assign vs expr stmt)
+// and looks for one of the recognised q.* call shapes. Recognised
+// shapes:
 //
-//	<ident> := <alias>.Try(<call-expr>)
-//	<ident> := <alias>.TryE(<call-expr>).<Method>(<args>...)
+//	<ident>      := <alias>.Try(<call>)                       formDefine
+//	<ident>       = <alias>.Try(<call>)                       formAssign
+//	             	<alias>.Try(<call>)                        formDiscard
 //
-// Returns the shape on a match. Returns (zero, false, nil) on a
-// no-match without diagnostic. Returns (zero, false, err) when the
-// statement *almost* matches but is malformed (e.g. q.Try with the
-// wrong arity) — the caller turns these into diagnostics.
-func matchAssignStmt(stmt ast.Stmt, alias string, fn *ast.FuncDecl) (callShape, bool, error) {
-	as, ok := stmt.(*ast.AssignStmt)
-	if !ok || as.Tok != token.DEFINE || len(as.Lhs) != 1 || len(as.Rhs) != 1 {
-		return callShape{}, false, nil
+//	<ident>      := <alias>.TryE(<call>).<Method>(<args>...)  formDefine
+//	<ident>       = <alias>.TryE(<call>).<Method>(<args>...)  formAssign
+//	             	<alias>.TryE(<call>).<Method>(<args>...)   formDiscard
+//
+// (Same set mirrored for q.NotNil / q.NotNilE with a *T expression in
+// place of the inner call.)
+//
+// Returns the shape on a match, (zero, false, nil) on a no-match, and
+// (zero, false, err) when the statement is *almost* a match but
+// malformed — the caller turns these into diagnostics.
+func matchStatement(fset *token.FileSet, stmt ast.Stmt, alias string, fn *ast.FuncDecl) (callShape, bool, error) {
+	switch s := stmt.(type) {
+	case *ast.AssignStmt:
+		if (s.Tok != token.DEFINE && s.Tok != token.ASSIGN) || len(s.Lhs) != 1 || len(s.Rhs) != 1 {
+			return callShape{}, false, nil
+		}
+		// For DEFINE the LHS must be a fresh identifier; for ASSIGN it
+		// can be any addressable expression (ident, selector, index).
+		if s.Tok == token.DEFINE {
+			if _, ok := s.Lhs[0].(*ast.Ident); !ok {
+				return callShape{}, false, nil
+			}
+		}
+		f := formDefine
+		if s.Tok == token.ASSIGN {
+			f = formAssign
+		}
+		shape, ok, err := classifyQCall(s.Rhs[0], alias)
+		if err != nil || !ok {
+			return callShape{}, ok, err
+		}
+		shape.Stmt = stmt
+		shape.Form = f
+		shape.LHSExpr = s.Lhs[0]
+		shape.EnclosingFunc = fn
+		return shape, true, nil
+
+	case *ast.ExprStmt:
+		shape, ok, err := classifyQCall(s.X, alias)
+		if err != nil || !ok {
+			return callShape{}, ok, err
+		}
+		shape.Stmt = stmt
+		shape.Form = formDiscard
+		shape.EnclosingFunc = fn
+		return shape, true, nil
 	}
-	id, ok := as.Lhs[0].(*ast.Ident)
-	if !ok {
-		return callShape{}, false, nil
-	}
-	rhs, ok := as.Rhs[0].(*ast.CallExpr)
+	return callShape{}, false, nil
+}
+
+// classifyQCall examines a single expression and reports whether it is
+// one of the recognised q.* call shapes (bare or chain). Sets the
+// per-shape fields on the returned callShape but leaves Stmt, Form,
+// LHSText, and EnclosingFunc to the caller.
+func classifyQCall(expr ast.Expr, alias string) (callShape, bool, error) {
+	call, ok := expr.(*ast.CallExpr)
 	if !ok {
 		return callShape{}, false, nil
 	}
 
-	// Bare q.Try shape: rhs is q.Try(inner).
-	if isSelector(rhs.Fun, alias, "Try") {
-		if len(rhs.Args) != 1 {
-			return callShape{}, false, fmt.Errorf("q.Try must take exactly one argument (a (T, error)-returning call); got %d", len(rhs.Args))
+	// Bare q.Try / q.NotNil.
+	if isSelector(call.Fun, alias, "Try") {
+		if len(call.Args) != 1 {
+			return callShape{}, false, fmt.Errorf("q.Try must take exactly one argument (a (T, error)-returning call); got %d", len(call.Args))
 		}
-		if _, ok := rhs.Args[0].(*ast.CallExpr); !ok {
+		if _, ok := call.Args[0].(*ast.CallExpr); !ok {
 			return callShape{}, false, fmt.Errorf("q.Try's argument must itself be a call expression returning (T, error)")
 		}
-		return callShape{
-			Stmt: stmt, LHSName: id.Name, Family: familyTry,
-			InnerExpr: rhs.Args[0], EnclosingFunc: fn,
-		}, true, nil
+		return callShape{Family: familyTry, InnerExpr: call.Args[0]}, true, nil
 	}
-
-	// Bare q.NotNil shape: rhs is q.NotNil(inner).
-	if isSelector(rhs.Fun, alias, "NotNil") {
-		if len(rhs.Args) != 1 {
-			return callShape{}, false, fmt.Errorf("q.NotNil must take exactly one argument (a *T expression); got %d", len(rhs.Args))
+	if isSelector(call.Fun, alias, "NotNil") {
+		if len(call.Args) != 1 {
+			return callShape{}, false, fmt.Errorf("q.NotNil must take exactly one argument (a *T expression); got %d", len(call.Args))
 		}
-		return callShape{
-			Stmt: stmt, LHSName: id.Name, Family: familyNotNil,
-			InnerExpr: rhs.Args[0], EnclosingFunc: fn,
-		}, true, nil
+		return callShape{Family: familyNotNil, InnerExpr: call.Args[0]}, true, nil
 	}
 
-	// Chain shapes: rhs is <q.TryE(inner)>.<Method>(args...) or
-	// <q.NotNilE(inner)>.<Method>(args...).
-	if sel, ok := rhs.Fun.(*ast.SelectorExpr); ok {
+	// Chain on q.TryE / q.NotNilE.
+	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 		entry, isEntry := sel.X.(*ast.CallExpr)
 		if !isEntry {
 			return callShape{}, false, nil
@@ -222,11 +278,7 @@ func matchAssignStmt(stmt ast.Stmt, alias string, fn *ast.FuncDecl) (callShape, 
 			if _, ok := entry.Args[0].(*ast.CallExpr); !ok {
 				return callShape{}, false, fmt.Errorf("q.TryE's argument must itself be a call expression returning (T, error)")
 			}
-			return callShape{
-				Stmt: stmt, LHSName: id.Name, Family: familyTryE,
-				Method: sel.Sel.Name, MethodArgs: rhs.Args,
-				InnerExpr: entry.Args[0], EnclosingFunc: fn,
-			}, true, nil
+			return callShape{Family: familyTryE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Args[0]}, true, nil
 		case isSelector(entry.Fun, alias, "NotNilE"):
 			if !chainMethods[sel.Sel.Name] {
 				return callShape{}, false, fmt.Errorf("q.NotNilE chain method %q not recognised; valid: Err, ErrF, Catch, Wrap, Wrapf", sel.Sel.Name)
@@ -234,11 +286,7 @@ func matchAssignStmt(stmt ast.Stmt, alias string, fn *ast.FuncDecl) (callShape, 
 			if len(entry.Args) != 1 {
 				return callShape{}, false, fmt.Errorf("q.NotNilE must take exactly one argument (a *T expression); got %d", len(entry.Args))
 			}
-			return callShape{
-				Stmt: stmt, LHSName: id.Name, Family: familyNotNilE,
-				Method: sel.Sel.Name, MethodArgs: rhs.Args,
-				InnerExpr: entry.Args[0], EnclosingFunc: fn,
-			}, true, nil
+			return callShape{Family: familyNotNilE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Args[0]}, true, nil
 		}
 	}
 

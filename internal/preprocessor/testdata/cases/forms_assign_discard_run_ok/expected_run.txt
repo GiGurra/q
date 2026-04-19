@@ -1,0 +1,14 @@
+tryAssign.ok: ok=11
+tryAssign.bad: err=strconv.Atoi: parsing "abc": invalid syntax
+tryDiscard.ok: ok
+tryDiscard.bad: err=strconv.Atoi: parsing "abc": invalid syntax
+tryEAssignWrapf.ok: ok=11
+tryEAssignWrapf.bad: err=assignWrap "abc": strconv.Atoi: parsing "abc": invalid syntax
+tryEDiscardErr.ok: ok
+tryEDiscardErr.bad: err=ping
+notNilAssign.ok: ok=5
+notNilAssign.bad: err=q: nil value
+notNilDiscard.ok: ok
+notNilDiscard.bad: err=q: nil value
+notNilEDiscardErr.ok: ok
+notNilEDiscardErr.bad: err=ping

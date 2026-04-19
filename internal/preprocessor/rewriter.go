@@ -106,38 +106,110 @@ func renderShape(fset *token.FileSet, src []byte, sh callShape, counter int, ali
 	return "", false, false, fmt.Errorf("renderShape: unknown family %v", sh.Family)
 }
 
-// renderNotNil produces the inlined replacement for the bare
-// `p := q.NotNil(<expr>)` shape:
-//
-//	p := <expr>
-//	if p == nil {
-//	    return *new(T1), …, *new(Tk-1), <alias>.ErrNil
-//	}
-//
-// alias is the local q import name, used to spell the sentinel
-// q.ErrNil reference.
+// renderTry produces the replacement for bare q.Try across all three
+// forms. The returned text always ends with `if <errVar> != nil { return … }`.
+// The bubbled error is the captured err itself (no wrapping for bare).
+func renderTry(fset *token.FileSet, src []byte, sh callShape, counter int) (string, error) {
+	zeros, indent, errVar, innerText, err := commonRenderInputs(fset, src, sh, counter)
+	if err != nil {
+		return "", err
+	}
+	bindLine := tryBindLine(fset, src, sh, errVar, innerText, indent)
+	zeros[len(zeros)-1] = errVar
+	return assembleErrBlock(bindLine, errVar, indent, zeros), nil
+}
+
+// renderTryE produces the replacement for q.TryE chains across all
+// three forms. The chain method picks how the bubbled error is
+// shaped; the form picks the bind line.
+func renderTryE(fset *token.FileSet, src []byte, sh callShape, counter int) (string, bool, error) {
+	zeros, indent, errVar, innerText, err := commonRenderInputs(fset, src, sh, counter)
+	if err != nil {
+		return "", false, err
+	}
+	bindLine := tryBindLine(fset, src, sh, errVar, innerText, indent)
+
+	switch sh.Method {
+	case "Err":
+		if len(sh.MethodArgs) != 1 {
+			return "", false, fmt.Errorf("q.TryE(...).Err requires exactly one argument (the replacement error); got %d", len(sh.MethodArgs))
+		}
+		zeros[len(zeros)-1] = exprText(fset, src, sh.MethodArgs[0])
+		return assembleErrBlock(bindLine, errVar, indent, zeros), false, nil
+
+	case "ErrF":
+		if len(sh.MethodArgs) != 1 {
+			return "", false, fmt.Errorf("q.TryE(...).ErrF requires exactly one argument (an error-transform fn); got %d", len(sh.MethodArgs))
+		}
+		fn := exprText(fset, src, sh.MethodArgs[0])
+		zeros[len(zeros)-1] = fmt.Sprintf("(%s)(%s)", fn, errVar)
+		return assembleErrBlock(bindLine, errVar, indent, zeros), false, nil
+
+	case "Wrap":
+		if len(sh.MethodArgs) != 1 {
+			return "", false, fmt.Errorf("q.TryE(...).Wrap requires exactly one argument (the message string); got %d", len(sh.MethodArgs))
+		}
+		msg := exprText(fset, src, sh.MethodArgs[0])
+		zeros[len(zeros)-1] = fmt.Sprintf(`fmt.Errorf("%%s: %%w", %s, %s)`, msg, errVar)
+		return assembleErrBlock(bindLine, errVar, indent, zeros), true, nil
+
+	case "Wrapf":
+		if len(sh.MethodArgs) < 1 {
+			return "", false, fmt.Errorf("q.TryE(...).Wrapf requires at least one argument (the format string); got %d", len(sh.MethodArgs))
+		}
+		formatExpr, ok := sh.MethodArgs[0].(*ast.BasicLit)
+		if !ok || formatExpr.Kind != token.STRING {
+			return "", false, fmt.Errorf("q.TryE(...).Wrapf's first argument must be a string literal so the rewriter can splice in `: %%w`")
+		}
+		raw := formatExpr.Value
+		formatWithW := raw[:len(raw)-1] + `: %w` + `"`
+		argParts := []string{formatWithW}
+		for _, a := range sh.MethodArgs[1:] {
+			argParts = append(argParts, exprText(fset, src, a))
+		}
+		argParts = append(argParts, errVar)
+		zeros[len(zeros)-1] = fmt.Sprintf("fmt.Errorf(%s)", joinWith(argParts, ", "))
+		return assembleErrBlock(bindLine, errVar, indent, zeros), true, nil
+
+	case "Catch":
+		if len(sh.MethodArgs) != 1 {
+			return "", false, fmt.Errorf("q.TryE(...).Catch requires exactly one argument (a (T, error)-returning fn); got %d", len(sh.MethodArgs))
+		}
+		fn := exprText(fset, src, sh.MethodArgs[0])
+		retErrVar := fmt.Sprintf("_qRet%d", counter)
+		zeros[len(zeros)-1] = retErrVar
+		// Catch only makes sense when there is a place to put the
+		// recovered value — i.e. formDefine or formAssign. In
+		// formDiscard there is no LHS to rebind; rewrite as if it were
+		// ErrF returning the second tuple element.
+		recoveryLHS := lhsTextOrUnderscore(fset, src, sh)
+		return assembleCatchErrBlock(bindLine, recoveryLHS, errVar, retErrVar, fn, indent, zeros), false, nil
+	}
+
+	return "", false, fmt.Errorf("renderTryE: unknown method %q", sh.Method)
+}
+
+// renderNotNil produces the replacement for bare q.NotNil across all
+// three forms. The bubbled error is q.ErrNil (spelled through the
+// local alias).
 func renderNotNil(fset *token.FileSet, src []byte, sh callShape, counter int, alias string) (string, error) {
 	zeros, indent, _, innerText, err := commonRenderInputs(fset, src, sh, counter)
 	if err != nil {
 		return "", err
 	}
+	bindLine, checkVar := nilBindLineAndCheck(fset, src, sh, innerText, counter)
 	zeros[len(zeros)-1] = alias + ".ErrNil"
-	return assembleNilBlock(sh.LHSName, innerText, indent, zeros, ""), nil
+	return assembleNilBlock(bindLine, checkVar, indent, zeros), nil
 }
 
-// renderNotNilE produces the inlined replacement for the chain shape
-// `p := q.NotNilE(<expr>).<Method>(args...)`. NotNilE has no captured
-// source error to wrap, so:
-//   - Wrap(msg)         → errors.New(msg)
-//   - Wrapf(fmt, args…) → fmt.Errorf(fmt, args…)   (no %w, no captured err)
-//   - Err(replacement)  → replacement
-//   - ErrF(fn)          → fn()                      (thunk, no error param)
-//   - Catch(fn)         → fn() (T, error) — recover or transform
+// renderNotNilE produces the replacement for q.NotNilE chains across
+// all three forms.
 func renderNotNilE(fset *token.FileSet, src []byte, sh callShape, counter int) (string, bool, bool, error) {
 	zeros, indent, _, innerText, err := commonRenderInputs(fset, src, sh, counter)
 	if err != nil {
 		return "", false, false, err
 	}
+	bindLine, checkVar := nilBindLineAndCheck(fset, src, sh, innerText, counter)
 
 	switch sh.Method {
 	case "Err":
@@ -145,7 +217,7 @@ func renderNotNilE(fset *token.FileSet, src []byte, sh callShape, counter int) (
 			return "", false, false, fmt.Errorf("q.NotNilE(...).Err requires exactly one argument (the replacement error); got %d", len(sh.MethodArgs))
 		}
 		zeros[len(zeros)-1] = exprText(fset, src, sh.MethodArgs[0])
-		return assembleNilBlock(sh.LHSName, innerText, indent, zeros, ""), false, false, nil
+		return assembleNilBlock(bindLine, checkVar, indent, zeros), false, false, nil
 
 	case "ErrF":
 		if len(sh.MethodArgs) != 1 {
@@ -153,7 +225,7 @@ func renderNotNilE(fset *token.FileSet, src []byte, sh callShape, counter int) (
 		}
 		fn := exprText(fset, src, sh.MethodArgs[0])
 		zeros[len(zeros)-1] = fmt.Sprintf("(%s)()", fn)
-		return assembleNilBlock(sh.LHSName, innerText, indent, zeros, ""), false, false, nil
+		return assembleNilBlock(bindLine, checkVar, indent, zeros), false, false, nil
 
 	case "Wrap":
 		if len(sh.MethodArgs) != 1 {
@@ -161,7 +233,7 @@ func renderNotNilE(fset *token.FileSet, src []byte, sh callShape, counter int) (
 		}
 		msg := exprText(fset, src, sh.MethodArgs[0])
 		zeros[len(zeros)-1] = fmt.Sprintf("errors.New(%s)", msg)
-		return assembleNilBlock(sh.LHSName, innerText, indent, zeros, ""), false, true, nil
+		return assembleNilBlock(bindLine, checkVar, indent, zeros), false, true, nil
 
 	case "Wrapf":
 		if len(sh.MethodArgs) < 1 {
@@ -172,7 +244,7 @@ func renderNotNilE(fset *token.FileSet, src []byte, sh callShape, counter int) (
 			argParts = append(argParts, exprText(fset, src, a))
 		}
 		zeros[len(zeros)-1] = fmt.Sprintf("fmt.Errorf(%s)", joinWith(argParts, ", "))
-		return assembleNilBlock(sh.LHSName, innerText, indent, zeros, ""), true, false, nil
+		return assembleNilBlock(bindLine, checkVar, indent, zeros), true, false, nil
 
 	case "Catch":
 		if len(sh.MethodArgs) != 1 {
@@ -181,147 +253,17 @@ func renderNotNilE(fset *token.FileSet, src []byte, sh callShape, counter int) (
 		fn := exprText(fset, src, sh.MethodArgs[0])
 		retErrVar := fmt.Sprintf("_qRet%d", counter)
 		zeros[len(zeros)-1] = retErrVar
-		return assembleNilCatchBlock(sh.LHSName, retErrVar, innerText, fn, indent, zeros), false, false, nil
+		recoveryLHS := lhsTextOrUnderscore(fset, src, sh)
+		return assembleNilCatchBlock(bindLine, checkVar, recoveryLHS, retErrVar, fn, indent, zeros), false, false, nil
 	}
 
 	return "", false, false, fmt.Errorf("renderNotNilE: unknown method %q", sh.Method)
 }
 
-// assembleNilBlock formats the replacement skeleton for the NotNil
-// family (bare and chain except Catch):
-//
-//	<lhs> := <innerText>
-//	if <lhs> == nil {
-//	    return <zeros>
-//	}
-//
-// The unused trailing parameter exists so the signature symmetry with
-// assembleTryBlock is visible at the call sites.
-func assembleNilBlock(lhs, innerText, indent string, zeros []string, _ string) string {
-	var b bytes.Buffer
-	fmt.Fprintf(&b, "%s := %s\n", lhs, innerText)
-	fmt.Fprintf(&b, "%sif %s == nil {\n", indent, lhs)
-	fmt.Fprintf(&b, "%s\treturn %s\n", indent, joinWith(zeros, ", "))
-	fmt.Fprintf(&b, "%s}", indent)
-	return b.String()
-}
-
-// assembleNilCatchBlock formats the NotNilE.Catch replacement. The
-// nil branch invokes the thunk; on (recovered, nil) the LHS is
-// rebound and execution falls through; on (zero, err) the err
-// bubbles.
-//
-//	<lhs> := <innerText>
-//	if <lhs> == nil {
-//	    var <retErrVar> error
-//	    <lhs>, <retErrVar> = (<fn>)()
-//	    if <retErrVar> != nil {
-//	        return <zeros>
-//	    }
-//	}
-func assembleNilCatchBlock(lhs, retErrVar, innerText, fn, indent string, zeros []string) string {
-	var b bytes.Buffer
-	fmt.Fprintf(&b, "%s := %s\n", lhs, innerText)
-	fmt.Fprintf(&b, "%sif %s == nil {\n", indent, lhs)
-	fmt.Fprintf(&b, "%s\tvar %s error\n", indent, retErrVar)
-	fmt.Fprintf(&b, "%s\t%s, %s = (%s)()\n", indent, lhs, retErrVar, fn)
-	fmt.Fprintf(&b, "%s\tif %s != nil {\n", indent, retErrVar)
-	fmt.Fprintf(&b, "%s\t\treturn %s\n", indent, joinWith(zeros, ", "))
-	fmt.Fprintf(&b, "%s\t}\n", indent)
-	fmt.Fprintf(&b, "%s}", indent)
-	return b.String()
-}
-
-// renderTry produces the inlined replacement text for the bare
-// `v := q.Try(call())` shape:
-//
-//	v, _qErrN := <inner-call>
-//	if _qErrN != nil {
-//	    return *new(T1), …, *new(Tk-1), _qErrN
-//	}
-func renderTry(fset *token.FileSet, src []byte, sh callShape, counter int) (string, error) {
-	zeros, indent, errVar, innerText, err := commonRenderInputs(fset, src, sh, counter)
-	if err != nil {
-		return "", err
-	}
-	zeros[len(zeros)-1] = errVar
-	return assembleTryBlock(sh.LHSName, errVar, innerText, indent, zeros), nil
-}
-
-// renderTryE produces the inlined replacement for the chain shape
-// `v := q.TryE(call()).<Method>(args...)`. The method name picks how
-// the bubbled error is shaped.
-//
-// For Catch the structure differs (the err branch may recover, in
-// which case execution falls through with v rebound), so it has its
-// own assembler.
-func renderTryE(fset *token.FileSet, src []byte, sh callShape, counter int) (string, bool, error) {
-	zeros, indent, errVar, innerText, err := commonRenderInputs(fset, src, sh, counter)
-	if err != nil {
-		return "", false, err
-	}
-
-	switch sh.Method {
-	case "Err":
-		if len(sh.MethodArgs) != 1 {
-			return "", false, fmt.Errorf("q.TryE(...).Err requires exactly one argument (the replacement error); got %d", len(sh.MethodArgs))
-		}
-		zeros[len(zeros)-1] = exprText(fset, src, sh.MethodArgs[0])
-		return assembleTryBlock(sh.LHSName, errVar, innerText, indent, zeros), false, nil
-
-	case "ErrF":
-		if len(sh.MethodArgs) != 1 {
-			return "", false, fmt.Errorf("q.TryE(...).ErrF requires exactly one argument (an error-transform fn); got %d", len(sh.MethodArgs))
-		}
-		fn := exprText(fset, src, sh.MethodArgs[0])
-		zeros[len(zeros)-1] = fmt.Sprintf("(%s)(%s)", fn, errVar)
-		return assembleTryBlock(sh.LHSName, errVar, innerText, indent, zeros), false, nil
-
-	case "Wrap":
-		if len(sh.MethodArgs) != 1 {
-			return "", false, fmt.Errorf("q.TryE(...).Wrap requires exactly one argument (the message string); got %d", len(sh.MethodArgs))
-		}
-		msg := exprText(fset, src, sh.MethodArgs[0])
-		zeros[len(zeros)-1] = fmt.Sprintf(`fmt.Errorf("%%s: %%w", %s, %s)`, msg, errVar)
-		return assembleTryBlock(sh.LHSName, errVar, innerText, indent, zeros), true, nil
-
-	case "Wrapf":
-		if len(sh.MethodArgs) < 1 {
-			return "", false, fmt.Errorf("q.TryE(...).Wrapf requires at least one argument (the format string); got %d", len(sh.MethodArgs))
-		}
-		formatExpr, ok := sh.MethodArgs[0].(*ast.BasicLit)
-		if !ok || formatExpr.Kind != token.STRING {
-			return "", false, fmt.Errorf("q.TryE(...).Wrapf's first argument must be a string literal so the rewriter can splice in `: %%w`")
-		}
-		// formatExpr.Value includes the surrounding quotes. Splice in `: %w`
-		// before the closing quote so fmt.Errorf wraps the captured err.
-		raw := formatExpr.Value
-		formatWithW := raw[:len(raw)-1] + `: %w` + `"`
-		var argParts []string
-		argParts = append(argParts, formatWithW)
-		for _, a := range sh.MethodArgs[1:] {
-			argParts = append(argParts, exprText(fset, src, a))
-		}
-		argParts = append(argParts, errVar)
-		zeros[len(zeros)-1] = fmt.Sprintf("fmt.Errorf(%s)", joinWith(argParts, ", "))
-		return assembleTryBlock(sh.LHSName, errVar, innerText, indent, zeros), true, nil
-
-	case "Catch":
-		if len(sh.MethodArgs) != 1 {
-			return "", false, fmt.Errorf("q.TryE(...).Catch requires exactly one argument (a (T, error)-returning fn); got %d", len(sh.MethodArgs))
-		}
-		fn := exprText(fset, src, sh.MethodArgs[0])
-		retErrVar := fmt.Sprintf("_qRet%d", counter)
-		zeros[len(zeros)-1] = retErrVar
-		return assembleCatchBlock(sh.LHSName, errVar, retErrVar, innerText, fn, indent, zeros), false, nil
-	}
-
-	return "", false, fmt.Errorf("renderTryE: unknown method %q", sh.Method)
-}
-
 // commonRenderInputs assembles the pieces every renderer needs: the
 // per-result zero-value expressions, the original statement's indent,
-// the local err-variable name, and the source text of the inner call.
+// the local err-variable name, and the source text of the inner
+// expression.
 func commonRenderInputs(fset *token.FileSet, src []byte, sh callShape, counter int) (zeros []string, indent, errVar, innerText string, err error) {
 	results := sh.EnclosingFunc.Type.Results
 	if results == nil || results.NumFields() == 0 {
@@ -339,41 +281,132 @@ func commonRenderInputs(fset *token.FileSet, src []byte, sh callShape, counter i
 	return zeros, indent, errVar, innerText, nil
 }
 
-// assembleTryBlock formats the universal three-line replacement used
-// by every shape except Catch:
+// tryBindLine builds the bind line for the Try family across all
+// three forms:
 //
-//	<lhs>, <errVar> := <innerText>
+//	formDefine:  v, _qErrN := <inner>
+//	formAssign:  var _qErrN error
+//	             v, _qErrN = <inner>
+//	formDiscard: _, _qErrN := <inner>
+func tryBindLine(fset *token.FileSet, src []byte, sh callShape, errVar, innerText, indent string) string {
+	switch sh.Form {
+	case formDefine:
+		return fmt.Sprintf("%s, %s := %s", exprText(fset, src, sh.LHSExpr), errVar, innerText)
+	case formAssign:
+		return fmt.Sprintf("var %s error\n%s%s, %s = %s", errVar, indent, exprText(fset, src, sh.LHSExpr), errVar, innerText)
+	case formDiscard:
+		return fmt.Sprintf("_, %s := %s", errVar, innerText)
+	}
+	return fmt.Sprintf("/* unsupported form %v */", sh.Form)
+}
+
+// nilBindLineAndCheck builds the bind line for the NotNil family and
+// the variable name to test for nil. For define and assign forms the
+// LHS itself is the check variable; for discard, a fresh _qVal<N>
+// temporary holds the value being tested.
+func nilBindLineAndCheck(fset *token.FileSet, src []byte, sh callShape, innerText string, counter int) (bindLine, checkVar string) {
+	switch sh.Form {
+	case formDefine:
+		lhs := exprText(fset, src, sh.LHSExpr)
+		return fmt.Sprintf("%s := %s", lhs, innerText), lhs
+	case formAssign:
+		lhs := exprText(fset, src, sh.LHSExpr)
+		return fmt.Sprintf("%s = %s", lhs, innerText), lhs
+	case formDiscard:
+		tmp := fmt.Sprintf("_qVal%d", counter)
+		return fmt.Sprintf("%s := %s", tmp, innerText), tmp
+	}
+	return "/* unsupported form */", "_"
+}
+
+// lhsTextOrUnderscore returns the LHS source text for define/assign
+// forms, or "_" for discard. Used by Catch's recovery line where the
+// rebinding has nowhere to go in the discard case.
+func lhsTextOrUnderscore(fset *token.FileSet, src []byte, sh callShape) string {
+	if sh.Form == formDiscard {
+		return "_"
+	}
+	return exprText(fset, src, sh.LHSExpr)
+}
+
+// assembleErrBlock formats the universal Try-family replacement
+// skeleton. bindLine carries the form-specific bind statements (one
+// or two lines, no trailing newline).
+//
+//	<bindLine>
 //	if <errVar> != nil {
-//	    return <zeros joined with ", ">
+//	    return <zeros>
 //	}
-func assembleTryBlock(lhs, errVar, innerText, indent string, zeros []string) string {
+func assembleErrBlock(bindLine, errVar, indent string, zeros []string) string {
 	var b bytes.Buffer
-	fmt.Fprintf(&b, "%s, %s := %s\n", lhs, errVar, innerText)
+	b.WriteString(bindLine)
+	b.WriteByte('\n')
 	fmt.Fprintf(&b, "%sif %s != nil {\n", indent, errVar)
 	fmt.Fprintf(&b, "%s\treturn %s\n", indent, joinWith(zeros, ", "))
 	fmt.Fprintf(&b, "%s}", indent)
 	return b.String()
 }
 
-// assembleCatchBlock formats the Catch replacement. Catch may either
-// recover (fn returns (T, nil) → continue with the recovered v) or
-// transform (fn returns (zero, err) → bubble err), so the err branch
-// reassigns v through fn and inspects the second return:
+// assembleNilBlock formats the universal NotNil-family replacement
+// skeleton.
 //
-//	<lhs>, <errVar> := <innerText>
+//	<bindLine>
+//	if <checkVar> == nil {
+//	    return <zeros>
+//	}
+func assembleNilBlock(bindLine, checkVar, indent string, zeros []string) string {
+	var b bytes.Buffer
+	b.WriteString(bindLine)
+	b.WriteByte('\n')
+	fmt.Fprintf(&b, "%sif %s == nil {\n", indent, checkVar)
+	fmt.Fprintf(&b, "%s\treturn %s\n", indent, joinWith(zeros, ", "))
+	fmt.Fprintf(&b, "%s}", indent)
+	return b.String()
+}
+
+// assembleCatchErrBlock formats the Catch replacement for the Try
+// family. The err branch reassigns the LHS via fn(err); on (recovered,
+// nil) execution falls through, on (zero, newErr) newErr bubbles.
+//
+//	<bindLine>
 //	if <errVar> != nil {
 //	    var <retErrVar> error
-//	    <lhs>, <retErrVar> = (<fn>)(<errVar>)
+//	    <recoveryLHS>, <retErrVar> = (<fn>)(<errVar>)
 //	    if <retErrVar> != nil {
 //	        return <zeros>
 //	    }
 //	}
-func assembleCatchBlock(lhs, errVar, retErrVar, innerText, fn, indent string, zeros []string) string {
+func assembleCatchErrBlock(bindLine, recoveryLHS, errVar, retErrVar, fn, indent string, zeros []string) string {
 	var b bytes.Buffer
-	fmt.Fprintf(&b, "%s, %s := %s\n", lhs, errVar, innerText)
+	b.WriteString(bindLine)
+	b.WriteByte('\n')
 	fmt.Fprintf(&b, "%sif %s != nil {\n", indent, errVar)
 	fmt.Fprintf(&b, "%s\tvar %s error\n", indent, retErrVar)
-	fmt.Fprintf(&b, "%s\t%s, %s = (%s)(%s)\n", indent, lhs, retErrVar, fn, errVar)
+	fmt.Fprintf(&b, "%s\t%s, %s = (%s)(%s)\n", indent, recoveryLHS, retErrVar, fn, errVar)
+	fmt.Fprintf(&b, "%s\tif %s != nil {\n", indent, retErrVar)
+	fmt.Fprintf(&b, "%s\t\treturn %s\n", indent, joinWith(zeros, ", "))
+	fmt.Fprintf(&b, "%s\t}\n", indent)
+	fmt.Fprintf(&b, "%s}", indent)
+	return b.String()
+}
+
+// assembleNilCatchBlock is the NotNil-family Catch counterpart.
+//
+//	<bindLine>
+//	if <checkVar> == nil {
+//	    var <retErrVar> error
+//	    <recoveryLHS>, <retErrVar> = (<fn>)()
+//	    if <retErrVar> != nil {
+//	        return <zeros>
+//	    }
+//	}
+func assembleNilCatchBlock(bindLine, checkVar, recoveryLHS, retErrVar, fn, indent string, zeros []string) string {
+	var b bytes.Buffer
+	b.WriteString(bindLine)
+	b.WriteByte('\n')
+	fmt.Fprintf(&b, "%sif %s == nil {\n", indent, checkVar)
+	fmt.Fprintf(&b, "%s\tvar %s error\n", indent, retErrVar)
+	fmt.Fprintf(&b, "%s\t%s, %s = (%s)()\n", indent, recoveryLHS, retErrVar, fn)
 	fmt.Fprintf(&b, "%s\tif %s != nil {\n", indent, retErrVar)
 	fmt.Fprintf(&b, "%s\t\treturn %s\n", indent, joinWith(zeros, ", "))
 	fmt.Fprintf(&b, "%s\t}\n", indent)
