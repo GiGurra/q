@@ -116,8 +116,13 @@ func NotNilE[T any](p *T) NilResult[T] {
 // preprocessor when emitting the rewritten if-err-then-return shape;
 // the struct itself is never materialized in production code.
 type ErrResult[T any] struct {
-	v   T
-	err error
+	v T
+	// err carries the captured error that the chain method's
+	// rewritten replacement bubbles. It's never read by the
+	// run-time method bodies (which panic if reached) — the
+	// rewriter erases every call site before the binary runs —
+	// so the linter would otherwise flag it as unused.
+	err error //nolint:unused // documented as part of the chain contract
 }
 
 // Err bubbles the supplied constant error when the captured err is
