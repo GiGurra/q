@@ -209,7 +209,7 @@ func mustRewrite(t *testing.T, src string) string {
 		t.Fatal("scanner returned no shapes")
 	}
 	alias := qImportAlias(file)
-	out, err := rewriteFile(fset, file, []byte(src), shapes, alias)
+	out, _, err := rewriteFile(fset, file, []byte(src), shapes, alias)
 	if err != nil {
 		t.Fatal(err)
 	}

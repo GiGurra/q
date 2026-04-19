@@ -41,6 +41,7 @@ func planUserPackage(pkgPath string, toolArgs []string) (*Plan, error) {
 	var diags []Diagnostic
 	var rewrittenFiles []rewritten
 	var cleanups []func()
+	importsToInject := map[string]bool{}
 
 	cleanupAll := func() {
 		for _, c := range cleanups {
@@ -71,10 +72,13 @@ func planUserPackage(pkgPath string, toolArgs []string) (*Plan, error) {
 			return nil, fmt.Errorf("read %s: %w", src, err)
 		}
 		alias := qImportAlias(file)
-		rewrittenBytes, err := rewriteFile(fset, file, original, shapes, alias)
+		rewrittenBytes, addedImports, err := rewriteFile(fset, file, original, shapes, alias)
 		if err != nil {
 			cleanupAll()
 			return nil, err
+		}
+		for _, p := range addedImports {
+			importsToInject[p] = true
 		}
 		newPath, cleanup, err := writeTempGoFile("q-rewrite-*.go", rewrittenBytes)
 		if err != nil {
@@ -101,6 +105,29 @@ func planUserPackage(pkgPath string, toolArgs []string) (*Plan, error) {
 				newArgs[i] = rw.newPath
 			}
 		}
+	}
+
+	// Extend the compile's importcfg with any packages we injected
+	// into rewritten files but that the original sources didn't import
+	// directly. Without this the compile fails with
+	// `could not import fmt (open : no such file or directory)` —
+	// importcfg lists only the package's direct imports + their
+	// transitive deps, computed by `go build` before the toolexec
+	// pass; injected imports were not visible at that point.
+	if len(importsToInject) > 0 {
+		var addPkgs []string
+		for p := range importsToInject {
+			addPkgs = append(addPkgs, p)
+		}
+		extendedArgs, importcfgCleanup, err := extendImportcfg(newArgs, addPkgs)
+		if err != nil {
+			cleanupAll()
+			return nil, err
+		}
+		if importcfgCleanup != nil {
+			cleanups = append(cleanups, importcfgCleanup)
+		}
+		newArgs = extendedArgs
 	}
 
 	return &Plan{

@@ -35,8 +35,10 @@ import (
 // become unused after the rewrites erase the only call sites that
 // referenced it. The needsFmt / needsErrors flags accumulate over all
 // rendered shapes so the import-injection passes run at most once per
-// package.
-func rewriteFile(fset *token.FileSet, file *ast.File, src []byte, shapes []callShape, alias string) ([]byte, error) {
+// package; the returned addedImports lists the packages the rewriter
+// actually injected (so the caller can extend the compile's
+// -importcfg accordingly).
+func rewriteFile(fset *token.FileSet, file *ast.File, src []byte, shapes []callShape, alias string) ([]byte, []string, error) {
 	type edit struct {
 		start, end int
 		text       string
@@ -49,7 +51,7 @@ func rewriteFile(fset *token.FileSet, file *ast.File, src []byte, shapes []callS
 		counter++
 		text, fmtUsed, errorsUsed, err := renderShape(fset, src, sh, counter, alias)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if fmtUsed {
 			needsFmt = true
@@ -71,18 +73,21 @@ func rewriteFile(fset *token.FileSet, file *ast.File, src []byte, shapes []callS
 		out = append(out[:e.start], append([]byte(e.text), out[e.end:]...)...)
 	}
 
+	var addedImports []string
 	if needsFmt && !hasImport(file, "fmt") {
 		out = ensureImport(file, fset, out, "fmt")
+		addedImports = append(addedImports, "fmt")
 	}
 	if needsErrors && !hasImport(file, "errors") {
 		out = ensureImport(file, fset, out, "errors")
+		addedImports = append(addedImports, "errors")
 	}
 
 	if alias != "" {
 		sentinel := fmt.Sprintf("\n\nvar _ = %s.ErrNil\n", alias)
 		out = append(out, []byte(sentinel)...)
 	}
-	return out, nil
+	return out, addedImports, nil
 }
 
 // renderShape dispatches one matched call site to the right renderer.

@@ -29,15 +29,21 @@ jobs:
         with:
           version: latest
 
-      # Library + scanner/rewriter unit tests run without toolexec.
-      # The internal/preprocessor harness (TestFixtures, TestLinkGate…)
-      # builds cmd/q itself in TestMain and manages its own GOCACHE,
-      # so it doesn't need GOFLAGS=-toolexec=q from the surrounding shell.
-      - name: Run unit tests (no toolexec)
-        run: go test ./internal/... ./pkg/...
+      # Pure library + scanner/rewriter unit tests, no toolexec.
+      - name: Run pkg + scanner/rewriter unit tests
+        run: go test ./pkg/... ./internal/preprocessor/ -run '^Test[^F]' -count=1
 
-      - name: Run unit tests with -race
-        run: go test -race ./internal/... ./pkg/...
+      - name: Run pkg + scanner/rewriter unit tests with -race
+        run: go test -race ./pkg/... ./internal/preprocessor/ -run '^Test[^F]' -count=1
+
+      # The full e2e fixture suite + the link-gate negative test.
+      # TestMain in internal/preprocessor builds cmd/q into a tempdir
+      # and TestFixtures runs every fixture through `go build
+      # -toolexec=<that-binary>` (and `go run` when expected_run.txt
+      # is present). The harness owns its own GOCACHE so it can't
+      # cross-contaminate with the unit tests above.
+      - name: Run e2e fixtures + link-gate negative test
+        run: go test ./internal/preprocessor/ -run '^TestFixtures$|^TestLinkGate' -v -count=1
 
       - name: Install q binary
         run: go install ./cmd/q/

@@ -71,6 +71,13 @@ func compilePkgPath(args []string) string {
 	return compileFlagValue(args, "-p")
 }
 
+// compileImportcfg returns the value of the -importcfg flag in a
+// compile argv, or "" if not present (unusual but legal for a package
+// that imports nothing beyond unsafe / builtin).
+func compileImportcfg(args []string) string {
+	return compileFlagValue(args, "-importcfg")
+}
+
 // compileFlagValue is the shared helper behind per-flag extractors.
 // The compile tool uses the two-token form `-flag value` exclusively
 // (not `-flag=value`); the helper relies on that invariant.
