@@ -1,0 +1,2 @@
+ok-path: 42
+err-path: strconv.Atoi: parsing "abc": invalid syntax

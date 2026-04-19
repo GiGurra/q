@@ -61,9 +61,7 @@ func planCompile(toolPath string, toolArgs []string) (*Plan, error) {
 		return planQStub(toolArgs)
 	}
 
-	// Phase 2 will dispatch to planUserPackage(pkgPath, toolArgs) here;
-	// for now every other package compiles unchanged.
-	return nil, nil
+	return planUserPackage(pkgPath, toolArgs)
 }
 
 // compilePkgPath returns the value of the -p flag in a compile argv,

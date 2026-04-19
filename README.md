@@ -26,7 +26,7 @@ func loadUser(id int) (User, error) {
 
 ## Status
 
-**Phase 1 (link gate) is implemented and verified.** The preprocessor currently injects the link-gate stub when compiling `pkg/q`, so a build either uses `-toolexec=q` and links cleanly, or it fails to link with a deterministic diagnostic. **Phase 2 (the actual call-site rewriting) is not yet implemented** — until it is, calling any `q.*` helper at runtime panics with a clear "call site was not rewritten by the preprocessor" message. Roadmap and full architecture: see [`CLAUDE.md`](CLAUDE.md) and [`docs/design.md`](docs/design.md).
+Phase 1 (link gate) and a minimum-viable Phase 2 rewriter are both implemented. The rewriter currently transforms the smallest shape — `v := q.Try(call())` — end-to-end into the inlined `if err != nil { return …, err }` form. Other shapes (`q.TryE(...).Method(...)` chains, `q.NotNil` family, plain assignment, discard form) emit a diagnostic and abort the build so half-rewritten code never happens silently. Roadmap and full architecture: see [`CLAUDE.md`](CLAUDE.md) and [`docs/design.md`](docs/design.md).
 
 ## Install
 

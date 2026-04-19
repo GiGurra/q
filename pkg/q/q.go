@@ -41,19 +41,27 @@ var ErrNil = errors.New("q: nil value")
 // pkg/q's compile). Without the preprocessor, the link step fails
 // with "undefined: _q_atCompileTime".
 //
-// Referenced exactly once via the package-level `var _ = _qLink`
-// declaration below — taking the function value forces the linker to
-// resolve the symbol, but no call is emitted at startup. Generic
-// callers of q.Try / etc. do not need to reference _qLink themselves;
-// the gate is global, not per-function.
+// Referenced exactly once via the package init() below — calling the
+// function (vs. taking its value into a blank) survives Go's
+// dead-code elimination at every optimisation level. Generic callers
+// of q.Try / etc. do not need to reference _qLink themselves; the
+// gate is global, not per-function.
 //
 //go:linkname _qLink _q_atCompileTime
 func _qLink()
 
-// Package-level reference that forces link-time resolution of _qLink.
-// Without this, an aggressive linker could drop _qLink as unused —
-// the build would succeed, and the gate would silently disengage.
-var _ = _qLink
+// init forces link-time resolution of _qLink. The call is a no-op
+// once the preprocessor's stub is in place; without the preprocessor,
+// the link step fails before init() ever runs.
+//
+// A package-level `var _ = _qLink` was tried first but Go's compiler
+// dead-code-eliminates the blank assignment — the linker then drops
+// _qLink as unreferenced and the gate silently disengages. An init()
+// that calls the function is the smallest construction that survives
+// every optimisation level reliably.
+func init() {
+	_qLink()
+}
 
 // panicUnrewritten is the universal body for every q.* helper. The
 // preprocessor rewrites every legitimate call site away, so reaching

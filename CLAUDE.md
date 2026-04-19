@@ -25,21 +25,34 @@
   - `ErrResult[T]` methods: `.Err(error)`, `.ErrF(func(error) error)`, `.Catch(func(error) (T, error))`, `.Wrap(string)`, `.Wrapf(string, ...any)`.
   - `NilResult[T]` methods: `.Err(error)`, `.ErrF(func() error)`, `.Catch(func() (*T, error))`, `.Wrap(string)`, `.Wrapf(string, ...any)`.
   - `ErrNil` sentinel, exposed for `errors.Is` checks against the bare `q.NotNil` bubble.
-  - `_qLink` plus `var _ = _qLink` — the package-level link gate.
+  - `_qLink` plus `func init() { _qLink() }` — the package-level link gate.
 - `cmd/q/main.go` — toolexec shim, thin wrapper around `internal/preprocessor.Run`.
 - `internal/preprocessor/run.go` — toolexec entry: dispatch by tool, plan, forward.
-- `internal/preprocessor/compile.go` — per-package dispatch; `Plan` and `Diagnostic` types; argv flag/source helpers.
+- `internal/preprocessor/compile.go` — per-package dispatch; `Plan` and `Diagnostic` types; argv flag/source helpers. Routes `pkg/q` compiles to `planQStub` and every other package to `planUserPackage`.
 - `internal/preprocessor/qstub.go` — Phase 1 handler: scans `pkg/q`'s sources for the `//go:linkname` directive, synthesizes a no-op companion file supplying `_q_atCompileTime`, and appends it to `pkg/q`'s compile argv.
+- `internal/preprocessor/userpkg.go` — Phase 2 entry: per user-package compile, parses each source, runs the scanner, applies the rewriter, writes rewritten files to a tempdir, substitutes the temp paths into the compile argv. Diagnostics from unsupported `q.*` shapes abort the build.
+- `internal/preprocessor/scanner.go` — recognises `q.*` call expressions on the AST. **Currently matches only `v := q.Try(call())`** (single-LHS short-var-decl, RHS is one q.Try call wrapping a multi-return call). Resolves the local import alias of `pkg/q` per file. Any unmatched `q.*` reference in a user file becomes a diagnostic.
+- `internal/preprocessor/rewriter.go` — emits replacement source for one matched call site. Replacement shape: `v, _qErrN := <inner>; if _qErrN != nil { return *new(T1), …, _qErrN }`. Uses the universal `*new(T)` zero-value form (works for any type without per-type knowledge; the compiler folds it to a constant). Appends a `var _ = <alias>.ErrNil` sentinel so the q import does not become unused after rewrites erase the only callers.
+- `internal/preprocessor/rewriter_test.go` — unit tests over scan + rewrite (basic shape, multi-result, aliased import, no-op when q is not imported).
 - `internal/preprocessor/e2e_test.go` — fixture-based e2e harness mirroring proven's pattern. `TestMain` builds `cmd/q` once into a tempdir, every fixture under `internal/preprocessor/testdata/cases/<name>/` runs in its own tempdir with a synthesized `go.mod` containing a local replace, and the harness asserts on `expected_build.txt` (build outcome) and `expected_run.txt` (runtime stdout, when present).
 - `internal/preprocessor/linkgate_test.go` — `TestLinkGateFailsWithoutPreprocessor`: builds a tiny main importing `pkg/q` *without* `-toolexec=q` in an isolated `GOCACHE`, asserts the link fails with a diagnostic naming `_q_atCompileTime`. Locks in the negative half of the gate's contract.
-- `internal/preprocessor/testdata/cases/try_bare_link_ok/` — first fixture: a main that uses bare `q.Try`, asserted to build cleanly under `-toolexec=q`.
+- `internal/preprocessor/testdata/cases/try_bare_link_ok/` — Phase 1 fixture: a main using bare `q.Try`, asserted to build cleanly under `-toolexec=q`.
+- `internal/preprocessor/testdata/cases/try_simple_run_ok/` — Phase 2 fixture: same shape, runs the binary on both a successful input ("21" → 42) and a failing one ("abc" → propagated `strconv.Atoi` error). Locks in that the rewritten code actually produces the right runtime values.
 - `example/basic/basic.go` — small library showing all four entry helpers in idiomatic positions.
 
-**Phase 1 (link gate + stub injection) is implemented and verified end-to-end. Phase 2 (the rewriter that actually transforms `q.*` call sites) is not yet started.** Without Phase 2, any binary that uses `q.*` will link cleanly under `-toolexec=q` but panic at runtime when the helper bodies execute (because no rewriting has erased them). The next pieces:
+**Status: Phase 1 + Phase 2 minimum-viable rewriter both implemented and verified.** The rewriter currently handles only the smallest recognised shape (`v := q.Try(call())`). Other shapes are pending — each emits a diagnostic when encountered so half-rewritten builds never happen silently:
 
-- **Phase 2a (`q.Try` / `q.TryE` rewriter).** Walk every user-package compile, find `q.Try(call)` and `q.TryE(call).Method(...)` chain expressions, replace each with the inlined `if err != nil { return …, <wrapped> }` shape using the enclosing `FuncDecl`'s return-type list to synthesize zero values.
-- **Phase 2b (`q.NotNil` / `q.NotNilE` rewriter).** Mirror of Phase 2a with the bubble condition `p == nil` and the `NilResult` chain methods.
-- More fixtures: at minimum one per chain method × source monad, plus a fixture per declined "not yet supported" pattern (so future expansion has a regression target).
+- Discard form: `q.Try(call())` (no LHS) — pending.
+- Plain assignment: `v = q.Try(call())` (`=`, not `:=`) — pending.
+- `q.TryE(call()).Err(…)` / `.ErrF` / `.Catch` / `.Wrap` / `.Wrapf` chain methods — pending.
+- `q.NotNil` / `q.NotNilE` family — pending (task #6).
+- Return-position (`return q.Try(call())`), nested-in-call, multi-LHS — out of scope for now per `docs/design.md` §4.4.
+
+### Implementation notes from the rewriter pass
+
+- **Universal `*new(T)` zero values.** Avoids per-type knowledge of the spelling of zero (`0` for ints, `""` for strings, `nil` for pointers, `T{}` for structs, generic-aware variants, etc.). The compiler folds `*new(T)` to a constant zero — generated machine code is identical to a hand-written zero literal.
+- **Sentinel reference to keep the q import alive.** Appending `var _ = <alias>.ErrNil` after every rewritten file is cheaper than statically tracking residual usage. Good enough until / unless gofmt-quality output of the temp files becomes interesting.
+- **Link-gate construction matters.** The first attempt (`var _ = _qLink` at package level) compiled fine but was dead-code-eliminated by Go's optimiser — the linker then dropped `_qLink` as unreferenced and the gate silently disengaged (build succeeded without `-toolexec=q`). Switched to `func init() { _qLink() }` which calls the function explicitly and survives every optimisation level. `TestLinkGateFailsWithoutPreprocessor` is the regression guard.
 
 ## Conventions
 
