@@ -1,0 +1,16 @@
+bareCheck.ok: ok
+bareCheck.bad: err=ping-failed
+checkErr.ok: ok
+checkErr.bad: err=replaced
+checkErrF.ok: ok
+checkErrF.bad: err=wrapped: ping-failed
+checkWrap.ok: ok
+checkWrap.bad: err=closing: ping-failed
+checkWrapf.ok: ok
+checkWrapf.bad: err=closing 7: ping-failed
+checkCatchSuppress.ok: ok
+checkCatchSuppress.bad: ok
+checkCatchBubble.ok: ok
+checkCatchBubble.bad: err=caught: ping-failed
+checkInValueFn.ok: ok=42
+checkInValueFn.bad: err=ping-failed

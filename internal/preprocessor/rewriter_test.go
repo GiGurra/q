@@ -686,6 +686,159 @@ func sum(x, y int) int           { return x + y }
 	}
 }
 
+func TestRewriteCheck_Bare(t *testing.T) {
+	src := `package p
+
+import "github.com/GiGurra/q/pkg/q"
+
+func run() error {
+	q.Check(closeIt())
+	return nil
+}
+
+func closeIt() error { return nil }
+`
+	got := mustRewrite(t, src)
+	wants := []string{
+		"_qErr1 := closeIt()",
+		"if _qErr1 != nil {",
+		"return _qErr1",
+	}
+	for _, w := range wants {
+		if !strings.Contains(got, w) {
+			t.Errorf("missing %q.\n--- output:\n%s", w, got)
+		}
+	}
+	if strings.Contains(got, "q.Check(") {
+		t.Errorf("q.Check survived rewrite.\n--- output:\n%s", got)
+	}
+}
+
+func TestRewriteCheckE_WrapAndCatch(t *testing.T) {
+	src := `package p
+
+import "github.com/GiGurra/q/pkg/q"
+
+func doWrap() error {
+	q.CheckE(closeIt()).Wrap("finalising")
+	return nil
+}
+
+func doCatch() error {
+	q.CheckE(closeIt()).Catch(swallowTimeouts)
+	return nil
+}
+
+func closeIt() error                     { return nil }
+func swallowTimeouts(err error) error    { return err }
+`
+	got := mustRewrite(t, src)
+	wants := []string{
+		`fmt.Errorf("%s: %w", "finalising", _qErr1)`,
+		"_qRet2 := (swallowTimeouts)(_qErr2)",
+		"if _qRet2 != nil {",
+		"return _qRet2",
+	}
+	for _, w := range wants {
+		if !strings.Contains(got, w) {
+			t.Errorf("missing %q.\n--- output:\n%s", w, got)
+		}
+	}
+}
+
+func TestRewriteOpen_BareDefine(t *testing.T) {
+	src := `package p
+
+import "github.com/GiGurra/q/pkg/q"
+
+type Conn struct{}
+
+func (*Conn) Close() {}
+
+func acquire() (int, error) {
+	conn := q.Open(dial()).Release((*Conn).Close)
+	_ = conn
+	return 0, nil
+}
+
+func dial() (*Conn, error) { return nil, nil }
+`
+	got := mustRewrite(t, src)
+	wants := []string{
+		"conn, _qErr1 := dial()",
+		"if _qErr1 != nil {",
+		"return *new(int), _qErr1",
+		"defer ((*Conn).Close)(conn)",
+	}
+	for _, w := range wants {
+		if !strings.Contains(got, w) {
+			t.Errorf("missing %q.\n--- output:\n%s", w, got)
+		}
+	}
+	if strings.Contains(got, "q.Open(") {
+		t.Errorf("q.Open survived rewrite.\n--- output:\n%s", got)
+	}
+}
+
+func TestRewriteOpenE_WrapChain(t *testing.T) {
+	src := `package p
+
+import "github.com/GiGurra/q/pkg/q"
+
+type Conn struct{}
+
+func (*Conn) Close() {}
+
+func acquire() (int, error) {
+	conn := q.OpenE(dial()).Wrap("dialing").Release((*Conn).Close)
+	_ = conn
+	return 0, nil
+}
+
+func dial() (*Conn, error) { return nil, nil }
+`
+	got := mustRewrite(t, src)
+	wants := []string{
+		"conn, _qErr1 := dial()",
+		`fmt.Errorf("%s: %w", "dialing", _qErr1)`,
+		"defer ((*Conn).Close)(conn)",
+	}
+	for _, w := range wants {
+		if !strings.Contains(got, w) {
+			t.Errorf("missing %q.\n--- output:\n%s", w, got)
+		}
+	}
+}
+
+func TestRewriteOpen_ReturnPosition(t *testing.T) {
+	src := `package p
+
+import "github.com/GiGurra/q/pkg/q"
+
+type Conn struct{}
+
+func (*Conn) Close() {}
+
+func get() (*Conn, error) {
+	return q.Open(dial()).Release((*Conn).Close), nil
+}
+
+func dial() (*Conn, error) { return nil, nil }
+`
+	got := mustRewrite(t, src)
+	wants := []string{
+		"_qTmp1, _qErr1 := dial()",
+		"if _qErr1 != nil {",
+		"defer ((*Conn).Close)(_qTmp1)",
+		"return _qTmp1, nil",
+	}
+	for _, w := range wants {
+		if !strings.Contains(got, w) {
+			t.Errorf("missing %q.\n--- output:\n%s", w, got)
+		}
+	}
+}
+
 func TestRewriteTryAssign_NoQImport_NoChange(t *testing.T) {
 	src := `package p
 

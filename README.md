@@ -56,8 +56,10 @@ See [Setup](#setup--ide-and-cache-configuration) below for the dedicated GOCACHE
 ### Bare bubble — pass through, propagate unchanged
 
 ```go
-n := q.Try(strconv.Atoi(s))      // (T, error) → bubble err
-u := q.NotNil(table[id])         // (*T)       → bubble q.ErrNil
+n := q.Try(strconv.Atoi(s))      // (T, error)  → bubble err
+u := q.NotNil(table[id])         // (*T)        → bubble q.ErrNil
+     q.Check(db.Ping())          // error alone → bubble err (stmt only)
+c := q.Open(dial(a)).Release((*Conn).Close)  // (T, error) + defer cleanup(v) on success
 ```
 
 ### Chain — custom error handling at the call site
@@ -89,19 +91,41 @@ u := q.NotNilE(table[id]).Wrapf("no user %d", id)                // fmt.Errorf(f
 u := q.NotNilE(table[id]).Catch(func() (*User, error) { ... })   // computed value OR error
 ```
 
-`Catch` is the most powerful method: returning `(value, nil)` recovers and uses that value in place of the bubble; returning `(zero, err)` bubbles the new error. The other methods are conveniences for the common shapes.
+For error-only via `q.CheckE` (void — always an expression statement):
+
+```go
+q.CheckE(db.Ping()).Wrap("health check")           // fmt.Errorf("health check: %w", err)
+q.CheckE(validate(input)).Err(ErrBadInput)         // replace the bubbled error
+q.CheckE(file.Close()).Catch(func(e error) error { // nil = suppress, non-nil = bubble
+    if errors.Is(e, io.ErrClosedPipe) { return nil }
+    return e
+})
+```
+
+For resource acquisition via `q.OpenE`, where `.Release` is the terminal and every other method is a pass-through modifier on the bubbled error:
+
+```go
+conn := q.OpenE(dial(addr)).Wrap("dialing").Release((*Conn).Close)
+conn := q.OpenE(dial(addr)).Catch(func(e error) (*Conn, error) {
+    return fallbackConn(), nil                     // recover with a fallback resource
+}).Release((*Conn).Close)
+```
+
+`Catch` is the most powerful method: returning `(value, nil)` recovers and uses that value in place of the bubble; returning `(zero, err)` bubbles the new error. The other methods are conveniences for the common shapes. For `q.OpenE`, a recovered `value` is what the deferred cleanup fires on — not the failed resource.
 
 ### Statement positions
 
-Every helper works in three positions:
+Every value-producing helper (Try, NotNil, Open and their `E` variants) works in five positions:
 
 ```go
-v := q.Try(call())   // define   — declare a fresh variable
-v  = q.Try(call())   // assign   — update an existing one (incl. obj.field, arr[i])
-     q.Try(call())   // discard  — bubble on err, drop the value
+v := q.Try(call())                       // define — declare a fresh variable
+v  = q.Try(call())                       // assign — update an existing one (incl. obj.field, arr[i])
+     q.Try(call())                       // discard — bubble on err, drop the value
+return q.Try(call()), nil                // return — q.* anywhere inside any return result
+x := f(q.Try(call()), q.NotNil(p))       // hoist — q.* nested inside another expression
 ```
 
-The discard form is useful for "must succeed" calls where the return value isn't needed (e.g. `q.NotNil(somePtr)` as a precondition assertion).
+Any combination works — `return q.Try(a()) * q.Try(b()) / q.Try(c()), nil` hoists three Trys, `x := q.Try(Foo(q.Try(Bar())))` handles nesting inside another q.*'s argument, `m[q.Try(k())] = v` handles a q.* in the assignment target. `q.Check` / `q.CheckE` return void, so they only appear as expression statements.
 
 </details>
 
@@ -213,13 +237,13 @@ GOCACHE="$HOME/.cache/q-build" go clean -cache
 <details>
 <summary><strong>Status and limitations</strong></summary>
 
-**What works.** Bare `q.Try` and `q.NotNil`. Every chain method on `q.TryE` and `q.NotNilE` (`Err`, `ErrF`, `Catch`, `Wrap`, `Wrapf`). Every statement form (define, assign, discard).
+**What works.** Every helper, every chain method, every statement position:
 
-**Currently rejected with a diagnostic** (planned, but not yet supported):
+- Entries: `q.Try`, `q.NotNil`, `q.Check`, `q.Open` and their `E` variants (`q.TryE`, `q.NotNilE`, `q.CheckE`, `q.OpenE`).
+- Chain methods on the `E` variants: `Err`, `ErrF`, `Catch`, `Wrap`, `Wrapf`. `Catch` returns the family-specific recovery shape (`func(error) (T, error)` for Try/OpenE; `func() (*T, error)` for NotNilE; `func(error) error` for CheckE; nil = suppress, non-nil = bubble). `q.Open`'s chain is terminated by `.Release(cleanup)`.
+- Statement forms: define, assign, discard, return-position, and hoist (nested inside any expression — including another q.*'s argument). Multiple q.*s per statement compose: `return q.Try(a()) * q.Try(b()), nil`, `x := q.Try(Foo(q.Try(Bar())))`. Closures and anonymous functions work too — each FuncLit uses its own result list for the bubble.
 
-- Return-position: `return q.Try(call())`.
-- Nested-in-call: `f(q.Try(call()))`.
-- Multi-LHS.
+**Parked.** Multi-LHS from a single q.* (`v, w := q.Try(call())`) — would require `q.Try2` / `q.Try3` runtime helpers; see `docs/planning/TODO.md` #16.
 
 When the rewriter encounters an unsupported shape, it emits a `file:line:col: q: …` diagnostic in the same format Go's compiler uses (so editor click-through works) and aborts the build. Half-rewritten code never happens silently.
 

@@ -21,10 +21,16 @@
 - `pkg/q/q.go` — public surface:
   - `Try[T any](v T, err error) T` — bare error bubble.
   - `NotNil[T any](p *T) *T` — bare nil bubble using sentinel `q.ErrNil`.
-  - `TryE[T any](v T, err error) ErrResult[T]` — chain entry for custom error handling.
-  - `NotNilE[T any](p *T) NilResult[T]` — chain entry for custom nil handling.
+  - `Check(err error)` — void error-only bubble (for `db.Ping`, `file.Close`, `validate(x)`). Always an expression statement.
+  - `Open[T any](v T, err error) OpenResult[T]` — resource acquisition; the only method is `.Release(cleanup func(T)) T` which bubbles on error and registers `defer cleanup(v)` on success.
+  - `TryE[T any](v T, err error) ErrResult[T]` — chain entry for custom error handling on the Try family.
+  - `NotNilE[T any](p *T) NilResult[T]` — chain entry for custom nil handling on the NotNil family.
+  - `CheckE(err error) CheckResult` — chain entry for custom error handling on Check (void).
+  - `OpenE[T any](v T, err error) OpenResultE[T]` — chain entry for Open with shape methods that return `OpenResultE[T]` so `.Release` can still terminate the chain.
   - `ErrResult[T]` methods: `.Err(error)`, `.ErrF(func(error) error)`, `.Catch(func(error) (T, error))`, `.Wrap(string)`, `.Wrapf(string, ...any)`.
   - `NilResult[T]` methods: `.Err(error)`, `.ErrF(func() error)`, `.Catch(func() (*T, error))`, `.Wrap(string)`, `.Wrapf(string, ...any)`.
+  - `CheckResult` methods (all return void): `.Err(error)`, `.ErrF(func(error) error)`, `.Catch(func(error) error)` (nil suppresses, non-nil bubbles), `.Wrap(string)`, `.Wrapf(string, ...any)`.
+  - `OpenResultE[T]` shape methods: `.Err(error)`, `.ErrF(func(error) error)`, `.Catch(func(error) (T, error))`, `.Wrap(string)`, `.Wrapf(string, ...any)` — each returns `OpenResultE[T]` so `.Release(cleanup func(T)) T` can follow as terminal.
   - `ErrNil` sentinel, exposed for `errors.Is` checks against the bare `q.NotNil` bubble.
   - `_qLink` plus `func init() { _qLink() }` — the package-level link gate.
 - `cmd/q/main.go` — toolexec shim, thin wrapper around `internal/preprocessor.Run`.
@@ -45,6 +51,8 @@
 - `internal/preprocessor/testdata/cases/return_position_run_ok/` — Phase 3 fixture for the return form: `return q.Try(...) * 2, nil` (nested inside an arithmetic expression), `return q.TryE(...).Wrap("..."), nil`, `return "tag", q.NotNil(p), nil` (q.* as the middle of three results), and `return q.NotNilE(p).Err(...), nil`. Eight expected_run.txt lines covering ok+bad for each shape.
 - `internal/preprocessor/testdata/cases/multi_q_in_return_run_ok/` — Phase 4 fixture for multiple q.* calls in one return expression: `q.Try(a()) * q.Try(b()) / q.Try(c())` (three Trys in arithmetic), mixed `q.Try + *q.NotNil` (two families in one return), two `q.TryE(...).Wrap(...)` with different messages, plus a counter-based short-circuit check (`calls=1` proves a failing first call skips the second). 14 expected_run.txt lines.
 - `internal/preprocessor/testdata/cases/closures_run_ok/` — q.* inside FuncLits: closure in a var, immediately-invoked, error-only, deferred, doubly-nested, and chain-method — all exercise the `EnclosingFuncType` plumbing and `walkFuncLits` recursion.
+- `internal/preprocessor/testdata/cases/check_run_ok/` — q.Check / q.CheckE across all chain methods (Err/ErrF/Wrap/Wrapf/Catch-suppress/Catch-bubble) on both success and failure paths. Includes a `(int, error)` function shape to exercise the multi-result zero + error bubble.
+- `internal/preprocessor/testdata/cases/open_run_ok/` — q.Open / q.OpenE across every Try-comparable form (define/assign/discard/return/hoist) plus every OpenE shape method on both paths. A package-level `closeLog` records each cleanup; the fixture asserts defer-LIFO ordering for two sequential Opens and verifies that Catch-recovered values feed into the deferred cleanup (closed=[99] on recovery, not the failed resource).
 - `example/basic/basic.go` — small library showing all four entry helpers in idiomatic positions.
 
 **Status: the full public surface is rewritten end-to-end across five statement forms.** Define (`v := ...`), assign (`v = ...`), discard (`q.Try(...)` as expression statement), return (`return q.Try(...), nil`), and hoist (`v := f(q.Try(...))` — q.* nested inside any non-return statement expression) all work for bare `q.Try` / `q.NotNil` and for every `q.TryE` / `q.NotNilE` chain method. Multi-q in one statement is supported (including nested: `x := q.Try(Foo(q.Try(Bar())))`). The rewriter orders nested q.*s innermost-first, substitutes each parent's InnerExpr/MethodArgs with its children's `_qTmpN`, and rebuilds the final stmt with outermost spans substituted. Pending:

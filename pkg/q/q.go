@@ -219,3 +219,161 @@ func (r NilResult[T]) Wrapf(format string, args ...any) *T {
 	panicUnrewritten("q.NotNilE(...).Wrapf")
 	return r.p
 }
+
+// Check bubbles err when non-nil. Use it in positions where the call
+// being guarded returns only an error (file.Close, db.Ping,
+// validate(...)).  Reach for q.CheckE for chain-style custom error
+// handling.
+//
+// q.Check is always an expression statement — it returns nothing, so
+// `v := q.Check(...)` and similar are rejected by the Go compiler.
+//
+// Example:
+//
+//	func shutdown(conn *Conn) error {
+//	    q.Check(conn.Close())
+//	    q.Check(db.Ping())
+//	    return nil
+//	}
+func Check(err error) {
+	panicUnrewritten("q.Check")
+}
+
+// CheckE starts an error-only chain; see ErrResult for the vocabulary.
+// The methods here return void — there is no value to thread through,
+// only an error to shape.
+func CheckE(err error) CheckResult {
+	panicUnrewritten("q.CheckE")
+	return CheckResult{}
+}
+
+// CheckResult carries a captured error for the q.CheckE chain. Like
+// ErrResult.err, CheckResult.err is documented but never read at run
+// time — the rewriter splices the captured error into the inlined
+// bubble.
+type CheckResult struct {
+	err error //nolint:unused // documented as part of the chain contract
+}
+
+// Err bubbles the supplied constant error when the captured err is
+// non-nil.
+func (r CheckResult) Err(replacement error) {
+	panicUnrewritten("q.CheckE(...).Err")
+}
+
+// ErrF bubbles fn(capturedErr).
+func (r CheckResult) ErrF(fn func(error) error) {
+	panicUnrewritten("q.CheckE(...).ErrF")
+}
+
+// Wrap bubbles fmt.Errorf("<msg>: %w", err).
+func (r CheckResult) Wrap(msg string) {
+	panicUnrewritten("q.CheckE(...).Wrap")
+}
+
+// Wrapf bubbles fmt.Errorf(format + ": %w", args..., err).
+func (r CheckResult) Wrapf(format string, args ...any) {
+	panicUnrewritten("q.CheckE(...).Wrapf")
+}
+
+// Catch transforms the captured error via fn. Returning nil suppresses
+// the bubble (continue past the CheckE call); returning non-nil bubbles
+// that error in place of the original. There is no value to recover,
+// unlike ErrResult.Catch.
+func (r CheckResult) Catch(fn func(error) error) {
+	panicUnrewritten("q.CheckE(...).Catch")
+}
+
+// Open begins a resource acquisition chain: pass in a (T, error)-
+// returning call, then chain `.Release(cleanup)` to bubble on error
+// and register `defer cleanup(resource)` on success in the enclosing
+// function. Reach for q.OpenE for chain-style custom error handling
+// around the bubble.
+//
+// Example:
+//
+//	conn := q.Open(dial(addr)).Release((*Conn).Close)
+//	// equivalent, post-rewrite, to:
+//	//   conn, err := dial(addr)
+//	//   if err != nil { return zero, err }
+//	//   defer conn.Close()
+func Open[T any](v T, err error) OpenResult[T] {
+	panicUnrewritten("q.Open")
+	return OpenResult[T]{}
+}
+
+// OpenE is Open with chainable error-shape methods. Shape methods
+// (Err/ErrF/Wrap/Wrapf/Catch) return OpenResultE[T] so `.Release` can
+// still follow as the terminal. Release is the only member that
+// returns T; everything else in the chain is a pass-through modifier
+// on the bubbled error.
+//
+// Example:
+//
+//	conn := q.OpenE(dial(addr)).Wrap("dialing").Release((*Conn).Close)
+func OpenE[T any](v T, err error) OpenResultE[T] {
+	panicUnrewritten("q.OpenE")
+	return OpenResultE[T]{}
+}
+
+// OpenResult is the plain Open handle — it exposes only .Release so
+// IDE completion stays focused on the common case.
+type OpenResult[T any] struct {
+	v   T
+	err error //nolint:unused // documented as part of the chain contract
+}
+
+// Release bubbles err on failure; registers `defer cleanup(v)` in
+// the enclosing function and returns v on success.
+func (r OpenResult[T]) Release(cleanup func(T)) T {
+	panicUnrewritten("q.Open(...).Release")
+	return r.v
+}
+
+// OpenResultE is the chain-capable Open handle. Shape methods return
+// OpenResultE[T] so Release can terminate the chain; Release itself
+// returns T.
+type OpenResultE[T any] struct {
+	v   T
+	err error //nolint:unused // documented as part of the chain contract
+}
+
+// Err replaces the captured error with a constant.
+func (r OpenResultE[T]) Err(replacement error) OpenResultE[T] {
+	panicUnrewritten("q.OpenE(...).Err")
+	return r
+}
+
+// ErrF transforms the captured error via fn(err) error.
+func (r OpenResultE[T]) ErrF(fn func(error) error) OpenResultE[T] {
+	panicUnrewritten("q.OpenE(...).ErrF")
+	return r
+}
+
+// Wrap bubbles fmt.Errorf("<msg>: %w", err).
+func (r OpenResultE[T]) Wrap(msg string) OpenResultE[T] {
+	panicUnrewritten("q.OpenE(...).Wrap")
+	return r
+}
+
+// Wrapf bubbles fmt.Errorf(format + ": %w", args..., err).
+func (r OpenResultE[T]) Wrapf(format string, args ...any) OpenResultE[T] {
+	panicUnrewritten("q.OpenE(...).Wrapf")
+	return r
+}
+
+// Catch recovers or transforms: fn(err) returns (T, nil) to recover
+// with a value (replaces the bubble, the recovered T feeds Release)
+// or (zero, newErr) to bubble newErr instead of the original.
+func (r OpenResultE[T]) Catch(fn func(error) (T, error)) OpenResultE[T] {
+	panicUnrewritten("q.OpenE(...).Catch")
+	return r
+}
+
+// Release bubbles the shaped error on failure; registers
+// `defer cleanup(v)` in the enclosing function and returns v on
+// success.
+func (r OpenResultE[T]) Release(cleanup func(T)) T {
+	panicUnrewritten("q.OpenE(...).Release")
+	return r.v
+}

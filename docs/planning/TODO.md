@@ -10,21 +10,6 @@ The persistent backlog for `q`. Mirrors the in-session task list so a fresh conv
 
 ### High-impact gaps in the public surface
 
-- [ ] **#15 — Add `q.Check` (or final-named) for error-only returns.** Public-surface gap: `q.Try` requires `(T, error)`. For functions returning only `error` (`file.Close()`, `db.Ping()`, `validate(input)`), the user has to hand-write `if err := f(); err != nil { return ..., err }`.
-  - Proposed name: `q.Check(fn())` (Johan suggested `q.TryValidate`; alternatives `Bail` / `OnErr`). Plus chain entry `q.CheckE(fn()).Wrapf` / `.Err` / `.ErrF` / `.Catch`.
-  - `Catch`'s fn signature is `func(error) error` (nil = suppress and continue, non-nil = bubble) since there's no value to recover.
-  - Pick name with Johan, then mirror the Try family implementation.
-
-- [ ] **#17 — Add `q.TryManage` (defer-on-success cleanup).** Resource-management sugar: open something, register cleanup, propagate errors. Two shapes worth considering:
-
-  ```go
-  conn := q.TryManage(openConn(), func(c *Conn) { c.Close() })
-  // or via chain:
-  conn := q.TryE(openConn()).WithDefer(func(c *Conn) { c.Close() }).Wrap("opening")
-  ```
-
-  TryManage is more concise; WithDefer composes with the existing chain methods. Semantics: on err, bubble (no defer registered); on success, register `defer cleanup(conn)` in the enclosing function and return conn. Pick name (TryManage / TryWith / Open / Acquire), then add to scanner+rewriter+fixture.
-
 ### Future / parking lot
 
 - [ ] **#11 — `q.<X>` for is-nil-as-failure / comma-ok / etc.** Open question from design discussion: a counterpart helper for cases where the bubble-trigger isn't `(T, error)` or `*T == nil`. Possible shapes: `q.IfNil(x)` — bubble when x is nil; `q.Ok(v, ok)` — bubble when ok is false (comma-ok pattern); `q.Recv(ch)` — bubble on channel close. Get exact semantic from user before designing.
@@ -35,6 +20,9 @@ The persistent backlog for `q`. Mirrors the in-session task list so a fresh conv
 
 A short ledger of what's shipped — newest first. Look at `git log` for the full story.
 
+- **#15 + #17 — q.Check / q.CheckE + q.Open / q.OpenE.** Two new public-surface families landed together:
+  - **q.Check** (void, error-only): `q.Check(file.Close())` bubbles non-nil err, otherwise no-op. Always an expression statement — the helper's return type is `()`, so `v := q.Check(...)` is a Go type error. `q.CheckE(...).<Err|ErrF|Wrap|Wrapf|Catch>` supports the same error-shape vocabulary as TryE; Catch's fn signature is `func(error) error` (nil = suppress, non-nil = bubble) since there's no value to recover.
+  - **q.Open** (resource-with-defer): `q.Open(dial()).Release((*Conn).Close)` bubbles on err, otherwise registers `defer cleanup(resource)` in the enclosing function and returns the resource. Release is the terminal method; the chain variant `q.OpenE(...)` exposes Err/ErrF/Wrap/Wrapf/Catch as intermediate shape methods that return `OpenResultE[T]` so Release can still come last. Scanner recognises the chain via a new `classifyOpenChain` helper that walks outward from the Release call. Rewriter emits the usual bind+check+bubble block, then a `defer (<cleanup>)(<valueVar>)` line where valueVar is the LHS (define/assign) or a new `_qTmp<N>` temp (discard/return/hoist). Works in every form Try supports, including return-position (`return q.Open(dial()).Release(c), nil`) and nested-in-call (`id := identity(q.Open(dial()).Release(c)).id`). Catch rebinds the valueVar on recovery so the defer fires on the recovered resource, not the failed one. Fixtures `check_run_ok` (16 assertions) and `open_run_ok` (25 assertions — asserts defer-LIFO ordering and Catch-recovery cleanup target).
 - **Hoist form: q.\* nested inside any non-return statement.** Scanner's direct-bind path now falls through to `matchHoist` whenever the matched q.* has nested q.*s in its InnerExpr or MethodArgs, or when the statement shape doesn't fit direct-bind (multi-LHS RHS, non-ident LHS with q.*, q.* as argument to a non-q.* call). `collectQCalls` descends through matched q.*s too so deep nesting is caught. Rewriter orders subs innermost-first, numbers counters in render order, and uses `substituteSpans` to replace immediate-child q.* spans wherever they appear — in each sub-call's InnerExpr/MethodArgs for its bind line, and in the full statement text for the final suffix. Unlocks `v := f(q.Try(call()))`, `a, b := split(q.Try(n()))`, `sink(q.Try(x()))`, `x := q.Try(Foo(q.Try(Bar())))`, `m[key] = q.Try(v())`, `m[q.Try(i())] = v`. Fixture `nested_in_call_run_ok` (17 runtime assertions) + `TestRewriteHoist_*` unit tests cover these shapes.
 - **Multi-q in return + renderer refactor.** Scanner now collects every q.* call inside a return-result subtree (via `ast.Inspect`) into a `callShape.Calls []qSubCall`. Per-call fields (Family/Method/MethodArgs/InnerExpr/OuterCall) moved out of callShape into qSubCall so the rewriter can iterate. Rewriter emits one bind+check block per sub-call, then a reconstructed final return with every q.* span substituted by its own `_qTmpN`. Each sub-call has its own early-return, so later q.*s short-circuit on earlier failures — verified by the `multi_q_in_return_run_ok` fixture (14 assertions including a call-counter for short-circuit proof). Unlocks `return q.Try(a()) * q.Try(b()) / q.Try(c()), nil`.
 - **#19 — q.* inside closures / anonymous functions.** Scanner now recurses into `*ast.FuncLit` bodies (new `walkFuncLits` helper), and each shape records the signature of its nearest-enclosing function — FuncLit or FuncDecl — via a `EnclosingFuncType *ast.FuncType` field (replaces the old `EnclosingFunc *ast.FuncDecl`). A FuncLit with a different result arity/types than its outer FuncDecl now bubbles to its own results, not the outer's. Fixture `closures_run_ok` covers six shapes: closure in a var, immediately-invoked closure, error-only closure, deferred closure, doubly-nested closures, and a chain-method (`q.TryE(...).Wrap`) inside a closure.

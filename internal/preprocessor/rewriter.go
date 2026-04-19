@@ -224,7 +224,7 @@ func substituteSpans(fset *token.FileSet, src []byte, start, end int, subs []qSu
 			sj := subs[j]
 			jsb := fset.Position(sj.OuterCall.Pos()).Offset
 			jeb := fset.Position(sj.OuterCall.End()).Offset
-			if jsb <= isb && ieb <= jeb && !(jsb == isb && jeb == ieb) {
+			if jsb <= isb && ieb <= jeb && (jsb != isb || jeb != ieb) {
 				containedByOther = true
 				break
 			}
@@ -278,8 +278,207 @@ func renderSubCall(fset *token.FileSet, src []byte, sh callShape, subIdx int, su
 		return text, false, false, err
 	case familyNotNilE:
 		return renderNotNilE(fset, src, sh, sub, counter, subs, counters)
+	case familyCheck:
+		text, err := renderCheck(fset, src, sh, sub, counter, subs, counters)
+		return text, false, false, err
+	case familyCheckE:
+		text, fmtUsed, err := renderCheckE(fset, src, sh, sub, counter, subs, counters)
+		return text, fmtUsed, false, err
+	case familyOpen, familyOpenE:
+		text, fmtUsed, err := renderOpen(fset, src, sh, sub, counter, subs, counters)
+		return text, fmtUsed, false, err
 	}
 	return "", false, false, fmt.Errorf("renderSubCall: unknown family %v", sub.Family)
+}
+
+// renderCheck produces the replacement for bare q.Check. Bind line
+// is `_qErrN := <inner>` (no T to bind) and the bubble is the
+// captured err itself.
+func renderCheck(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, counter int, subs []qSubCall, counters []int) (string, error) {
+	zeros, indent, errVar, innerText, err := commonRenderInputs(fset, src, sh, sub, counter, subs, counters)
+	if err != nil {
+		return "", err
+	}
+	bindLine := fmt.Sprintf("%s := %s", errVar, innerText)
+	zeros[len(zeros)-1] = errVar
+	return assembleErrBlock(bindLine, errVar, indent, zeros), nil
+}
+
+// renderCheckE produces the replacement for the q.CheckE chain. Same
+// bubble-expression vocabulary as TryE, but no value is threaded —
+// the bind line captures only the error.
+func renderCheckE(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, counter int, subs []qSubCall, counters []int) (string, bool, error) {
+	zeros, indent, errVar, innerText, err := commonRenderInputs(fset, src, sh, sub, counter, subs, counters)
+	if err != nil {
+		return "", false, err
+	}
+	bindLine := fmt.Sprintf("%s := %s", errVar, innerText)
+
+	switch sub.Method {
+	case "Err":
+		if len(sub.MethodArgs) != 1 {
+			return "", false, fmt.Errorf("q.CheckE(...).Err requires exactly one argument (the replacement error); got %d", len(sub.MethodArgs))
+		}
+		zeros[len(zeros)-1] = exprTextSubst(fset, src, sub.MethodArgs[0], subs, counters)
+		return assembleErrBlock(bindLine, errVar, indent, zeros), false, nil
+	case "ErrF":
+		if len(sub.MethodArgs) != 1 {
+			return "", false, fmt.Errorf("q.CheckE(...).ErrF requires exactly one argument (an error-transform fn); got %d", len(sub.MethodArgs))
+		}
+		fn := exprTextSubst(fset, src, sub.MethodArgs[0], subs, counters)
+		zeros[len(zeros)-1] = fmt.Sprintf("(%s)(%s)", fn, errVar)
+		return assembleErrBlock(bindLine, errVar, indent, zeros), false, nil
+	case "Wrap":
+		if len(sub.MethodArgs) != 1 {
+			return "", false, fmt.Errorf("q.CheckE(...).Wrap requires exactly one argument (the message string); got %d", len(sub.MethodArgs))
+		}
+		msg := exprTextSubst(fset, src, sub.MethodArgs[0], subs, counters)
+		zeros[len(zeros)-1] = fmt.Sprintf(`fmt.Errorf("%%s: %%w", %s, %s)`, msg, errVar)
+		return assembleErrBlock(bindLine, errVar, indent, zeros), true, nil
+	case "Wrapf":
+		if len(sub.MethodArgs) < 1 {
+			return "", false, fmt.Errorf("q.CheckE(...).Wrapf requires at least one argument (the format string); got %d", len(sub.MethodArgs))
+		}
+		formatExpr, ok := sub.MethodArgs[0].(*ast.BasicLit)
+		if !ok || formatExpr.Kind != token.STRING {
+			return "", false, fmt.Errorf("q.CheckE(...).Wrapf's first argument must be a string literal so the rewriter can splice in `: %%w`")
+		}
+		raw := formatExpr.Value
+		formatWithW := raw[:len(raw)-1] + `: %w` + `"`
+		argParts := []string{formatWithW}
+		for _, a := range sub.MethodArgs[1:] {
+			argParts = append(argParts, exprTextSubst(fset, src, a, subs, counters))
+		}
+		argParts = append(argParts, errVar)
+		zeros[len(zeros)-1] = fmt.Sprintf("fmt.Errorf(%s)", joinWith(argParts, ", "))
+		return assembleErrBlock(bindLine, errVar, indent, zeros), true, nil
+	case "Catch":
+		if len(sub.MethodArgs) != 1 {
+			return "", false, fmt.Errorf("q.CheckE(...).Catch requires exactly one argument (a func(error) error); got %d", len(sub.MethodArgs))
+		}
+		// Catch for Check: fn returns error alone. nil = suppress
+		// (fall through past the block), non-nil = bubble.
+		fn := exprTextSubst(fset, src, sub.MethodArgs[0], subs, counters)
+		retErrVar := fmt.Sprintf("_qRet%d", counter)
+		zeros[len(zeros)-1] = retErrVar
+		var b bytes.Buffer
+		b.WriteString(bindLine)
+		b.WriteByte('\n')
+		fmt.Fprintf(&b, "%sif %s != nil {\n", indent, errVar)
+		fmt.Fprintf(&b, "%s\t%s := (%s)(%s)\n", indent, retErrVar, fn, errVar)
+		fmt.Fprintf(&b, "%s\tif %s != nil {\n", indent, retErrVar)
+		fmt.Fprintf(&b, "%s\t\treturn %s\n", indent, joinWith(zeros, ", "))
+		fmt.Fprintf(&b, "%s\t}\n", indent)
+		fmt.Fprintf(&b, "%s}", indent)
+		return b.String(), false, nil
+	}
+	return "", false, fmt.Errorf("renderCheckE: unknown method %q", sub.Method)
+}
+
+// renderOpen produces the replacement for q.Open / q.OpenE chains
+// terminated by .Release. Shares the TryE shape-method vocabulary
+// for the bubble branch, and appends a `defer (cleanup)(resource)`
+// line on the success path so the cleanup fires when the enclosing
+// function returns.
+func renderOpen(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, counter int, subs []qSubCall, counters []int) (string, bool, error) {
+	zeros, indent, errVar, innerText, err := commonRenderInputs(fset, src, sh, sub, counter, subs, counters)
+	if err != nil {
+		return "", false, err
+	}
+	bindLine := openBindLine(fset, src, sh, errVar, innerText, indent, counter)
+	valueVar := openValueVar(fset, src, sh, counter)
+
+	var (
+		block   string
+		fmtUsed bool
+	)
+	switch sub.Method {
+	case "":
+		zeros[len(zeros)-1] = errVar
+		block = assembleErrBlock(bindLine, errVar, indent, zeros)
+	case "Err":
+		if len(sub.MethodArgs) != 1 {
+			return "", false, fmt.Errorf("q.OpenE(...).Err requires exactly one argument (the replacement error); got %d", len(sub.MethodArgs))
+		}
+		zeros[len(zeros)-1] = exprTextSubst(fset, src, sub.MethodArgs[0], subs, counters)
+		block = assembleErrBlock(bindLine, errVar, indent, zeros)
+	case "ErrF":
+		if len(sub.MethodArgs) != 1 {
+			return "", false, fmt.Errorf("q.OpenE(...).ErrF requires exactly one argument (an error-transform fn); got %d", len(sub.MethodArgs))
+		}
+		fn := exprTextSubst(fset, src, sub.MethodArgs[0], subs, counters)
+		zeros[len(zeros)-1] = fmt.Sprintf("(%s)(%s)", fn, errVar)
+		block = assembleErrBlock(bindLine, errVar, indent, zeros)
+	case "Wrap":
+		if len(sub.MethodArgs) != 1 {
+			return "", false, fmt.Errorf("q.OpenE(...).Wrap requires exactly one argument (the message string); got %d", len(sub.MethodArgs))
+		}
+		msg := exprTextSubst(fset, src, sub.MethodArgs[0], subs, counters)
+		zeros[len(zeros)-1] = fmt.Sprintf(`fmt.Errorf("%%s: %%w", %s, %s)`, msg, errVar)
+		fmtUsed = true
+		block = assembleErrBlock(bindLine, errVar, indent, zeros)
+	case "Wrapf":
+		if len(sub.MethodArgs) < 1 {
+			return "", false, fmt.Errorf("q.OpenE(...).Wrapf requires at least one argument (the format string); got %d", len(sub.MethodArgs))
+		}
+		formatExpr, ok := sub.MethodArgs[0].(*ast.BasicLit)
+		if !ok || formatExpr.Kind != token.STRING {
+			return "", false, fmt.Errorf("q.OpenE(...).Wrapf's first argument must be a string literal so the rewriter can splice in `: %%w`")
+		}
+		raw := formatExpr.Value
+		formatWithW := raw[:len(raw)-1] + `: %w` + `"`
+		argParts := []string{formatWithW}
+		for _, a := range sub.MethodArgs[1:] {
+			argParts = append(argParts, exprTextSubst(fset, src, a, subs, counters))
+		}
+		argParts = append(argParts, errVar)
+		zeros[len(zeros)-1] = fmt.Sprintf("fmt.Errorf(%s)", joinWith(argParts, ", "))
+		fmtUsed = true
+		block = assembleErrBlock(bindLine, errVar, indent, zeros)
+	case "Catch":
+		if len(sub.MethodArgs) != 1 {
+			return "", false, fmt.Errorf("q.OpenE(...).Catch requires exactly one argument (a func(error) (T, error)); got %d", len(sub.MethodArgs))
+		}
+		fn := exprTextSubst(fset, src, sub.MethodArgs[0], subs, counters)
+		retErrVar := fmt.Sprintf("_qRet%d", counter)
+		zeros[len(zeros)-1] = retErrVar
+		// Recovery rebinds valueVar so the deferred cleanup
+		// later fires on the recovered value.
+		block = assembleCatchErrBlock(bindLine, valueVar, errVar, retErrVar, fn, indent, zeros)
+	default:
+		return "", false, fmt.Errorf("renderOpen: unknown method %q", sub.Method)
+	}
+
+	cleanupText := exprTextSubst(fset, src, sub.ReleaseArg, subs, counters)
+	deferLine := fmt.Sprintf("defer (%s)(%s)", cleanupText, valueVar)
+	return block + "\n" + indent + deferLine, fmtUsed, nil
+}
+
+// openBindLine mirrors tryBindLine but always binds to a named
+// variable for formDiscard — Open needs a target to pass to the
+// deferred cleanup, so `_, _qErrN := …` (which Try uses) won't do.
+func openBindLine(fset *token.FileSet, src []byte, sh callShape, errVar, innerText, indent string, counter int) string {
+	switch sh.Form {
+	case formDefine:
+		return fmt.Sprintf("%s, %s := %s", exprText(fset, src, sh.LHSExpr), errVar, innerText)
+	case formAssign:
+		return fmt.Sprintf("var %s error\n%s%s, %s = %s", errVar, indent, exprText(fset, src, sh.LHSExpr), errVar, innerText)
+	case formDiscard, formReturn, formHoist:
+		return fmt.Sprintf("_qTmp%d, %s := %s", counter, errVar, innerText)
+	}
+	return fmt.Sprintf("/* unsupported form %v */", sh.Form)
+}
+
+// openValueVar returns the name of the bound resource variable for
+// this Open sub-call. Used to spell the deferred cleanup arg and
+// (for Catch) the recovery LHS.
+func openValueVar(fset *token.FileSet, src []byte, sh callShape, counter int) string {
+	switch sh.Form {
+	case formDefine, formAssign:
+		return exprText(fset, src, sh.LHSExpr)
+	default:
+		return fmt.Sprintf("_qTmp%d", counter)
+	}
 }
 
 // finalStmtSuffix builds the `\n<indent><reconstructed-stmt>` tail

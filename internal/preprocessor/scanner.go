@@ -41,6 +41,10 @@ const (
 	familyTryE
 	familyNotNil
 	familyNotNilE
+	familyCheck   // q.Check(err) — void, always formDiscard
+	familyCheckE  // q.CheckE(err).<method> — void chain, always formDiscard
+	familyOpen    // q.Open(v, err).Release(cleanup) — value chain, always Release-terminated
+	familyOpenE   // q.OpenE(v, err).<shape?>.Release(cleanup) — value chain with optional shape
 )
 
 // form is the syntactic position of a recognised q.* call:
@@ -96,6 +100,13 @@ type qSubCall struct {
 	// the rewriter splices `_qTmpN` into the reconstructed final
 	// return in place of this call's source span.
 	OuterCall ast.Expr
+
+	// ReleaseArg is the cleanup function passed to .Release in the
+	// Open family (familyOpen / familyOpenE). nil for every other
+	// family. When non-nil, the rewriter emits a `defer
+	// (<cleanup>)(<resultVar>)` line on the success path so the
+	// cleanup fires when the enclosing function returns.
+	ReleaseArg ast.Expr
 }
 
 // callShape describes one recognised q.* call site, captured at scan
@@ -556,9 +567,22 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 		}
 		return qSubCall{Family: familyNotNil, InnerExpr: call.Args[0], OuterCall: expr}, true, nil
 	}
+	// Bare q.Check — error-only bubble, no chain.
+	if isSelector(call.Fun, alias, "Check") {
+		if len(call.Args) != 1 {
+			return qSubCall{}, false, fmt.Errorf("q.Check must take exactly one argument (an error expression); got %d", len(call.Args))
+		}
+		return qSubCall{Family: familyCheck, InnerExpr: call.Args[0], OuterCall: expr}, true, nil
+	}
 
-	// Chain on q.TryE / q.NotNilE.
+	// Chain on q.TryE / q.NotNilE / q.CheckE, or a q.Open / q.OpenE
+	// chain terminated by .Release.
 	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+		// .Release terminal — walk down through an optional shape
+		// method to find q.Open / q.OpenE.
+		if sel.Sel.Name == "Release" {
+			return classifyOpenChain(call, sel, alias)
+		}
 		entry, isEntry := sel.X.(*ast.CallExpr)
 		if !isEntry {
 			return qSubCall{}, false, nil
@@ -583,10 +607,104 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 				return qSubCall{}, false, fmt.Errorf("q.NotNilE must take exactly one argument (a *T expression); got %d", len(entry.Args))
 			}
 			return qSubCall{Family: familyNotNilE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Args[0], OuterCall: expr}, true, nil
+		case isSelector(entry.Fun, alias, "CheckE"):
+			if !chainMethods[sel.Sel.Name] {
+				return qSubCall{}, false, fmt.Errorf("q.CheckE chain method %q not recognised; valid: Err, ErrF, Catch, Wrap, Wrapf", sel.Sel.Name)
+			}
+			if len(entry.Args) != 1 {
+				return qSubCall{}, false, fmt.Errorf("q.CheckE must take exactly one argument (an error expression); got %d", len(entry.Args))
+			}
+			return qSubCall{Family: familyCheckE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Args[0], OuterCall: expr}, true, nil
 		}
 	}
 
 	return qSubCall{}, false, nil
+}
+
+// classifyOpenChain recognises the q.Open / q.OpenE terminal Release
+// shape, optionally with one intermediate shape method between the
+// entry and Release:
+//
+//	q.Open(call()).Release(cleanup)
+//	q.OpenE(call()).Release(cleanup)
+//	q.OpenE(call()).<Shape>(args).Release(cleanup)    // Shape ∈ Err/ErrF/Wrap/Wrapf/Catch
+//
+// call is the outer Release CallExpr; sel is its .Fun SelectorExpr
+// (sel.Sel.Name == "Release"). expr is the source expression
+// (== call) used for OuterCall span.
+func classifyOpenChain(call *ast.CallExpr, sel *ast.SelectorExpr, alias string) (qSubCall, bool, error) {
+	expr := ast.Expr(call)
+	if len(call.Args) != 1 {
+		return qSubCall{}, false, fmt.Errorf("q.Open/OpenE(...).Release requires exactly one argument (a cleanup fn); got %d", len(call.Args))
+	}
+	releaseArg := call.Args[0]
+
+	inner, ok := sel.X.(*ast.CallExpr)
+	if !ok {
+		return qSubCall{}, false, nil
+	}
+
+	// Case 1: inner is q.Open(x) or q.OpenE(x) directly — no shape.
+	if family, entry, ok := matchOpenEntry(inner, alias); ok {
+		if len(entry.Args) != 1 {
+			return qSubCall{}, false, fmt.Errorf("q.Open/OpenE must take exactly one argument (a (T, error)-returning call); got %d", len(entry.Args))
+		}
+		if _, isCall := entry.Args[0].(*ast.CallExpr); !isCall {
+			return qSubCall{}, false, fmt.Errorf("q.Open/OpenE's argument must itself be a call expression returning (T, error)")
+		}
+		return qSubCall{
+			Family:     family,
+			InnerExpr:  entry.Args[0],
+			OuterCall:  expr,
+			ReleaseArg: releaseArg,
+		}, true, nil
+	}
+
+	// Case 2: inner is a shape-method call on q.OpenE: q.OpenE(x).<Shape>(args).Release(...).
+	shapeSel, ok := inner.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return qSubCall{}, false, nil
+	}
+	if !chainMethods[shapeSel.Sel.Name] {
+		return qSubCall{}, false, fmt.Errorf("q.OpenE shape method %q not recognised; valid: Err, ErrF, Catch, Wrap, Wrapf", shapeSel.Sel.Name)
+	}
+	entryCall, ok := shapeSel.X.(*ast.CallExpr)
+	if !ok {
+		return qSubCall{}, false, nil
+	}
+	family, entry, ok := matchOpenEntry(entryCall, alias)
+	if !ok || family != familyOpenE {
+		// Shape methods are only valid on OpenE; bare Open's
+		// type doesn't expose them. If we got familyOpen here,
+		// the user's source won't type-check — let Go tell them.
+		return qSubCall{}, false, nil
+	}
+	if len(entry.Args) != 1 {
+		return qSubCall{}, false, fmt.Errorf("q.OpenE must take exactly one argument (a (T, error)-returning call); got %d", len(entry.Args))
+	}
+	if _, isCall := entry.Args[0].(*ast.CallExpr); !isCall {
+		return qSubCall{}, false, fmt.Errorf("q.OpenE's argument must itself be a call expression returning (T, error)")
+	}
+	return qSubCall{
+		Family:     familyOpenE,
+		Method:     shapeSel.Sel.Name,
+		MethodArgs: inner.Args,
+		InnerExpr:  entry.Args[0],
+		OuterCall:  expr,
+		ReleaseArg: releaseArg,
+	}, true, nil
+}
+
+// matchOpenEntry reports whether c is a direct q.Open / q.OpenE call
+// under the local alias, and which family it belongs to.
+func matchOpenEntry(c *ast.CallExpr, alias string) (family, *ast.CallExpr, bool) {
+	if isSelector(c.Fun, alias, "Open") {
+		return familyOpen, c, true
+	}
+	if isSelector(c.Fun, alias, "OpenE") {
+		return familyOpenE, c, true
+	}
+	return 0, nil, false
 }
 
 // isSelector reports whether expr has the shape `<alias>.<name>`.
