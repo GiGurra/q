@@ -218,7 +218,7 @@ func TestRewriteFixtureSource_NoExceptions(t *testing.T) {
 					t.Skip("no shapes to rewrite")
 				}
 				alias := qImportAlias(file)
-				out, _, err := rewriteFile(fset, file, data, shapes, alias)
+				out, _, err := rewriteFile(fset, file, data, shapes, alias, "")
 				if err != nil {
 					t.Fatalf("rewrite: %v", err)
 				}
@@ -840,6 +840,120 @@ func dial() (*Conn, error) { return nil, nil }
 	}
 }
 
+func TestRewriteEmitsLineDirectives(t *testing.T) {
+	// When origPath is supplied, the output must start with a
+	// //line directive pointing at that path, and each rewrite must
+	// be followed by a //line directive resetting to the line after
+	// the original statement. Together these make DWARF point at
+	// the user's file (so IDE breakpoints match) instead of the
+	// preprocessor's tempdir path.
+	src := `package p
+
+import "github.com/GiGurra/q/pkg/q"
+
+func run(s string) (int, error) {
+	n := q.Try(atoi(s))
+	return n, nil
+}
+
+func atoi(s string) (int, error) { return 0, nil }
+`
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "p.go", src, parser.ParseComments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shapes, diags, err := scanFile(fset, "p.go", file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diags) > 0 {
+		t.Fatalf("unexpected scan diagnostics: %v", diags)
+	}
+	alias := qImportAlias(file)
+
+	out, _, err := rewriteFile(fset, file, []byte(src), shapes, alias, "/home/user/proj/p.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(out)
+
+	// The rewritten file must start with a file-level //line
+	// directive pointing at the supplied path.
+	if !strings.HasPrefix(got, "//line /home/user/proj/p.go:1\n") {
+		t.Errorf("missing file-level //line prefix; got: %q", firstLine(got))
+	}
+
+	// The q.Try rewrite was on source line 6 (1-indexed); its
+	// `return n, nil` follow-up is on line 7. After the rewrite
+	// expansion, we expect a //line directive resetting to line 7.
+	if !strings.Contains(got, "//line /home/user/proj/p.go:7") {
+		t.Errorf("missing per-edit //line reset after the q.Try rewrite.\n--- output:\n%s", got)
+	}
+
+	// The rewritten output must still parse as valid Go.
+	if _, err := parser.ParseFile(token.NewFileSet(), "p.go", out, parser.ParseComments); err != nil {
+		t.Errorf("rewritten output failed to parse: %v\n--- output:\n%s", err, got)
+	}
+}
+
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
+
+func TestRewriteLineDirectiveSurvivesTrailingComment(t *testing.T) {
+	// Regression: when the rewritten statement has a trailing `//
+	// note` on the same source line, the per-edit //line directive
+	// must end with a newline so the user's comment doesn't land on
+	// the same physical line as the directive. Otherwise Go parses
+	// `//line /path:N // note` as one directive and rejects
+	// "invalid line number: N // note".
+	src := `package p
+
+import "github.com/GiGurra/q/pkg/q"
+
+func f() error {
+	q.Check(func() error { return nil }()) // trailing comment stays valid
+	return nil
+}
+`
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "p.go", src, parser.ParseComments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shapes, diags, err := scanFile(fset, "p.go", file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diags) > 0 {
+		t.Fatalf("unexpected scan diagnostics: %v", diags)
+	}
+	alias := qImportAlias(file)
+
+	out, _, err := rewriteFile(fset, file, []byte(src), shapes, alias, "/abs/path/p.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The //line directive and the user's trailing comment must
+	// occupy separate lines.
+	lines := strings.Split(string(out), "\n")
+	for i, line := range lines {
+		if strings.Contains(line, "//line /abs/path/p.go:") && strings.Contains(line, "trailing comment") {
+			t.Errorf("line directive and user trailing comment collide on line %d: %q", i+1, line)
+		}
+	}
+
+	// And the output must parse cleanly.
+	if _, err := parser.ParseFile(token.NewFileSet(), "p.go", out, parser.ParseComments); err != nil {
+		t.Errorf("rewritten output failed to parse: %v\n--- output:\n%s", err, out)
+	}
+}
+
 func TestRewriteScan_ValueRefToQErrNilIsNotFlagged(t *testing.T) {
 	// Regression: findQReference used to flag *any* selector rooted at
 	// the q alias, including plain value references like
@@ -926,7 +1040,7 @@ func mustRewrite(t *testing.T, src string) string {
 		t.Fatal("scanner returned no shapes")
 	}
 	alias := qImportAlias(file)
-	out, _, err := rewriteFile(fset, file, []byte(src), shapes, alias)
+	out, _, err := rewriteFile(fset, file, []byte(src), shapes, alias, "")
 	if err != nil {
 		t.Fatal(err)
 	}

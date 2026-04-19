@@ -162,7 +162,7 @@ Examples of explicit rejections:
 
 ### 4.3 What the rewriter must preserve
 
-- **Source positions for compile errors.** When the user package itself has a compile error, the column / line numbers `cmd/compile` reports must point to the user's source, not to the rewritten temp file. `proven` solves this with length-preserving rewrites (replacing call spans with same-width whitespace + sentinel); `q` will need a similar approach for the parts of files it modifies, or accept some position drift inside rewritten regions.
+- **Source positions for compile errors and debuggers.** When the user package itself has a compile error, the column / line numbers `cmd/compile` reports must point to the user's source, not to the rewritten temp file. Same for DWARF — IDE breakpoints set against the user's path must match what the binary's debug info records. `q` achieves this via `//line` directives: a file-level `//line <user-path>:1` is prepended to each rewritten file, and each per-statement rewrite is followed by a `//line <user-path>:<line-after-stmt>` directive so the extra lines the rewrite injects don't shift subsequent mappings. Debuggers, `go vet`, and the compiler all honour these directives, so DWARF / error messages show the user's path and the line of the original q.* call.
 - **Imports.** If the rewriter introduces `fmt` or `errors` calls, it must add the import (deduped against existing imports).
 - **Side-effect order.** The replacement must evaluate the inner call exactly once and bind its results before the if-check. Naïve textual substitution that re-evaluated `call()` would change semantics.
 

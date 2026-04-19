@@ -24,6 +24,7 @@ import (
 	"go/ast"
 	"go/token"
 	"sort"
+	"strconv"
 )
 
 // rewriteFile applies every shape's replacement to a copy of src and
@@ -38,7 +39,7 @@ import (
 // package; the returned addedImports lists the packages the rewriter
 // actually injected (so the caller can extend the compile's
 // -importcfg accordingly).
-func rewriteFile(fset *token.FileSet, file *ast.File, src []byte, shapes []callShape, alias string) ([]byte, []string, error) {
+func rewriteFile(fset *token.FileSet, file *ast.File, src []byte, shapes []callShape, alias, origPath string) ([]byte, []string, error) {
 	type edit struct {
 		start, end int
 		text       string
@@ -60,6 +61,23 @@ func rewriteFile(fset *token.FileSet, file *ast.File, src []byte, shapes []callS
 		}
 		start := fset.Position(sh.Stmt.Pos()).Offset
 		end := fset.Position(sh.Stmt.End()).Offset
+		// Append a //line directive after the replacement so that
+		// source AFTER the rewritten statement maps to the correct
+		// original line again. Without this, the extra lines the
+		// rewrite injects would shift every downstream line number
+		// in DWARF — breaking debugger breakpoints set against the
+		// original source.
+		//
+		// Trailing newline is essential: the bytes immediately after
+		// the rewritten stmt can include a same-line trailing
+		// comment (`q.Check(...) // note`). Without the newline the
+		// user's `// note` would end up on the same physical line as
+		// the `//line` directive, making it "invalid line number"
+		// to the go parser.
+		if origPath != "" {
+			afterLine := fset.Position(sh.Stmt.End()).Line + 1
+			text = text + "\n//line " + origPath + ":" + strconv.Itoa(afterLine) + "\n"
+		}
 		edits = append(edits, edit{start: start, end: end, text: text})
 	}
 
@@ -86,6 +104,21 @@ func rewriteFile(fset *token.FileSet, file *ast.File, src []byte, shapes []callS
 		sentinel := fmt.Sprintf("\n\nvar _ = %s.ErrNil\n", alias)
 		out = append(out, []byte(sentinel)...)
 	}
+
+	// Prepend a file-level //line directive so the compiler records
+	// the user's original source path in DWARF rather than the
+	// preprocessor's tempdir. Without this, IDE breakpoints set
+	// against the user's file don't match the binary's debug info
+	// and never fire. The directive says "the next physical line is
+	// line 1 of origPath", so physical line 2 of the rewritten file
+	// becomes logical line 1 of the original, and so on. Per-edit
+	// //line directives after each rewrite keep the mapping aligned
+	// where rewrites expand one logical line into several.
+	if origPath != "" {
+		prefix := []byte("//line " + origPath + ":1\n")
+		out = append(prefix, out...)
+	}
+
 	return out, addedImports, nil
 }
 

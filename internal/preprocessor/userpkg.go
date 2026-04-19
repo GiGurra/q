@@ -21,6 +21,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"path/filepath"
 )
 
 // planUserPackage is the per-package handler invoked from compile.go
@@ -72,7 +73,11 @@ func planUserPackage(pkgPath string, toolArgs []string) (*Plan, error) {
 			return nil, fmt.Errorf("read %s: %w", src, err)
 		}
 		alias := qImportAlias(file)
-		rewrittenBytes, addedImports, err := rewriteFile(fset, file, original, shapes, alias)
+		absSrc, absErr := filepath.Abs(src)
+		if absErr != nil {
+			absSrc = src
+		}
+		rewrittenBytes, addedImports, err := rewriteFile(fset, file, original, shapes, alias, absSrc)
 		if err != nil {
 			cleanupAll()
 			return nil, err
