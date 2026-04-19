@@ -45,10 +45,19 @@ const (
 
 // form is the syntactic position of a recognised q.* call:
 //
-//	formDefine  -> v   := q.Try(call())   (declares LHS via :=)
-//	formAssign  -> v    = q.Try(call())   (assigns to existing LHS)
-//	formDiscard -> 	      q.Try(call())   (ExprStmt; bubbles, drops T/p)
-//	formReturn  -> return …, q.Try(call()), …   (q.* is one top-level result)
+//	formDefine  -> v   := q.Try(call())     (declares LHS via :=)
+//	formAssign  -> v    = q.Try(call())     (assigns to existing LHS)
+//	formDiscard ->        q.Try(call())     (ExprStmt; bubbles, drops T/p)
+//	formReturn  -> return …, q.Try(…), …    (q.* anywhere in a result)
+//	formHoist   -> v := f(q.Try(…), …)      (q.* nested inside a non-
+//	                                         return statement's expr)
+//
+// formHoist is the general case: the rewriter binds each q.* call to
+// its own `_qTmpN`, emits per-call bubble checks, then re-emits the
+// original statement with each q.* span replaced by its temp. The
+// direct-bind forms (formDefine/formAssign/formDiscard) are kept for
+// the common simple shapes so the rewrite stays tight (one line
+// instead of two for `v := q.Try(call())`).
 type form int
 
 const (
@@ -56,6 +65,7 @@ const (
 	formAssign
 	formDiscard
 	formReturn
+	formHoist
 )
 
 // qSubCall captures the per-call-site pieces of a recognised q.*
@@ -181,7 +191,7 @@ func walkBlock(fset *token.FileSet, path string, block *ast.BlockStmt, alias str
 		return
 	}
 	for _, stmt := range block.List {
-		shape, ok, err := matchStatement(fset, stmt, alias, fnType)
+		shape, ok, err := matchStatement(stmt, alias, fnType)
 		if err != nil {
 			*diags = append(*diags, diagAt(fset, path, stmt.Pos(), err.Error()))
 		} else if ok {
@@ -257,7 +267,7 @@ func walkChildBlocks(fset *token.FileSet, path string, stmt ast.Stmt, alias stri
 		for _, child := range s.Body {
 			// Synthesise the same per-stmt logic walkBlock applies, but
 			// without the BlockStmt wrapper.
-			subShape, ok, err := matchStatement(fset, child, alias, fnType)
+			subShape, ok, err := matchStatement(child, alias, fnType)
 			if err != nil {
 				*diags = append(*diags, diagAt(fset, path, child.Pos(), err.Error()))
 			} else if ok {
@@ -271,7 +281,7 @@ func walkChildBlocks(fset *token.FileSet, path string, stmt ast.Stmt, alias stri
 		}
 	case *ast.CommClause:
 		for _, child := range s.Body {
-			subShape, ok, err := matchStatement(fset, child, alias, fnType)
+			subShape, ok, err := matchStatement(child, alias, fnType)
 			if err != nil {
 				*diags = append(*diags, diagAt(fset, path, child.Pos(), err.Error()))
 			} else if ok {
@@ -327,46 +337,68 @@ func qImportAlias(file *ast.File) string {
 // Returns the shape on a match, (zero, false, nil) on a no-match, and
 // (zero, false, err) when the statement is *almost* a match but
 // malformed — the caller turns these into diagnostics.
-func matchStatement(fset *token.FileSet, stmt ast.Stmt, alias string, fnType *ast.FuncType) (callShape, bool, error) {
+func matchStatement(stmt ast.Stmt, alias string, fnType *ast.FuncType) (callShape, bool, error) {
 	switch s := stmt.(type) {
 	case *ast.AssignStmt:
-		if (s.Tok != token.DEFINE && s.Tok != token.ASSIGN) || len(s.Lhs) != 1 || len(s.Rhs) != 1 {
+		if s.Tok != token.DEFINE && s.Tok != token.ASSIGN {
 			return callShape{}, false, nil
 		}
-		// For DEFINE the LHS must be a fresh identifier; for ASSIGN it
-		// can be any addressable expression (ident, selector, index).
-		if s.Tok == token.DEFINE {
-			if _, ok := s.Lhs[0].(*ast.Ident); !ok {
-				return callShape{}, false, nil
+		// Direct-bind eligibility: single LHS, single RHS, RHS IS a
+		// q.* call, LHS has no nested q.*. That's the tight one-line
+		// shape: `v, _qErrN := inner`. Anything else falls through to
+		// hoist.
+		if len(s.Lhs) == 1 && len(s.Rhs) == 1 && !hasQRef(s.Lhs[0], alias) {
+			lhsOK := true
+			if s.Tok == token.DEFINE {
+				if _, isIdent := s.Lhs[0].(*ast.Ident); !isIdent {
+					lhsOK = false
+				}
+			}
+			if lhsOK {
+				sub, ok, err := classifyQCall(s.Rhs[0], alias)
+				if err != nil {
+					return callShape{}, false, err
+				}
+				// Direct-bind also requires the matched q.*'s own
+				// InnerExpr / MethodArgs to be free of nested q.*s.
+				// Otherwise the bind line would embed an unrewritten
+				// q.* call — fall through to hoist, which handles
+				// nesting by rendering innermost first and feeding
+				// their `_qTmpN` into the outer's bind.
+				if ok && !hasQRefInSub(sub, alias) {
+					f := formDefine
+					if s.Tok == token.ASSIGN {
+						f = formAssign
+					}
+					return callShape{
+						Stmt:              stmt,
+						Form:              f,
+						LHSExpr:           s.Lhs[0],
+						Calls:             []qSubCall{sub},
+						EnclosingFuncType: fnType,
+					}, true, nil
+				}
 			}
 		}
-		f := formDefine
-		if s.Tok == token.ASSIGN {
-			f = formAssign
-		}
-		sub, ok, err := classifyQCall(s.Rhs[0], alias)
-		if err != nil || !ok {
-			return callShape{}, ok, err
-		}
-		return callShape{
-			Stmt:              stmt,
-			Form:              f,
-			LHSExpr:           s.Lhs[0],
-			Calls:             []qSubCall{sub},
-			EnclosingFuncType: fnType,
-		}, true, nil
+		// Hoist path: bind every q.* call inside LHS or RHS to a temp,
+		// check each, then re-emit the statement with the q.* spans
+		// substituted.
+		return matchHoist(stmt, fnType, alias, append(append([]ast.Expr(nil), s.Lhs...), s.Rhs...))
 
 	case *ast.ExprStmt:
 		sub, ok, err := classifyQCall(s.X, alias)
-		if err != nil || !ok {
-			return callShape{}, ok, err
+		if err != nil {
+			return callShape{}, false, err
 		}
-		return callShape{
-			Stmt:              stmt,
-			Form:              formDiscard,
-			Calls:             []qSubCall{sub},
-			EnclosingFuncType: fnType,
-		}, true, nil
+		if ok {
+			return callShape{
+				Stmt:              stmt,
+				Form:              formDiscard,
+				Calls:             []qSubCall{sub},
+				EnclosingFuncType: fnType,
+			}, true, nil
+		}
+		return matchHoist(stmt, fnType, alias, []ast.Expr{s.X})
 
 	case *ast.ReturnStmt:
 		// Find every q.* call anywhere inside the return's result
@@ -375,35 +407,9 @@ func matchStatement(fset *token.FileSet, stmt ast.Stmt, alias string, fnType *as
 		// binds to its own `_qTmpN` with its own bubble check, and
 		// the final return keeps the rest of the expression verbatim
 		// with each `_qTmpN` spliced into its call's source span.
-		var subs []qSubCall
-		var walkErr error
-		for _, res := range s.Results {
-			ast.Inspect(res, func(n ast.Node) bool {
-				if walkErr != nil {
-					return false
-				}
-				expr, ok := n.(ast.Expr)
-				if !ok {
-					return true
-				}
-				sub, matched, err := classifyQCall(expr, alias)
-				if err != nil {
-					walkErr = err
-					return false
-				}
-				if matched {
-					subs = append(subs, sub)
-					// Stop descending — the matched call's inner sub-
-					// tree (InnerExpr for Try, MethodArgs for chain)
-					// is copied verbatim by the renderer; any q.* in
-					// there is out of scope.
-					return false
-				}
-				return true
-			})
-			if walkErr != nil {
-				return callShape{}, false, walkErr
-			}
+		subs, err := collectQCalls(s.Results, alias)
+		if err != nil {
+			return callShape{}, false, err
 		}
 		if len(subs) == 0 {
 			return callShape{}, false, nil
@@ -416,6 +422,112 @@ func matchStatement(fset *token.FileSet, stmt ast.Stmt, alias string, fnType *as
 		}, true, nil
 	}
 	return callShape{}, false, nil
+}
+
+// matchHoist builds a formHoist callShape by collecting every q.*
+// call reachable from exprs. Returns (zero, false, nil) when no q.*
+// is present — the caller falls through to the findQReference
+// diagnostic path.
+func matchHoist(stmt ast.Stmt, fnType *ast.FuncType, alias string, exprs []ast.Expr) (callShape, bool, error) {
+	subs, err := collectQCalls(exprs, alias)
+	if err != nil {
+		return callShape{}, false, err
+	}
+	if len(subs) == 0 {
+		return callShape{}, false, nil
+	}
+	return callShape{
+		Stmt:              stmt,
+		Form:              formHoist,
+		Calls:             subs,
+		EnclosingFuncType: fnType,
+	}, true, nil
+}
+
+// collectQCalls walks each expr's AST sub-tree with ast.Inspect and
+// returns every recognised q.* call in source order, including those
+// nested inside another matched q.*'s InnerExpr or MethodArgs. The
+// rewriter handles nesting by rendering the innermost first and
+// substituting each inner's `_qTmpN` into the outer's bind line.
+//
+// Descent stops at *ast.FuncLit boundaries — those belong to a
+// nested function scope and are handled by walkFuncLits with the
+// inner FuncType as their enclosing signature.
+func collectQCalls(exprs []ast.Expr, alias string) ([]qSubCall, error) {
+	var subs []qSubCall
+	var walkErr error
+	for _, e := range exprs {
+		ast.Inspect(e, func(n ast.Node) bool {
+			if walkErr != nil {
+				return false
+			}
+			if _, isLit := n.(*ast.FuncLit); isLit {
+				return false
+			}
+			expr, ok := n.(ast.Expr)
+			if !ok {
+				return true
+			}
+			sub, matched, err := classifyQCall(expr, alias)
+			if err != nil {
+				walkErr = err
+				return false
+			}
+			if matched {
+				subs = append(subs, sub)
+			}
+			return true
+		})
+		if walkErr != nil {
+			return nil, walkErr
+		}
+	}
+	return subs, nil
+}
+
+// hasQRefInSub reports whether the sub's InnerExpr or any MethodArg
+// contains a nested q.* reference. Used by the direct-bind
+// eligibility check: if the matched q.* wraps more q.*s, hoist
+// instead so the nesting gets rendered innermost-first.
+func hasQRefInSub(sub qSubCall, alias string) bool {
+	if hasQRef(sub.InnerExpr, alias) {
+		return true
+	}
+	for _, a := range sub.MethodArgs {
+		if hasQRef(a, alias) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasQRef reports whether the expression's AST contains any selector
+// rooted at the local q-alias identifier. Descent stops at FuncLits
+// — those belong to a nested scope and are scanned separately.
+func hasQRef(e ast.Expr, alias string) bool {
+	found := false
+	ast.Inspect(e, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		if _, isLit := n.(*ast.FuncLit); isLit {
+			return false
+		}
+		sel, ok := n.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		x, ok := sel.X.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		if x.Name == alias {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
 }
 
 // classifyQCall examines a single expression and reports whether it is

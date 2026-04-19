@@ -145,3 +145,17 @@ Future / deferred:
 - **No general monad library.** `q` is the Rust-`?` analogue; it is not `for { x <- … }` from Scala. If the project ever needed a wider effect surface, that is a separate project, not a feature of `q`.
 - **No type-level guarantees.** The rewriter is purely syntactic. Whether `call()` actually returns `(T, error)` is left to the Go compiler to verify after the rewrite (which it will, because the inlined `v, __err := call()` is what the user would have written).
 - **No support for outside the function body.** `q.*` calls in package-level `var` initializers, in struct field tags, etc., are outside scope. The rewriter rejects them with a diagnostic.
+
+## 7. The golden rule: q only accepts Go-valid syntax
+
+Everything q exposes to the user must parse and type-check as plain Go — what `go build` / `gopls` / the IDE's analyzer sees before the toolexec pass ever runs. If a proposed ergonomic improvement would require Go to accept syntax it doesn't, we reject the proposal. No exceptions.
+
+Some shapes that would read nicely but are deliberately rejected:
+
+- **Auto-inferring a trailing `, nil` on a return.** `return q.Try(strconv.Atoi(s)) * 2` inside a `(int, error)` function looks clean, but it is invalid Go: a `return` statement needs as many values as the function signature declares. Every editor would light it up red. We require the user to write the explicit `, nil` tail.
+- **Auto-injecting a trailing `return nil` at the end of an `error`-returning function.** Same reason: a function declared to return `error` must end with an explicit return in Go's grammar (or be otherwise unreachable). Synthesising it at preprocess time would hide that requirement from gopls.
+- **Omitted return values in multi-return functions.** Any shape where "q fills in the rest" would show as a type error in the editor.
+
+We *could* implement all of the above — the rewriter sees the AST and could emit whatever the compiler accepts. But the value proposition of q is precisely that its user surface is indistinguishable from well-typed Go: completion works, go-to-definition works, refactors work, rename works, type errors point at the right places. The instant we accept non-Go input, we start fighting the tooling on behalf of the user — and we lose the exact reason we chose a toolexec rewriter over a custom parser. Tooling-native > source-density.
+
+Counter-rule: this does NOT constrain what the *rewrite output* looks like. The generated bind + check blocks, `_qTmpN` temporaries, `*new(T)` zero values, etc., live only in temp files the compiler reads and never see an editor. They just need to compile and behave identically to hand-written error forwarding.

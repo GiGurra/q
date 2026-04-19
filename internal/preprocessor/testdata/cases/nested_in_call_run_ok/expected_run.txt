@@ -1,0 +1,17 @@
+nestedInCallRHS.ok: ok=14
+nestedInCallRHS.bad: err=strconv.Atoi: parsing "xx": invalid syntax
+multiLHS.ok: ok=3,pos
+multiLHS.bad: err=strconv.Atoi: parsing "yy": invalid syntax
+exprStmtNested.ok: ok
+exprStmtNested.bad: err=strconv.Atoi: parsing "zz": invalid syntax
+multipleInOne.ok: ok=8
+multipleInOne.badA: err=strconv.Atoi: parsing "qq": invalid syntax
+multipleInOne.nilPtr: err=q: nil value
+mapAssign.ok: ok=11
+mapAssign.bad: err=strconv.Atoi: parsing "xx": invalid syntax
+indexLHS.ok: ok=42
+indexLHS.bad: err=strconv.Atoi: parsing "zz": invalid syntax
+chainedArg.ok: ok=12
+chainedArg.bad: err=parsing "label": strconv.Atoi: parsing "xx": invalid syntax
+qInsideQ.ok: ok=8
+qInsideQ.bad: err=strconv.Atoi: parsing "zz": invalid syntax

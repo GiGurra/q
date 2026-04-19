@@ -108,15 +108,25 @@ func renderShape(fset *token.FileSet, src []byte, sh callShape, counter *int, al
 	}
 	indent := indentOf(src, fset.Position(sh.Stmt.Pos()).Offset)
 
+	// Render innermost-first: an outer q.* call's bind line embeds
+	// the inner's `_qTmpN`, so the inner must be defined first.
+	order := orderInnermostFirst(fset, sh.Calls)
+
+	// Allocate counter values in render order so the generated code
+	// reads top-to-bottom with _qTmp1, _qTmp2, … regardless of where
+	// the original q.* calls sat in the source.
+	counters := make([]int, len(sh.Calls))
+	for _, idx := range order {
+		*counter++
+		counters[idx] = *counter
+	}
+
 	var (
 		blocks             []string
-		counters           []int
 		fmtUsed, errorsUsed bool
 	)
-	for _, sub := range sh.Calls {
-		*counter++
-		counters = append(counters, *counter)
-		block, fu, eu, err := renderSubCall(fset, src, sh, sub, *counter, alias)
+	for _, idx := range order {
+		block, fu, eu, err := renderSubCall(fset, src, sh, idx, sh.Calls, counters, alias)
 		if err != nil {
 			return "", false, false, err
 		}
@@ -129,73 +139,168 @@ func renderShape(fset *token.FileSet, src []byte, sh callShape, counter *int, al
 		blocks = append(blocks, block)
 	}
 	text := joinWith(blocks, "\n"+indent)
-	if sh.Form == formReturn {
-		text += finalReturnSuffix(fset, src, sh, counters)
+	if sh.Form == formReturn || sh.Form == formHoist {
+		text += finalStmtSuffix(fset, src, sh, counters)
 	}
 	return text, fmtUsed, errorsUsed, nil
 }
 
+// orderInnermostFirst returns indices into subs ordered so that
+// deeper-nested q.* calls come before their containers. Ties (subs
+// at the same nesting depth) are broken by source position so the
+// output reads in natural order.
+func orderInnermostFirst(fset *token.FileSet, subs []qSubCall) []int {
+	depth := make([]int, len(subs))
+	for i, si := range subs {
+		for j, sj := range subs {
+			if i == j {
+				continue
+			}
+			if spanContains(fset, sj.OuterCall, si.OuterCall) {
+				depth[i]++
+			}
+		}
+	}
+	order := make([]int, len(subs))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool {
+		ai, bi := order[a], order[b]
+		if depth[ai] != depth[bi] {
+			return depth[ai] > depth[bi]
+		}
+		return fset.Position(subs[ai].OuterCall.Pos()).Offset <
+			fset.Position(subs[bi].OuterCall.Pos()).Offset
+	})
+	return order
+}
+
+// spanContains reports whether outer strictly contains inner (same
+// span counts as non-containment).
+func spanContains(fset *token.FileSet, outer, inner ast.Expr) bool {
+	os := fset.Position(outer.Pos()).Offset
+	oe := fset.Position(outer.End()).Offset
+	is := fset.Position(inner.Pos()).Offset
+	ie := fset.Position(inner.End()).Offset
+	if os == is && oe == ie {
+		return false
+	}
+	return os <= is && ie <= oe
+}
+
+// substituteSpans returns the source text of [start, end] with every
+// sub whose OuterCall is an immediate child of that range replaced
+// by its `_qTmp<counter>`. "Immediate child" means: contained by
+// [start, end] and not contained by any other sub also contained by
+// [start, end]. An exact match ([start, end] == OuterCall span) is
+// not a child — otherwise rendering a sub's own InnerExpr text
+// would substitute the parent sub into its own bind line. Children
+// are applied bottom-up in offset-descending order so earlier
+// offsets stay valid.
+func substituteSpans(fset *token.FileSet, src []byte, start, end int, subs []qSubCall, counters []int) string {
+	var contained []int
+	for i, sub := range subs {
+		cs := fset.Position(sub.OuterCall.Pos()).Offset
+		ce := fset.Position(sub.OuterCall.End()).Offset
+		if cs < start || ce > end {
+			continue
+		}
+		if cs == start && ce == end {
+			continue
+		}
+		contained = append(contained, i)
+	}
+	var children []int
+	for _, i := range contained {
+		si := subs[i]
+		isb := fset.Position(si.OuterCall.Pos()).Offset
+		ieb := fset.Position(si.OuterCall.End()).Offset
+		containedByOther := false
+		for _, j := range contained {
+			if i == j {
+				continue
+			}
+			sj := subs[j]
+			jsb := fset.Position(sj.OuterCall.Pos()).Offset
+			jeb := fset.Position(sj.OuterCall.End()).Offset
+			if jsb <= isb && ieb <= jeb && !(jsb == isb && jeb == ieb) {
+				containedByOther = true
+				break
+			}
+		}
+		if !containedByOther {
+			children = append(children, i)
+		}
+	}
+	sort.Slice(children, func(a, b int) bool {
+		return fset.Position(subs[children[a]].OuterCall.Pos()).Offset >
+			fset.Position(subs[children[b]].OuterCall.Pos()).Offset
+	})
+	text := []byte(string(src[start:end]))
+	for _, i := range children {
+		sub := subs[i]
+		cs := fset.Position(sub.OuterCall.Pos()).Offset - start
+		ce := fset.Position(sub.OuterCall.End()).Offset - start
+		tmp := fmt.Sprintf("_qTmp%d", counters[i])
+		text = append(text[:cs], append([]byte(tmp), text[ce:]...)...)
+	}
+	return string(text)
+}
+
+// exprTextSubst is exprText with nested q.* substitutions applied —
+// used wherever a user-supplied expression might contain q.* calls
+// that have been hoisted into their own binds. For locations known
+// to be q.*-free (e.g. LHS on the direct-bind path), exprText
+// suffices.
+func exprTextSubst(fset *token.FileSet, src []byte, e ast.Expr, subs []qSubCall, counters []int) string {
+	start := fset.Position(e.Pos()).Offset
+	end := fset.Position(e.End()).Offset
+	return substituteSpans(fset, src, start, end, subs, counters)
+}
+
 // renderSubCall dispatches one sub-call to the family-specific
-// renderer. Every renderer now takes the qSubCall it is rendering
-// (which provides Family/Method/MethodArgs/InnerExpr/OuterCall)
-// alongside the containing callShape (which provides Stmt/Form/
-// LHSExpr/EnclosingFuncType). The counter is this sub-call's
-// unique index.
-func renderSubCall(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, counter int, alias string) (string, bool, bool, error) {
+// renderer. The full subs/counters lists are threaded through so
+// each renderer can substitute nested q.* spans inside its own
+// InnerExpr / MethodArgs text.
+func renderSubCall(fset *token.FileSet, src []byte, sh callShape, subIdx int, subs []qSubCall, counters []int, alias string) (string, bool, bool, error) {
+	sub := subs[subIdx]
+	counter := counters[subIdx]
 	switch sub.Family {
 	case familyTry:
-		text, err := renderTry(fset, src, sh, sub, counter)
+		text, err := renderTry(fset, src, sh, sub, counter, subs, counters)
 		return text, false, false, err
 	case familyTryE:
-		text, fmtUsed, err := renderTryE(fset, src, sh, sub, counter)
+		text, fmtUsed, err := renderTryE(fset, src, sh, sub, counter, subs, counters)
 		return text, fmtUsed, false, err
 	case familyNotNil:
-		text, err := renderNotNil(fset, src, sh, sub, counter, alias)
+		text, err := renderNotNil(fset, src, sh, sub, counter, alias, subs, counters)
 		return text, false, false, err
 	case familyNotNilE:
-		return renderNotNilE(fset, src, sh, sub, counter)
+		return renderNotNilE(fset, src, sh, sub, counter, subs, counters)
 	}
 	return "", false, false, fmt.Errorf("renderSubCall: unknown family %v", sub.Family)
 }
 
-// finalReturnSuffix builds the `\n<indent>return <reconstructed>`
-// tail for a formReturn shape. The reconstructed return is the
-// original return statement's source text with every q.* outer call
-// span replaced by its corresponding `_qTmp<N>`. The spans are
-// applied in decreasing offset order so earlier offsets stay valid
-// as later ones shorten the text. Source outside the q.* spans is
-// preserved verbatim, keeping user formatting and surrounding
-// expressions untouched.
-func finalReturnSuffix(fset *token.FileSet, src []byte, sh callShape, counters []int) string {
+// finalStmtSuffix builds the `\n<indent><reconstructed-stmt>` tail
+// for a formReturn or formHoist shape. The reconstructed statement
+// is the original statement's source text with every outermost q.*
+// span replaced by its corresponding `_qTmp<N>`. Nested q.* spans
+// are already covered by their enclosing outermost span, so we
+// only substitute immediate children of the statement — which is
+// exactly what substituteSpans does.
+func finalStmtSuffix(fset *token.FileSet, src []byte, sh callShape, counters []int) string {
 	indent := indentOf(src, fset.Position(sh.Stmt.Pos()).Offset)
-	retStart := fset.Position(sh.Stmt.Pos()).Offset
-	retEnd := fset.Position(sh.Stmt.End()).Offset
-	retText := []byte(string(src[retStart:retEnd]))
-
-	type span struct {
-		start, end int
-		tmp        string
-	}
-	spans := make([]span, 0, len(sh.Calls))
-	for i, sub := range sh.Calls {
-		spans = append(spans, span{
-			start: fset.Position(sub.OuterCall.Pos()).Offset - retStart,
-			end:   fset.Position(sub.OuterCall.End()).Offset - retStart,
-			tmp:   fmt.Sprintf("_qTmp%d", counters[i]),
-		})
-	}
-	sort.Slice(spans, func(i, j int) bool { return spans[i].start > spans[j].start })
-	for _, s := range spans {
-		retText = append(retText[:s.start], append([]byte(s.tmp), retText[s.end:]...)...)
-	}
-	return "\n" + indent + string(retText)
+	start := fset.Position(sh.Stmt.Pos()).Offset
+	end := fset.Position(sh.Stmt.End()).Offset
+	return "\n" + indent + substituteSpans(fset, src, start, end, sh.Calls, counters)
 }
 
-// renderTry produces the replacement for bare q.Try across all three
+// renderTry produces the replacement for bare q.Try across all
 // forms. The returned text always ends with `if <errVar> != nil { return … }`.
 // The bubbled error is the captured err itself (no wrapping for bare).
-func renderTry(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, counter int) (string, error) {
-	zeros, indent, errVar, innerText, err := commonRenderInputs(fset, src, sh, sub, counter)
+func renderTry(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, counter int, subs []qSubCall, counters []int) (string, error) {
+	zeros, indent, errVar, innerText, err := commonRenderInputs(fset, src, sh, sub, counter, subs, counters)
 	if err != nil {
 		return "", err
 	}
@@ -207,8 +312,8 @@ func renderTry(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, coun
 // renderTryE produces the replacement for q.TryE chains across all
 // four forms. The chain method picks how the bubbled error is
 // shaped; the form picks the bind line.
-func renderTryE(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, counter int) (string, bool, error) {
-	zeros, indent, errVar, innerText, err := commonRenderInputs(fset, src, sh, sub, counter)
+func renderTryE(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, counter int, subs []qSubCall, counters []int) (string, bool, error) {
+	zeros, indent, errVar, innerText, err := commonRenderInputs(fset, src, sh, sub, counter, subs, counters)
 	if err != nil {
 		return "", false, err
 	}
@@ -219,14 +324,14 @@ func renderTryE(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, cou
 		if len(sub.MethodArgs) != 1 {
 			return "", false, fmt.Errorf("q.TryE(...).Err requires exactly one argument (the replacement error); got %d", len(sub.MethodArgs))
 		}
-		zeros[len(zeros)-1] = exprText(fset, src, sub.MethodArgs[0])
+		zeros[len(zeros)-1] = exprTextSubst(fset, src, sub.MethodArgs[0], subs, counters)
 		return assembleErrBlock(bindLine, errVar, indent, zeros), false, nil
 
 	case "ErrF":
 		if len(sub.MethodArgs) != 1 {
 			return "", false, fmt.Errorf("q.TryE(...).ErrF requires exactly one argument (an error-transform fn); got %d", len(sub.MethodArgs))
 		}
-		fn := exprText(fset, src, sub.MethodArgs[0])
+		fn := exprTextSubst(fset, src, sub.MethodArgs[0], subs, counters)
 		zeros[len(zeros)-1] = fmt.Sprintf("(%s)(%s)", fn, errVar)
 		return assembleErrBlock(bindLine, errVar, indent, zeros), false, nil
 
@@ -234,7 +339,7 @@ func renderTryE(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, cou
 		if len(sub.MethodArgs) != 1 {
 			return "", false, fmt.Errorf("q.TryE(...).Wrap requires exactly one argument (the message string); got %d", len(sub.MethodArgs))
 		}
-		msg := exprText(fset, src, sub.MethodArgs[0])
+		msg := exprTextSubst(fset, src, sub.MethodArgs[0], subs, counters)
 		zeros[len(zeros)-1] = fmt.Sprintf(`fmt.Errorf("%%s: %%w", %s, %s)`, msg, errVar)
 		return assembleErrBlock(bindLine, errVar, indent, zeros), true, nil
 
@@ -250,7 +355,7 @@ func renderTryE(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, cou
 		formatWithW := raw[:len(raw)-1] + `: %w` + `"`
 		argParts := []string{formatWithW}
 		for _, a := range sub.MethodArgs[1:] {
-			argParts = append(argParts, exprText(fset, src, a))
+			argParts = append(argParts, exprTextSubst(fset, src, a, subs, counters))
 		}
 		argParts = append(argParts, errVar)
 		zeros[len(zeros)-1] = fmt.Sprintf("fmt.Errorf(%s)", joinWith(argParts, ", "))
@@ -260,7 +365,7 @@ func renderTryE(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, cou
 		if len(sub.MethodArgs) != 1 {
 			return "", false, fmt.Errorf("q.TryE(...).Catch requires exactly one argument (a (T, error)-returning fn); got %d", len(sub.MethodArgs))
 		}
-		fn := exprText(fset, src, sub.MethodArgs[0])
+		fn := exprTextSubst(fset, src, sub.MethodArgs[0], subs, counters)
 		retErrVar := fmt.Sprintf("_qRet%d", counter)
 		zeros[len(zeros)-1] = retErrVar
 		// Catch only makes sense when there is a place to put the
@@ -277,8 +382,8 @@ func renderTryE(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, cou
 // renderNotNil produces the replacement for bare q.NotNil across all
 // four forms. The bubbled error is q.ErrNil (spelled through the
 // local alias).
-func renderNotNil(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, counter int, alias string) (string, error) {
-	zeros, indent, _, innerText, err := commonRenderInputs(fset, src, sh, sub, counter)
+func renderNotNil(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, counter int, alias string, subs []qSubCall, counters []int) (string, error) {
+	zeros, indent, _, innerText, err := commonRenderInputs(fset, src, sh, sub, counter, subs, counters)
 	if err != nil {
 		return "", err
 	}
@@ -289,8 +394,8 @@ func renderNotNil(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, c
 
 // renderNotNilE produces the replacement for q.NotNilE chains across
 // all four forms.
-func renderNotNilE(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, counter int) (string, bool, bool, error) {
-	zeros, indent, _, innerText, err := commonRenderInputs(fset, src, sh, sub, counter)
+func renderNotNilE(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, counter int, subs []qSubCall, counters []int) (string, bool, bool, error) {
+	zeros, indent, _, innerText, err := commonRenderInputs(fset, src, sh, sub, counter, subs, counters)
 	if err != nil {
 		return "", false, false, err
 	}
@@ -349,7 +454,7 @@ func renderNotNilE(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, 
 // per-result zero-value expressions, the original statement's indent,
 // the local err-variable name, and the source text of the inner
 // expression.
-func commonRenderInputs(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, counter int) (zeros []string, indent, errVar, innerText string, err error) {
+func commonRenderInputs(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, counter int, subs []qSubCall, counters []int) (zeros []string, indent, errVar, innerText string, err error) {
 	results := sh.EnclosingFuncType.Results
 	if results == nil || results.NumFields() == 0 {
 		return nil, "", "", "", fmt.Errorf("q.* used in a function with no return values; the bubble has nowhere to go")
@@ -358,22 +463,20 @@ func commonRenderInputs(fset *token.FileSet, src []byte, sh callShape, sub qSubC
 	if err != nil {
 		return nil, "", "", "", err
 	}
-	innerStart := fset.Position(sub.InnerExpr.Pos()).Offset
-	innerEnd := fset.Position(sub.InnerExpr.End()).Offset
-	innerText = string(src[innerStart:innerEnd])
+	innerText = exprTextSubst(fset, src, sub.InnerExpr, subs, counters)
 	errVar = fmt.Sprintf("_qErr%d", counter)
 	indent = indentOf(src, fset.Position(sh.Stmt.Pos()).Offset)
 	return zeros, indent, errVar, innerText, nil
 }
 
 // tryBindLine builds the bind line for the Try family across all
-// four forms:
+// forms:
 //
-//	formDefine:  v, _qErrN := <inner>
-//	formAssign:  var _qErrN error
-//	             v, _qErrN = <inner>
-//	formDiscard: _, _qErrN := <inner>
-//	formReturn:  _qTmpN, _qErrN := <inner>
+//	formDefine:           v, _qErrN := <inner>
+//	formAssign:           var _qErrN error
+//	                      v, _qErrN = <inner>
+//	formDiscard:          _, _qErrN := <inner>
+//	formReturn/formHoist: _qTmpN, _qErrN := <inner>
 func tryBindLine(fset *token.FileSet, src []byte, sh callShape, errVar, innerText, indent string, counter int) string {
 	switch sh.Form {
 	case formDefine:
@@ -382,7 +485,7 @@ func tryBindLine(fset *token.FileSet, src []byte, sh callShape, errVar, innerTex
 		return fmt.Sprintf("var %s error\n%s%s, %s = %s", errVar, indent, exprText(fset, src, sh.LHSExpr), errVar, innerText)
 	case formDiscard:
 		return fmt.Sprintf("_, %s := %s", errVar, innerText)
-	case formReturn:
+	case formReturn, formHoist:
 		return fmt.Sprintf("_qTmp%d, %s := %s", counter, errVar, innerText)
 	}
 	return fmt.Sprintf("/* unsupported form %v */", sh.Form)
@@ -405,7 +508,7 @@ func nilBindLineAndCheck(fset *token.FileSet, src []byte, sh callShape, innerTex
 	case formDiscard:
 		tmp := fmt.Sprintf("_qVal%d", counter)
 		return fmt.Sprintf("%s := %s", tmp, innerText), tmp
-	case formReturn:
+	case formReturn, formHoist:
 		tmp := fmt.Sprintf("_qTmp%d", counter)
 		return fmt.Sprintf("%s := %s", tmp, innerText), tmp
 	}

@@ -500,6 +500,192 @@ func atoi(s string) (int, error) { return 0, nil }
 	}
 }
 
+func TestRewriteHoist_NestedInCallRHS(t *testing.T) {
+	// `v := f(q.Try(call()))` — q.Try is nested inside the RHS call,
+	// not the direct RHS. Rewriter must hoist it to a preceding bind
+	// + check, then rebuild the AssignStmt with the q.* span replaced.
+	src := `package p
+
+import "github.com/GiGurra/q/pkg/q"
+
+func compute(s string) (int, error) {
+	v := double(q.Try(atoi(s)))
+	return v, nil
+}
+
+func atoi(s string) (int, error) { return 0, nil }
+func double(n int) int           { return n * 2 }
+`
+	got := mustRewrite(t, src)
+	wants := []string{
+		"_qTmp1, _qErr1 := atoi(s)",
+		"if _qErr1 != nil {",
+		"return *new(int), _qErr1",
+		"v := double(_qTmp1)",
+	}
+	for _, w := range wants {
+		if !strings.Contains(got, w) {
+			t.Errorf("missing %q.\n--- output:\n%s", w, got)
+		}
+	}
+	if strings.Contains(got, "q.Try(") {
+		t.Errorf("q.Try call survived rewrite.\n--- output:\n%s", got)
+	}
+}
+
+func TestRewriteHoist_MultiLHS(t *testing.T) {
+	// `a, b := fn(q.Try(call()))` — multi-LHS where the RHS call
+	// returns (T1, T2) and itself takes a q.*. The direct-bind path
+	// rejects multi-LHS; hoist handles it.
+	src := `package p
+
+import "github.com/GiGurra/q/pkg/q"
+
+func pick(s string) (int, string, error) {
+	a, b := split(q.Try(atoi(s)))
+	return a, b, nil
+}
+
+func atoi(s string) (int, error)    { return 0, nil }
+func split(n int) (int, string)     { return n, "x" }
+`
+	got := mustRewrite(t, src)
+	wants := []string{
+		"_qTmp1, _qErr1 := atoi(s)",
+		"a, b := split(_qTmp1)",
+	}
+	for _, w := range wants {
+		if !strings.Contains(got, w) {
+			t.Errorf("missing %q.\n--- output:\n%s", w, got)
+		}
+	}
+}
+
+func TestRewriteHoist_ExprStmtNested(t *testing.T) {
+	// `f(q.Try(call()))` as an expression statement. No LHS; after
+	// hoisting the q.*, the reconstructed stmt just calls f(_qTmp1)
+	// for its side effect.
+	src := `package p
+
+import "github.com/GiGurra/q/pkg/q"
+
+func run(s string) error {
+	sink(q.Try(atoi(s)))
+	return nil
+}
+
+func atoi(s string) (int, error) { return 0, nil }
+func sink(n int)                 {}
+`
+	got := mustRewrite(t, src)
+	wants := []string{
+		"_qTmp1, _qErr1 := atoi(s)",
+		"sink(_qTmp1)",
+	}
+	for _, w := range wants {
+		if !strings.Contains(got, w) {
+			t.Errorf("missing %q.\n--- output:\n%s", w, got)
+		}
+	}
+}
+
+func TestRewriteHoist_QInWrapArg(t *testing.T) {
+	// q.* passed as the argument to a chain method (Wrap takes a
+	// string, so Wrap(q.Try(...)) doesn't type-check — but ErrF
+	// takes a func(error) error value, so
+	// q.TryE(f()).ErrF(mkFn(q.Try(g()))) is legitimate where mkFn
+	// builds the error-transform fn from a T.
+	src := `package p
+
+import "github.com/GiGurra/q/pkg/q"
+
+func run(s string) (int, error) {
+	v := q.TryE(f()).ErrF(mkFn(q.Try(g(s))))
+	return v, nil
+}
+
+func f() (int, error)         { return 0, nil }
+func g(s string) (int, error) { return 0, nil }
+func mkFn(n int) func(error) error { return func(e error) error { return e } }
+`
+	got := mustRewrite(t, src)
+	wants := []string{
+		"_qTmp1, _qErr1 := g(s)",
+		"_qTmp2, _qErr2 := f()",
+		"(mkFn(_qTmp1))(_qErr2)",
+	}
+	for _, w := range wants {
+		if !strings.Contains(got, w) {
+			t.Errorf("missing %q.\n--- output:\n%s", w, got)
+		}
+	}
+}
+
+func TestRewriteHoist_NestedQInsideQInner(t *testing.T) {
+	// `x := q.Try(Foo(q.Try(Bar())))` — outer q.Try's InnerExpr
+	// itself contains an inner q.Try. The rewriter must hoist the
+	// innermost q.Try first so its result feeds the outer's bind
+	// line as a temp.
+	src := `package p
+
+import "github.com/GiGurra/q/pkg/q"
+
+func compute() (int, error) {
+	x := q.Try(Foo(q.Try(Bar())))
+	return x, nil
+}
+
+func Bar() (int, error)   { return 0, nil }
+func Foo(n int) (int, error) { return n, nil }
+`
+	got := mustRewrite(t, src)
+	wants := []string{
+		"_qTmp1, _qErr1 := Bar()",
+		"if _qErr1 != nil {",
+		"_qTmp2, _qErr2 := Foo(_qTmp1)",
+		"if _qErr2 != nil {",
+		"x := _qTmp2",
+	}
+	for _, w := range wants {
+		if !strings.Contains(got, w) {
+			t.Errorf("missing %q.\n--- output:\n%s", w, got)
+		}
+	}
+	if strings.Contains(got, "q.Try(") {
+		t.Errorf("q.Try call survived rewrite (nested q.* not rewritten).\n--- output:\n%s", got)
+	}
+}
+
+func TestRewriteHoist_MultipleInOneStatement(t *testing.T) {
+	// Two q.* calls nested in one RHS expression. Each binds
+	// separately with its own counter.
+	src := `package p
+
+import "github.com/GiGurra/q/pkg/q"
+
+func add(a, b string, p *int) (int, error) {
+	v := sum(q.Try(atoi(a)), q.Try(atoi(b))) + *q.NotNil(p)
+	return v, nil
+}
+
+func atoi(s string) (int, error) { return 0, nil }
+func sum(x, y int) int           { return x + y }
+`
+	got := mustRewrite(t, src)
+	wants := []string{
+		"_qTmp1, _qErr1 := atoi(a)",
+		"_qTmp2, _qErr2 := atoi(b)",
+		"_qTmp3 := p",
+		"if _qTmp3 == nil {",
+		"v := sum(_qTmp1, _qTmp2) + *_qTmp3",
+	}
+	for _, w := range wants {
+		if !strings.Contains(got, w) {
+			t.Errorf("missing %q.\n--- output:\n%s", w, got)
+		}
+	}
+}
+
 func TestRewriteTryAssign_NoQImport_NoChange(t *testing.T) {
 	src := `package p
 

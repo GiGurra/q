@@ -2,16 +2,15 @@
 
 The persistent backlog for `q`. Mirrors the in-session task list so a fresh conversation (or anyone reading the repo cold) can pick up where we left off without re-deriving priorities.
 
-**Standing rule.** When a task lands, move it to the "Done" section *in the same commit* with a one-line note about what shipped (and a commit ref if useful). When a new task is created, add it here *in the same commit* that creates the in-session task. The two views must not drift.
+**Standing rule (bookkeeping).** When a task lands, move it to the "Done" section *in the same commit* with a one-line note about what shipped (and a commit ref if useful). When a new task is created, add it here *in the same commit* that creates the in-session task. The two views must not drift.
+
+**Standing rule (design).** q only accepts syntax Go itself accepts — see `docs/design.md` §7. Reject any feature that would light up as a type/syntax error in gopls. This kills some nice-reading shapes (auto-inferred `, nil` tails, auto-injected trailing `return nil`, omitted return values) but it's non-negotiable: the IDE experience is the whole reason we're a toolexec rewriter instead of a custom parser.
 
 ## Open
 
 ### High-impact gaps in the public surface
 
-- [ ] **#16 — Remaining shape gaps: nested-in-call (non-return), multi-LHS.** Return-position is shipped (see Done); these two are what's left.
-  - **nested-in-call** (`f(q.Try(call()))`): hoist the q.* call into a preceding statement that binds to a temp, then rewrite the outer call to reference the temp. Needs careful AST manipulation around statement insertion. More general than the return-position case because we can't build a replacement statement tail — we have to *add* a preceding statement and edit the outer call's sub-expression in place.
-  - **multi-LHS** (`v, w := q.Try(call())`): only meaningful if call returns 3+ values, e.g. q.Try3 family. Probably out of scope until we add multi-T support to the runtime helpers.
-  - Each shape gets a fixture under `internal/preprocessor/testdata/cases/`.
+- [ ] **#16 — Multi-LHS from a single q.\***: `v, w := q.Try(call())` where we'd want q.Try to split a multi-result producer. Requires new runtime helpers `q.Try2[T1, T2]` / `q.Try3` and corresponding rewrite templates. The hoisting infrastructure handles *incidental* multi-LHS (where the RHS call itself returns multi, and a q.* is nested in its args) — see the hoist fixture's `multiLHS` case. This item is strictly the shape where q.* IS the multi-result producer.
 
 
 - [ ] **#15 — Add `q.Check` (or final-named) for error-only returns.** Public-surface gap: `q.Try` requires `(T, error)`. For functions returning only `error` (`file.Close()`, `db.Ping()`, `validate(input)`), the user has to hand-write `if err := f(); err != nil { return ..., err }`.
@@ -33,12 +32,11 @@ The persistent backlog for `q`. Mirrors the in-session task list so a fresh conv
 
 - [ ] **#11 — `q.<X>` for is-nil-as-failure / comma-ok / etc.** Open question from design discussion: a counterpart helper for cases where the bubble-trigger isn't `(T, error)` or `*T == nil`. Possible shapes: `q.IfNil(x)` — bubble when x is nil; `q.Ok(v, ok)` — bubble when ok is false (comma-ok pattern); `q.Recv(ch)` — bubble on channel close. Get exact semantic from user before designing.
 
-- [ ] **#20 — Infer trailing `, nil` in multi-q returns.** Nice-to-have: `return q.Try(a()) * q.Try(b()) / q.Try(c())` — no user-written `, nil` at the end. The rewriter could detect that every non-q result position is missing and synthesise zero-nil tails for the success path. Discussed when landing the multi-q return; parked here so it doesn't get lost.
-
 ## Done
 
 A short ledger of what's shipped — newest first. Look at `git log` for the full story.
 
+- **Hoist form: q.\* nested inside any non-return statement.** Scanner's direct-bind path now falls through to `matchHoist` whenever the matched q.* has nested q.*s in its InnerExpr or MethodArgs, or when the statement shape doesn't fit direct-bind (multi-LHS RHS, non-ident LHS with q.*, q.* as argument to a non-q.* call). `collectQCalls` descends through matched q.*s too so deep nesting is caught. Rewriter orders subs innermost-first, numbers counters in render order, and uses `substituteSpans` to replace immediate-child q.* spans wherever they appear — in each sub-call's InnerExpr/MethodArgs for its bind line, and in the full statement text for the final suffix. Unlocks `v := f(q.Try(call()))`, `a, b := split(q.Try(n()))`, `sink(q.Try(x()))`, `x := q.Try(Foo(q.Try(Bar())))`, `m[key] = q.Try(v())`, `m[q.Try(i())] = v`. Fixture `nested_in_call_run_ok` (17 runtime assertions) + `TestRewriteHoist_*` unit tests cover these shapes.
 - **Multi-q in return + renderer refactor.** Scanner now collects every q.* call inside a return-result subtree (via `ast.Inspect`) into a `callShape.Calls []qSubCall`. Per-call fields (Family/Method/MethodArgs/InnerExpr/OuterCall) moved out of callShape into qSubCall so the rewriter can iterate. Rewriter emits one bind+check block per sub-call, then a reconstructed final return with every q.* span substituted by its own `_qTmpN`. Each sub-call has its own early-return, so later q.*s short-circuit on earlier failures — verified by the `multi_q_in_return_run_ok` fixture (14 assertions including a call-counter for short-circuit proof). Unlocks `return q.Try(a()) * q.Try(b()) / q.Try(c()), nil`.
 - **#19 — q.* inside closures / anonymous functions.** Scanner now recurses into `*ast.FuncLit` bodies (new `walkFuncLits` helper), and each shape records the signature of its nearest-enclosing function — FuncLit or FuncDecl — via a `EnclosingFuncType *ast.FuncType` field (replaces the old `EnclosingFunc *ast.FuncDecl`). A FuncLit with a different result arity/types than its outer FuncDecl now bubbles to its own results, not the outer's. Fixture `closures_run_ok` covers six shapes: closure in a var, immediately-invoked closure, error-only closure, deferred closure, doubly-nested closures, and a chain-method (`q.TryE(...).Wrap`) inside a closure.
 - **#16a — Return-position rewrite.** New `formReturn` form: the scanner walks each return result's AST subtree for q.* calls (anywhere, not just top-level), and the rewriter binds the q.* call to `_qTmp<N>`, emits the usual bubble block, and rebuilds the final return with `_qTmp<N>` spliced into the q.* call's source span. Unlocks `return q.Try(strconv.Atoi(s)) * 2, nil`, `return "tag", q.NotNil(p), nil`, `return q.TryE(call()).Wrap("..."), nil`. Fixture: `return_position_run_ok`. Remaining sub-tasks (nested-in-call outside returns, multi-LHS) are tracked as the reshaped #16.
