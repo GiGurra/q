@@ -31,65 +31,27 @@ Signatures stay plain Go. There are no special types you have to learn, no closu
 
 The withdrawn Go [`try` proposal](https://github.com/golang/go/issues/32437) is the same idea, delivered as a preprocessor instead of a language change. You opt in per-module via `-toolexec`.
 
-## The full surface
+## The four entries
 
-### Bare bubble — pass through, propagate unchanged
+| Entry                          | Source shape                   | Page                          |
+|--------------------------------|--------------------------------|-------------------------------|
+| `q.Try` / `q.TryE`             | `(T, error)`                   | [Try](api/try.md)             |
+| `q.NotNil` / `q.NotNilE`       | `*T`                           | [NotNil](api/notnil.md)       |
+| `q.Check` / `q.CheckE`         | `error` alone (statement only) | [Check](api/check.md)         |
+| `q.Open` / `q.OpenE`           | `(T, error)` + defer cleanup   | [Open](api/open.md)           |
 
-```go
-n := q.Try(strconv.Atoi(s))      // (T, error) → bubble err
-u := q.NotNil(table[id])         // (*T)       → bubble q.ErrNil
-```
+Each bare form bubbles on failure. Each `E` variant carries the capture into a `Result` whose chain methods (`Err`, `ErrF`, `Wrap`, `Wrapf`, `Catch`) shape the bubbled error at the call site.
 
-### Chain — custom error handling at the call site
-
-For `(T, error)` via `q.TryE`:
-
-```go
-n := q.TryE(strconv.Atoi(s)).Err(ErrBadInput)                   // replace with constant error
-n := q.TryE(strconv.Atoi(s)).ErrF(toDBError)                    // transform: fn(err) error
-n := q.TryE(strconv.Atoi(s)).Wrap("parsing")                    // fmt.Errorf("parsing: %w", err)
-n := q.TryE(strconv.Atoi(s)).Wrapf("parsing %q", s)             // fmt.Errorf("parsing %q: %w", s, err)
-n := q.TryE(strconv.Atoi(s)).Catch(func(e error) (int, error) { // transform OR recover
-    if errors.Is(e, strconv.ErrSyntax) {
-        return 0, nil                                           //   recover with default
-    }
-    return 0, fmt.Errorf("parsing %q: %w", s, e)                //   bubble new error
-})
-```
-
-For `*T` via `q.NotNilE`:
-
-```go
-u := q.NotNilE(table[id]).Err(ErrNotFound)                       // replace with constant error
-u := q.NotNilE(table[id]).ErrF(func() error { ... })             // computed error (thunk)
-u := q.NotNilE(table[id]).Wrap("user not found")                 // errors.New(msg)
-u := q.NotNilE(table[id]).Wrapf("no user %d", id)                // fmt.Errorf(format, args...)
-u := q.NotNilE(table[id]).Catch(func() (*User, error) { ... })   // computed value OR error
-```
-
-`Catch` is the most powerful method: returning `(value, nil)` recovers and uses that value in place of the bubble; returning `(zero, err)` bubbles the new error. The other methods are conveniences for the common shapes.
-
-### Statement positions
-
-Every helper works in three positions:
-
-```go
-v := q.Try(call())   // define   — declare a fresh variable
-v  = q.Try(call())   // assign   — update an existing one (incl. obj.field, arr[i])
-     q.Try(call())   // discard  — bubble on err, drop the value
-```
-
-The discard form is useful for "must succeed" calls where the return value isn't needed (e.g. `q.NotNil(somePtr)` as a precondition assertion).
-
-## Next
+## Where to go next
 
 - [Getting Started](getting-started.md) — install, first build, IDE setup, GOCACHE discipline.
+- [Examples → Basic bubbling](examples/basic.md) — smallest runnable programs for Try / NotNil / Check.
+- [Examples → Error shaping](examples/error-shaping.md) — Wrap / Wrapf / Err / ErrF / Catch patterns.
+- [Examples → Resources](examples/resources.md) — acquire/release with Open, LIFO cleanup, recovery to a fallback.
 - [Design](design.md) — the link gate, the rewriter contract, what's recognised, what isn't.
 
 ## Status
 
-Experimental — APIs and internals may change.
+Experimental — APIs and internals may change. But the public surface is complete: every entry × every chain method × every statement position (define, assign, discard, return-position, and hoist-inside-expression) works end-to-end. Multi-q in one statement composes, including nesting one q.* inside another. Closures and generics are supported.
 
-**What works.** Bare `q.Try` and `q.NotNil`. Every chain method on `q.TryE` and `q.NotNilE` (`Err`, `ErrF`, `Catch`, `Wrap`, `Wrapf`). Every statement form (define, assign, discard).
-
-**Currently rejected with a diagnostic** (planned, but not yet supported): return-position (`return q.Try(call())`), nested-in-call (`f(q.Try(call()))`), multi-LHS. Half-rewritten code never happens silently.
+The only currently-parked shape is multi-LHS where q.* itself produces multiple T values (`v, w := q.Try(call())`) — that needs new runtime helpers; see [TODO #16](https://github.com/GiGurra/q/blob/main/docs/planning/TODO.md#future--parking-lot).

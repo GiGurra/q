@@ -38,4 +38,13 @@ markdown_extensions:
 nav:
   - Home: index.md
   - Getting Started: getting-started.md
+  - API:
+    - q.Try:    api/try.md
+    - q.NotNil: api/notnil.md
+    - q.Check:  api/check.md
+    - q.Open:   api/open.md
+  - Examples:
+    - Basic bubbling: examples/basic.md
+    - Error shaping:  examples/error-shaping.md
+    - Resources:      examples/resources.md
   - Design: design.md
