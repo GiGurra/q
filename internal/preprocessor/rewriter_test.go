@@ -87,6 +87,87 @@ func atoi(s string) (int, error) { return 0, nil }
 	}
 }
 
+func TestRewriteTryEWrapf_InjectsFmtImport(t *testing.T) {
+	// Source has no `fmt` import; the Wrapf rewrite needs fmt.Errorf,
+	// so the rewriter must inject the import.
+	src := `package p
+
+import "github.com/GiGurra/q/pkg/q"
+
+func parse(s string) (int, error) {
+	n := q.TryE(atoi(s)).Wrapf("parsing %q", s)
+	return n, nil
+}
+
+func atoi(s string) (int, error) { return 0, nil }
+`
+	got := mustRewrite(t, src)
+	wants := []string{
+		`fmt.Errorf("parsing %q: %w", s, _qErr1)`,
+		`"fmt"`, // injected import
+	}
+	for _, w := range wants {
+		if !strings.Contains(got, w) {
+			t.Errorf("missing %q.\n--- output:\n%s", w, got)
+		}
+	}
+}
+
+func TestRewriteTryECatch_RecoveryShape(t *testing.T) {
+	// Catch's replacement is structurally distinct: the err branch
+	// reassigns LHS via fn and inspects the second return.
+	src := `package p
+
+import "github.com/GiGurra/q/pkg/q"
+
+func parse(s string) (int, error) {
+	n := q.TryE(atoi(s)).Catch(myFn)
+	return n, nil
+}
+
+func atoi(s string) (int, error)             { return 0, nil }
+func myFn(e error) (int, error)              { return 0, nil }
+`
+	got := mustRewrite(t, src)
+	wants := []string{
+		"n, _qErr1 := atoi(s)",
+		"var _qRet1 error",
+		"n, _qRet1 = (myFn)(_qErr1)",
+		"if _qRet1 != nil {",
+	}
+	for _, w := range wants {
+		if !strings.Contains(got, w) {
+			t.Errorf("missing %q.\n--- output:\n%s", w, got)
+		}
+	}
+}
+
+func TestRewriteTryEErr_ReplacementError(t *testing.T) {
+	// Err passes a constant error that should appear as the bubbled
+	// value in place of the captured err.
+	src := `package p
+
+import (
+	"errors"
+	"github.com/GiGurra/q/pkg/q"
+)
+
+var ErrCustom = errors.New("custom")
+
+func parse(s string) (int, error) {
+	n := q.TryE(atoi(s)).Err(ErrCustom)
+	return n, nil
+}
+
+func atoi(s string) (int, error) { return 0, nil }
+`
+	got := mustRewrite(t, src)
+	want := "return *new(int), ErrCustom"
+	if !strings.Contains(got, want) {
+		t.Errorf("missing %q.\n--- output:\n%s", want, got)
+	}
+}
+
 func TestRewriteTryAssign_NoQImport_NoChange(t *testing.T) {
 	src := `package p
 
@@ -128,7 +209,7 @@ func mustRewrite(t *testing.T, src string) string {
 		t.Fatal("scanner returned no shapes")
 	}
 	alias := qImportAlias(file)
-	out, err := rewriteFile(fset, []byte(src), shapes, alias)
+	out, err := rewriteFile(fset, file, []byte(src), shapes, alias)
 	if err != nil {
 		t.Fatal(err)
 	}

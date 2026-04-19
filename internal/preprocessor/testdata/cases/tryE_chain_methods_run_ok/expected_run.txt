@@ -1,0 +1,12 @@
+Err.ok: ok=42
+Err.bad: err=custom error
+ErrF.ok: ok=42
+ErrF.bad: err=transformed: strconv.Atoi: parsing "abc": invalid syntax
+Wrap.ok: ok=42
+Wrap.bad: err=wrap-context: strconv.Atoi: parsing "abc": invalid syntax
+Wrapf.ok: ok=42
+Wrapf.bad: err=wrapf-context "abc": strconv.Atoi: parsing "abc": invalid syntax
+CatchRec.ok: ok=42
+CatchRec.bad: ok=99
+CatchXf.ok: ok=42
+CatchXf.bad: err=catch-transformed: strconv.Atoi: parsing "abc": invalid syntax

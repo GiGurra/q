@@ -71,7 +71,7 @@ func planUserPackage(pkgPath string, toolArgs []string) (*Plan, error) {
 			return nil, fmt.Errorf("read %s: %w", src, err)
 		}
 		alias := qImportAlias(file)
-		rewrittenBytes, err := rewriteFile(fset, original, shapes, alias)
+		rewrittenBytes, err := rewriteFile(fset, file, original, shapes, alias)
 		if err != nil {
 			cleanupAll()
 			return nil, err

@@ -26,7 +26,7 @@ func loadUser(id int) (User, error) {
 
 ## Status
 
-Phase 1 (link gate) and a minimum-viable Phase 2 rewriter are both implemented. The rewriter currently transforms the smallest shape — `v := q.Try(call())` — end-to-end into the inlined `if err != nil { return …, err }` form. Other shapes (`q.TryE(...).Method(...)` chains, `q.NotNil` family, plain assignment, discard form) emit a diagnostic and abort the build so half-rewritten code never happens silently. Roadmap and full architecture: see [`CLAUDE.md`](CLAUDE.md) and [`docs/design.md`](docs/design.md).
+Phase 1 (link gate) and the full Try-family rewriter are implemented and verified end-to-end. The rewriter handles bare `v := q.Try(call())` plus every `v := q.TryE(call()).<Method>(args...)` chain (Method ∈ {`Err`, `ErrF`, `Catch`, `Wrap`, `Wrapf`}). Other shapes (`q.NotNil` family, plain `=` assignment, discard form) emit a diagnostic and abort the build so half-rewritten code never happens silently. Roadmap and full architecture: see [`CLAUDE.md`](CLAUDE.md) and [`docs/design.md`](docs/design.md).
 
 ## Install
 
