@@ -302,7 +302,7 @@ func renderNotNilE(fset *token.FileSet, src []byte, sh callShape, counter int) (
 // the local err-variable name, and the source text of the inner
 // expression.
 func commonRenderInputs(fset *token.FileSet, src []byte, sh callShape, counter int) (zeros []string, indent, errVar, innerText string, err error) {
-	results := sh.EnclosingFunc.Type.Results
+	results := sh.EnclosingFuncType.Results
 	if results == nil || results.NumFields() == 0 {
 		return nil, "", "", "", fmt.Errorf("q.* used in a function with no return values; the bubble has nowhere to go")
 	}

@@ -100,10 +100,14 @@ type callShape struct {
 	// of the q.* sub-expression.
 	OuterCall ast.Expr
 
-	// EnclosingFunc is the FuncDecl containing this call. Its
-	// Type.Results gives the rewriter the result types from which to
-	// synthesize the zero-value tuple in the early return.
-	EnclosingFunc *ast.FuncDecl
+	// EnclosingFuncType is the signature of the nearest-enclosing
+	// function — either the outer FuncDecl or an inner FuncLit. Its
+	// Results give the rewriter the result types from which to
+	// synthesize the zero-value tuple in the early return. Using the
+	// nearest enclosing scope is critical for q.* inside closures:
+	// an inner FuncLit can have a different result arity/types than
+	// its outer FuncDecl.
+	EnclosingFuncType *ast.FuncType
 }
 
 // chainMethods is the set of recognised TryE chain method names.
@@ -137,7 +141,7 @@ func scanFile(fset *token.FileSet, path string, file *ast.File) ([]callShape, []
 		if !ok || fn.Body == nil {
 			continue
 		}
-		walkBlock(fset, path, fn.Body, alias, fn, &shapes, &diags)
+		walkBlock(fset, path, fn.Body, alias, fn.Type, &shapes, &diags)
 	}
 
 	return shapes, diags, nil
@@ -149,17 +153,23 @@ func scanFile(fset *token.FileSet, path string, file *ast.File) ([]callShape, []
 // and plain blocks). Each leaf statement is fed to matchStatement; any
 // q.* reference in an unsupported position produces a diagnostic.
 //
+// fnType is the signature of the nearest-enclosing function — the
+// outer FuncDecl at the top level, or an inner FuncLit after we cross
+// into a closure body via walkFuncLits. Each shape matched here
+// records fnType as its EnclosingFuncType so the rewriter uses the
+// correct result list for zero-value synthesis.
+//
 // Nested-scope rewrites are correct because each shape's replacement
 // is a self-contained block (zero or one bind line, an if check, a
 // return). The new statements live where the original q.* statement
 // lived — same scope, same in-flow position — so visibility of the
 // LHS variable to surrounding code is preserved.
-func walkBlock(fset *token.FileSet, path string, block *ast.BlockStmt, alias string, fn *ast.FuncDecl, shapes *[]callShape, diags *[]Diagnostic) {
+func walkBlock(fset *token.FileSet, path string, block *ast.BlockStmt, alias string, fnType *ast.FuncType, shapes *[]callShape, diags *[]Diagnostic) {
 	if block == nil {
 		return
 	}
 	for _, stmt := range block.List {
-		shape, ok, err := matchStatement(fset, stmt, alias, fn)
+		shape, ok, err := matchStatement(fset, stmt, alias, fnType)
 		if err != nil {
 			*diags = append(*diags, diagAt(fset, path, stmt.Pos(), err.Error()))
 		} else if ok {
@@ -168,45 +178,74 @@ func walkBlock(fset *token.FileSet, path string, block *ast.BlockStmt, alias str
 			*diags = append(*diags, diagAt(fset, path, pos,
 				fmt.Sprintf("unsupported q.* call shape; supported: `v := %s.Try/NotNil(...)`, `v = %s.Try/NotNil(...)`, `%s.Try/NotNil(...)` (discard), `return %s.Try/NotNil(...), …` (q.* as one top-level return result), with optional .Err / .ErrF / .Catch / .Wrap / .Wrapf chain methods on the *E entries", alias, alias, alias, alias)))
 		}
-		walkChildBlocks(fset, path, stmt, alias, fn, shapes, diags)
+		walkChildBlocks(fset, path, stmt, alias, fnType, shapes, diags)
+		walkFuncLits(fset, path, stmt, alias, shapes, diags)
 	}
+}
+
+// walkFuncLits finds *ast.FuncLit expressions reachable from stmt
+// without crossing a nested *ast.BlockStmt boundary. For each FuncLit
+// found, walkBlock recurses into the FuncLit's body with the
+// FuncLit's own Type as the enclosing function scope — so q.* inside
+// a closure bubbles according to the *closure's* result list, not the
+// outer FuncDecl's.
+//
+// The BlockStmt-boundary guard prevents double-walking: FuncLits
+// inside nested statements (e.g. an if-body) are reached via the
+// recursive walkBlock call that walkChildBlocks triggers on that
+// body. Stopping descent at FuncLits themselves after processing
+// avoids walking a closure's body twice when it contains further
+// closures; the recursive walkBlock on the outer closure will
+// discover the inner one.
+func walkFuncLits(fset *token.FileSet, path string, stmt ast.Stmt, alias string, shapes *[]callShape, diags *[]Diagnostic) {
+	ast.Inspect(stmt, func(n ast.Node) bool {
+		if blk, ok := n.(*ast.BlockStmt); ok && ast.Node(blk) != ast.Node(stmt) {
+			return false
+		}
+		lit, ok := n.(*ast.FuncLit)
+		if !ok {
+			return true
+		}
+		walkBlock(fset, path, lit.Body, alias, lit.Type, shapes, diags)
+		return false
+	})
 }
 
 // walkChildBlocks dispatches into every child *ast.BlockStmt that the
 // given statement holds. Mirrors the shape of go/ast's nodes that
 // carry blocks; new statement kinds added by future Go versions would
 // need a case here.
-func walkChildBlocks(fset *token.FileSet, path string, stmt ast.Stmt, alias string, fn *ast.FuncDecl, shapes *[]callShape, diags *[]Diagnostic) {
+func walkChildBlocks(fset *token.FileSet, path string, stmt ast.Stmt, alias string, fnType *ast.FuncType, shapes *[]callShape, diags *[]Diagnostic) {
 	switch s := stmt.(type) {
 	case *ast.BlockStmt:
-		walkBlock(fset, path, s, alias, fn, shapes, diags)
+		walkBlock(fset, path, s, alias, fnType, shapes, diags)
 	case *ast.IfStmt:
-		walkBlock(fset, path, s.Body, alias, fn, shapes, diags)
+		walkBlock(fset, path, s.Body, alias, fnType, shapes, diags)
 		if s.Else != nil {
 			switch elseStmt := s.Else.(type) {
 			case *ast.BlockStmt:
-				walkBlock(fset, path, elseStmt, alias, fn, shapes, diags)
+				walkBlock(fset, path, elseStmt, alias, fnType, shapes, diags)
 			case *ast.IfStmt:
-				walkChildBlocks(fset, path, elseStmt, alias, fn, shapes, diags)
+				walkChildBlocks(fset, path, elseStmt, alias, fnType, shapes, diags)
 			}
 		}
 	case *ast.ForStmt:
-		walkBlock(fset, path, s.Body, alias, fn, shapes, diags)
+		walkBlock(fset, path, s.Body, alias, fnType, shapes, diags)
 	case *ast.RangeStmt:
-		walkBlock(fset, path, s.Body, alias, fn, shapes, diags)
+		walkBlock(fset, path, s.Body, alias, fnType, shapes, diags)
 	case *ast.SwitchStmt:
-		walkBlock(fset, path, s.Body, alias, fn, shapes, diags)
+		walkBlock(fset, path, s.Body, alias, fnType, shapes, diags)
 	case *ast.TypeSwitchStmt:
-		walkBlock(fset, path, s.Body, alias, fn, shapes, diags)
+		walkBlock(fset, path, s.Body, alias, fnType, shapes, diags)
 	case *ast.SelectStmt:
-		walkBlock(fset, path, s.Body, alias, fn, shapes, diags)
+		walkBlock(fset, path, s.Body, alias, fnType, shapes, diags)
 	case *ast.CaseClause:
 		// case clause Body is a []ast.Stmt without its own BlockStmt
 		// wrapper, so we walk it inline.
 		for _, child := range s.Body {
 			// Synthesise the same per-stmt logic walkBlock applies, but
 			// without the BlockStmt wrapper.
-			subShape, ok, err := matchStatement(fset, child, alias, fn)
+			subShape, ok, err := matchStatement(fset, child, alias, fnType)
 			if err != nil {
 				*diags = append(*diags, diagAt(fset, path, child.Pos(), err.Error()))
 			} else if ok {
@@ -215,11 +254,12 @@ func walkChildBlocks(fset *token.FileSet, path string, stmt ast.Stmt, alias stri
 				*diags = append(*diags, diagAt(fset, path, pos,
 					fmt.Sprintf("unsupported q.* call shape; supported: `v := %s.Try/NotNil(...)`, `v = %s.Try/NotNil(...)`, `%s.Try/NotNil(...)` (discard), `return %s.Try/NotNil(...), …` (q.* as one top-level return result), with optional .Err / .ErrF / .Catch / .Wrap / .Wrapf chain methods on the *E entries", alias, alias, alias, alias)))
 			}
-			walkChildBlocks(fset, path, child, alias, fn, shapes, diags)
+			walkChildBlocks(fset, path, child, alias, fnType, shapes, diags)
+			walkFuncLits(fset, path, child, alias, shapes, diags)
 		}
 	case *ast.CommClause:
 		for _, child := range s.Body {
-			subShape, ok, err := matchStatement(fset, child, alias, fn)
+			subShape, ok, err := matchStatement(fset, child, alias, fnType)
 			if err != nil {
 				*diags = append(*diags, diagAt(fset, path, child.Pos(), err.Error()))
 			} else if ok {
@@ -228,10 +268,11 @@ func walkChildBlocks(fset *token.FileSet, path string, stmt ast.Stmt, alias stri
 				*diags = append(*diags, diagAt(fset, path, pos,
 					fmt.Sprintf("unsupported q.* call shape; supported: `v := %s.Try/NotNil(...)`, `v = %s.Try/NotNil(...)`, `%s.Try/NotNil(...)` (discard), `return %s.Try/NotNil(...), …` (q.* as one top-level return result), with optional .Err / .ErrF / .Catch / .Wrap / .Wrapf chain methods on the *E entries", alias, alias, alias, alias)))
 			}
-			walkChildBlocks(fset, path, child, alias, fn, shapes, diags)
+			walkChildBlocks(fset, path, child, alias, fnType, shapes, diags)
+			walkFuncLits(fset, path, child, alias, shapes, diags)
 		}
 	case *ast.LabeledStmt:
-		walkChildBlocks(fset, path, s.Stmt, alias, fn, shapes, diags)
+		walkChildBlocks(fset, path, s.Stmt, alias, fnType, shapes, diags)
 	}
 }
 
@@ -274,7 +315,7 @@ func qImportAlias(file *ast.File) string {
 // Returns the shape on a match, (zero, false, nil) on a no-match, and
 // (zero, false, err) when the statement is *almost* a match but
 // malformed — the caller turns these into diagnostics.
-func matchStatement(fset *token.FileSet, stmt ast.Stmt, alias string, fn *ast.FuncDecl) (callShape, bool, error) {
+func matchStatement(fset *token.FileSet, stmt ast.Stmt, alias string, fnType *ast.FuncType) (callShape, bool, error) {
 	switch s := stmt.(type) {
 	case *ast.AssignStmt:
 		if (s.Tok != token.DEFINE && s.Tok != token.ASSIGN) || len(s.Lhs) != 1 || len(s.Rhs) != 1 {
@@ -298,7 +339,7 @@ func matchStatement(fset *token.FileSet, stmt ast.Stmt, alias string, fn *ast.Fu
 		shape.Stmt = stmt
 		shape.Form = f
 		shape.LHSExpr = s.Lhs[0]
-		shape.EnclosingFunc = fn
+		shape.EnclosingFuncType = fnType
 		return shape, true, nil
 
 	case *ast.ExprStmt:
@@ -308,7 +349,7 @@ func matchStatement(fset *token.FileSet, stmt ast.Stmt, alias string, fn *ast.Fu
 		}
 		shape.Stmt = stmt
 		shape.Form = formDiscard
-		shape.EnclosingFunc = fn
+		shape.EnclosingFuncType = fnType
 		return shape, true, nil
 
 	case *ast.ReturnStmt:
@@ -363,7 +404,7 @@ func matchStatement(fset *token.FileSet, stmt ast.Stmt, alias string, fn *ast.Fu
 		}
 		shape.Stmt = stmt
 		shape.Form = formReturn
-		shape.EnclosingFunc = fn
+		shape.EnclosingFuncType = fnType
 		return shape, true, nil
 	}
 	return callShape{}, false, nil

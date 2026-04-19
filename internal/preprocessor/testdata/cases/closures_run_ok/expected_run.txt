@@ -1,0 +1,12 @@
+closureInVar.ok: ok=22
+closureInVar.bad: err=strconv.Atoi: parsing "abc": invalid syntax
+closureImmediate.ok: ok
+closureImmediate.bad: err=q: nil value
+closureErrorOnly.ok: ok
+closureErrorOnly.bad: err=q: nil value
+closureInDefer.ok: ok
+closureInDefer.bad: err=closure ran
+nestedClosures.ok: ok=6
+nestedClosures.bad: err=strconv.Atoi: parsing "xyz": invalid syntax
+closureChainWrap.ok: ok=8
+closureChainWrap.bad: err=inner: strconv.Atoi: parsing "pqr": invalid syntax
