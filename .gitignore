@@ -6,6 +6,12 @@
 *.test
 *.out
 
+# Binaries accidentally built inside example subdirs — extensionless
+# Go binaries that `go build` produces if you omit -o.
+/example/*/*
+!/example/*/*.go
+!/example/*/README.md
+
 # IDE
 .idea/
 .vscode/
