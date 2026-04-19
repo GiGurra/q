@@ -721,40 +721,71 @@ func isSelector(expr ast.Expr, alias, name string) bool {
 }
 
 // findQReference walks a statement's AST and returns the position of
-// any selector whose root identifier matches the q alias, or an
-// invalid token.Pos if none is found. Used to flag statements that
-// contain q.* calls in unsupported positions.
+// any q.* CALL in an unsupported position, or an invalid token.Pos
+// if none is found. Only calls are flagged — plain value references
+// to exported q identifiers (e.g. `errors.Is(err, q.ErrNil)`) are
+// legitimate uses that don't need rewriting.
 //
-// Bounded: descent stops at any nested *ast.BlockStmt. The walker in
-// walkChildBlocks recurses into those blocks separately and runs
-// matchStatement on each statement inside, so a q.* call inside a
-// nested block is the responsibility of the recursive descent — not
-// of the outer container statement's diagnostic. Without this bound,
-// a recognised `v := q.Try(call())` inside an if-body would also be
-// flagged as "unsupported" against the enclosing if-statement.
+// A call is "rooted at q" if its Fun chain (through any number of
+// `.<method>` selectors on sub-CallExprs) eventually resolves to an
+// Ident named alias. That catches both the bare form `q.Try(x)` and
+// the chain form `q.TryE(x).Method(y)` whose outer Fun's leftmost
+// ident is still q.
+//
+// Bounded: descent stops at any nested *ast.BlockStmt or FuncLit.
+// Nested blocks are scanned separately by walkChildBlocks; FuncLit
+// bodies are scanned by walkFuncLits with their own scope. Without
+// these bounds, a recognised `v := q.Try(call())` inside an if-body
+// or a closure would also be flagged as "unsupported" against the
+// enclosing container.
 func findQReference(stmt ast.Stmt, alias string) token.Pos {
 	var found token.Pos
 	ast.Inspect(stmt, func(n ast.Node) bool {
-		// Skip the root if it IS a BlockStmt — only stop descent for
-		// nested ones (the inspector starts at stmt itself).
 		if blk, ok := n.(*ast.BlockStmt); ok && ast.Node(blk) != ast.Node(stmt) {
 			return false
 		}
-		sel, ok := n.(*ast.SelectorExpr)
+		if _, isLit := n.(*ast.FuncLit); isLit {
+			return false
+		}
+		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
 		}
-		x, ok := sel.X.(*ast.Ident)
-		if !ok {
-			return true
-		}
-		if x.Name == alias {
-			found = sel.Pos()
+		if pos := qCallRootPos(call, alias); pos.IsValid() {
+			found = pos
 			return false
 		}
 		return true
 	})
 	return found
+}
+
+// qCallRootPos reports the position of call's outer selector when
+// call is rooted at the q alias (directly or through a chain),
+// or token.NoPos otherwise.
+func qCallRootPos(call *ast.CallExpr, alias string) token.Pos {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return token.NoPos
+	}
+	root := sel.X
+	for {
+		switch v := root.(type) {
+		case *ast.Ident:
+			if v.Name == alias {
+				return sel.Pos()
+			}
+			return token.NoPos
+		case *ast.CallExpr:
+			innerSel, ok := v.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return token.NoPos
+			}
+			root = innerSel.X
+		default:
+			return token.NoPos
+		}
+	}
 }
 
 // unquote strips the surrounding quotes from a Go string literal as

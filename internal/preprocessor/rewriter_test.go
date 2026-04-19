@@ -840,6 +840,51 @@ func dial() (*Conn, error) { return nil, nil }
 	}
 }
 
+func TestRewriteScan_ValueRefToQErrNilIsNotFlagged(t *testing.T) {
+	// Regression: findQReference used to flag *any* selector rooted at
+	// the q alias, including plain value references like
+	// `errors.Is(err, q.ErrNil)`. That is a legitimate exported
+	// sentinel — no call to rewrite. The scanner should only flag
+	// q.* call expressions.
+	src := `package p
+
+import (
+	"errors"
+
+	"github.com/GiGurra/q/pkg/q"
+)
+
+func check(p *int) error {
+	_, err := lookup(p)
+	if errors.Is(err, q.ErrNil) {
+		return errors.New("missed")
+	}
+	return nil
+}
+
+func lookup(p *int) (int, error) {
+	v := q.NotNil(p)
+	return *v, nil
+}
+`
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "p.go", src, parser.ParseComments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shapes, diags, err := scanFile(fset, "p.go", file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diags) > 0 {
+		t.Errorf("unexpected diagnostics for q.ErrNil value reference: %v", diags)
+	}
+	// One shape: q.NotNil(p) in the second func.
+	if len(shapes) != 1 {
+		t.Errorf("expected exactly one recognised shape; got %d", len(shapes))
+	}
+}
+
 func TestRewriteTryAssign_NoQImport_NoChange(t *testing.T) {
 	src := `package p
 
