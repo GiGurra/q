@@ -39,8 +39,8 @@ type family int
 const (
 	familyTry family = iota
 	familyTryE
-	// familyNotNil and familyNotNilE will land alongside the q.NotNil
-	// rewriter; declared here only to keep the enum stable when they do.
+	familyNotNil
+	familyNotNilE
 )
 
 // callShape describes one recognised q.* call site, captured at scan
@@ -66,10 +66,11 @@ type callShape struct {
 	// Method is "".
 	MethodArgs []ast.Expr
 
-	// InnerCall is the (T, error)-returning call passed to q.Try /
-	// q.TryE. The rewriter copies its source span verbatim into the
-	// `v, err := <inner>` binding.
-	InnerCall *ast.CallExpr
+	// InnerExpr is the source expression handed to the q.* entry: a
+	// (T, error)-returning call for the Try family, or any pointer-
+	// returning expression for the NotNil family. The rewriter copies
+	// its source span verbatim into the bind line.
+	InnerExpr ast.Expr
 
 	// EnclosingFunc is the FuncDecl containing this call. Its
 	// Type.Results gives the rewriter the result types from which to
@@ -183,33 +184,60 @@ func matchAssignStmt(stmt ast.Stmt, alias string, fn *ast.FuncDecl) (callShape, 
 		if len(rhs.Args) != 1 {
 			return callShape{}, false, fmt.Errorf("q.Try must take exactly one argument (a (T, error)-returning call); got %d", len(rhs.Args))
 		}
-		inner, ok := rhs.Args[0].(*ast.CallExpr)
-		if !ok {
+		if _, ok := rhs.Args[0].(*ast.CallExpr); !ok {
 			return callShape{}, false, fmt.Errorf("q.Try's argument must itself be a call expression returning (T, error)")
 		}
 		return callShape{
 			Stmt: stmt, LHSName: id.Name, Family: familyTry,
-			InnerCall: inner, EnclosingFunc: fn,
+			InnerExpr: rhs.Args[0], EnclosingFunc: fn,
 		}, true, nil
 	}
 
-	// Chain q.TryE shape: rhs is <q.TryE(inner)>.<Method>(args...).
+	// Bare q.NotNil shape: rhs is q.NotNil(inner).
+	if isSelector(rhs.Fun, alias, "NotNil") {
+		if len(rhs.Args) != 1 {
+			return callShape{}, false, fmt.Errorf("q.NotNil must take exactly one argument (a *T expression); got %d", len(rhs.Args))
+		}
+		return callShape{
+			Stmt: stmt, LHSName: id.Name, Family: familyNotNil,
+			InnerExpr: rhs.Args[0], EnclosingFunc: fn,
+		}, true, nil
+	}
+
+	// Chain shapes: rhs is <q.TryE(inner)>.<Method>(args...) or
+	// <q.NotNilE(inner)>.<Method>(args...).
 	if sel, ok := rhs.Fun.(*ast.SelectorExpr); ok {
-		if entry, isEntry := sel.X.(*ast.CallExpr); isEntry && isSelector(entry.Fun, alias, "TryE") {
+		entry, isEntry := sel.X.(*ast.CallExpr)
+		if !isEntry {
+			return callShape{}, false, nil
+		}
+		switch {
+		case isSelector(entry.Fun, alias, "TryE"):
 			if !chainMethods[sel.Sel.Name] {
 				return callShape{}, false, fmt.Errorf("q.TryE chain method %q not recognised; valid: Err, ErrF, Catch, Wrap, Wrapf", sel.Sel.Name)
 			}
 			if len(entry.Args) != 1 {
 				return callShape{}, false, fmt.Errorf("q.TryE must take exactly one argument (a (T, error)-returning call); got %d", len(entry.Args))
 			}
-			inner, ok := entry.Args[0].(*ast.CallExpr)
-			if !ok {
+			if _, ok := entry.Args[0].(*ast.CallExpr); !ok {
 				return callShape{}, false, fmt.Errorf("q.TryE's argument must itself be a call expression returning (T, error)")
 			}
 			return callShape{
 				Stmt: stmt, LHSName: id.Name, Family: familyTryE,
 				Method: sel.Sel.Name, MethodArgs: rhs.Args,
-				InnerCall: inner, EnclosingFunc: fn,
+				InnerExpr: entry.Args[0], EnclosingFunc: fn,
+			}, true, nil
+		case isSelector(entry.Fun, alias, "NotNilE"):
+			if !chainMethods[sel.Sel.Name] {
+				return callShape{}, false, fmt.Errorf("q.NotNilE chain method %q not recognised; valid: Err, ErrF, Catch, Wrap, Wrapf", sel.Sel.Name)
+			}
+			if len(entry.Args) != 1 {
+				return callShape{}, false, fmt.Errorf("q.NotNilE must take exactly one argument (a *T expression); got %d", len(entry.Args))
+			}
+			return callShape{
+				Stmt: stmt, LHSName: id.Name, Family: familyNotNilE,
+				Method: sel.Sel.Name, MethodArgs: rhs.Args,
+				InnerExpr: entry.Args[0], EnclosingFunc: fn,
 			}, true, nil
 		}
 	}

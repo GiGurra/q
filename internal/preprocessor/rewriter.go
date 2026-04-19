@@ -33,9 +33,9 @@ import (
 // alias is the local import name of pkg/q in this file; the rewriter
 // appends `var _ = <alias>.ErrNil` at the end so the import does not
 // become unused after the rewrites erase the only call sites that
-// referenced it. needsFmt is set when at least one rendered shape
-// needs the fmt package; the rewriter ensures fmt is imported,
-// adding a new import spec to the file's import block when missing.
+// referenced it. The needsFmt / needsErrors flags accumulate over all
+// rendered shapes so the import-injection passes run at most once per
+// package.
 func rewriteFile(fset *token.FileSet, file *ast.File, src []byte, shapes []callShape, alias string) ([]byte, error) {
 	type edit struct {
 		start, end int
@@ -44,15 +44,18 @@ func rewriteFile(fset *token.FileSet, file *ast.File, src []byte, shapes []callS
 
 	edits := make([]edit, 0, len(shapes))
 	counter := 0
-	needsFmt := false
+	needsFmt, needsErrors := false, false
 	for _, sh := range shapes {
 		counter++
-		text, fmtUsed, err := renderShape(fset, src, sh, counter)
+		text, fmtUsed, errorsUsed, err := renderShape(fset, src, sh, counter, alias)
 		if err != nil {
 			return nil, err
 		}
 		if fmtUsed {
 			needsFmt = true
+		}
+		if errorsUsed {
+			needsErrors = true
 		}
 		start := fset.Position(sh.Stmt.Pos()).Offset
 		end := fset.Position(sh.Stmt.End()).Offset
@@ -69,7 +72,10 @@ func rewriteFile(fset *token.FileSet, file *ast.File, src []byte, shapes []callS
 	}
 
 	if needsFmt && !hasImport(file, "fmt") {
-		out = ensureFmtImport(file, fset, out)
+		out = ensureImport(file, fset, out, "fmt")
+	}
+	if needsErrors && !hasImport(file, "errors") {
+		out = ensureImport(file, fset, out, "errors")
 	}
 
 	if alias != "" {
@@ -80,18 +86,150 @@ func rewriteFile(fset *token.FileSet, file *ast.File, src []byte, shapes []callS
 }
 
 // renderShape dispatches one matched call site to the right renderer.
-// Returns the replacement text, a flag indicating whether fmt is used
-// by the replacement (the caller injects an import if so), and any
-// error.
-func renderShape(fset *token.FileSet, src []byte, sh callShape, counter int) (string, bool, error) {
+// Returns the replacement text, flags indicating whether fmt / errors
+// are used by the replacement (the caller injects imports if so), and
+// any error.
+func renderShape(fset *token.FileSet, src []byte, sh callShape, counter int, alias string) (string, bool, bool, error) {
 	switch sh.Family {
 	case familyTry:
 		text, err := renderTry(fset, src, sh, counter)
-		return text, false, err
+		return text, false, false, err
 	case familyTryE:
-		return renderTryE(fset, src, sh, counter)
+		text, fmtUsed, err := renderTryE(fset, src, sh, counter)
+		return text, fmtUsed, false, err
+	case familyNotNil:
+		text, err := renderNotNil(fset, src, sh, counter, alias)
+		return text, false, false, err
+	case familyNotNilE:
+		return renderNotNilE(fset, src, sh, counter)
 	}
-	return "", false, fmt.Errorf("renderShape: unknown family %v", sh.Family)
+	return "", false, false, fmt.Errorf("renderShape: unknown family %v", sh.Family)
+}
+
+// renderNotNil produces the inlined replacement for the bare
+// `p := q.NotNil(<expr>)` shape:
+//
+//	p := <expr>
+//	if p == nil {
+//	    return *new(T1), …, *new(Tk-1), <alias>.ErrNil
+//	}
+//
+// alias is the local q import name, used to spell the sentinel
+// q.ErrNil reference.
+func renderNotNil(fset *token.FileSet, src []byte, sh callShape, counter int, alias string) (string, error) {
+	zeros, indent, _, innerText, err := commonRenderInputs(fset, src, sh, counter)
+	if err != nil {
+		return "", err
+	}
+	zeros[len(zeros)-1] = alias + ".ErrNil"
+	return assembleNilBlock(sh.LHSName, innerText, indent, zeros, ""), nil
+}
+
+// renderNotNilE produces the inlined replacement for the chain shape
+// `p := q.NotNilE(<expr>).<Method>(args...)`. NotNilE has no captured
+// source error to wrap, so:
+//   - Wrap(msg)         → errors.New(msg)
+//   - Wrapf(fmt, args…) → fmt.Errorf(fmt, args…)   (no %w, no captured err)
+//   - Err(replacement)  → replacement
+//   - ErrF(fn)          → fn()                      (thunk, no error param)
+//   - Catch(fn)         → fn() (T, error) — recover or transform
+func renderNotNilE(fset *token.FileSet, src []byte, sh callShape, counter int) (string, bool, bool, error) {
+	zeros, indent, _, innerText, err := commonRenderInputs(fset, src, sh, counter)
+	if err != nil {
+		return "", false, false, err
+	}
+
+	switch sh.Method {
+	case "Err":
+		if len(sh.MethodArgs) != 1 {
+			return "", false, false, fmt.Errorf("q.NotNilE(...).Err requires exactly one argument (the replacement error); got %d", len(sh.MethodArgs))
+		}
+		zeros[len(zeros)-1] = exprText(fset, src, sh.MethodArgs[0])
+		return assembleNilBlock(sh.LHSName, innerText, indent, zeros, ""), false, false, nil
+
+	case "ErrF":
+		if len(sh.MethodArgs) != 1 {
+			return "", false, false, fmt.Errorf("q.NotNilE(...).ErrF requires exactly one argument (a func() error thunk); got %d", len(sh.MethodArgs))
+		}
+		fn := exprText(fset, src, sh.MethodArgs[0])
+		zeros[len(zeros)-1] = fmt.Sprintf("(%s)()", fn)
+		return assembleNilBlock(sh.LHSName, innerText, indent, zeros, ""), false, false, nil
+
+	case "Wrap":
+		if len(sh.MethodArgs) != 1 {
+			return "", false, false, fmt.Errorf("q.NotNilE(...).Wrap requires exactly one argument (the message string); got %d", len(sh.MethodArgs))
+		}
+		msg := exprText(fset, src, sh.MethodArgs[0])
+		zeros[len(zeros)-1] = fmt.Sprintf("errors.New(%s)", msg)
+		return assembleNilBlock(sh.LHSName, innerText, indent, zeros, ""), false, true, nil
+
+	case "Wrapf":
+		if len(sh.MethodArgs) < 1 {
+			return "", false, false, fmt.Errorf("q.NotNilE(...).Wrapf requires at least one argument (the format string); got %d", len(sh.MethodArgs))
+		}
+		var argParts []string
+		for _, a := range sh.MethodArgs {
+			argParts = append(argParts, exprText(fset, src, a))
+		}
+		zeros[len(zeros)-1] = fmt.Sprintf("fmt.Errorf(%s)", joinWith(argParts, ", "))
+		return assembleNilBlock(sh.LHSName, innerText, indent, zeros, ""), true, false, nil
+
+	case "Catch":
+		if len(sh.MethodArgs) != 1 {
+			return "", false, false, fmt.Errorf("q.NotNilE(...).Catch requires exactly one argument (a func() (*T, error)); got %d", len(sh.MethodArgs))
+		}
+		fn := exprText(fset, src, sh.MethodArgs[0])
+		retErrVar := fmt.Sprintf("_qRet%d", counter)
+		zeros[len(zeros)-1] = retErrVar
+		return assembleNilCatchBlock(sh.LHSName, retErrVar, innerText, fn, indent, zeros), false, false, nil
+	}
+
+	return "", false, false, fmt.Errorf("renderNotNilE: unknown method %q", sh.Method)
+}
+
+// assembleNilBlock formats the replacement skeleton for the NotNil
+// family (bare and chain except Catch):
+//
+//	<lhs> := <innerText>
+//	if <lhs> == nil {
+//	    return <zeros>
+//	}
+//
+// The unused trailing parameter exists so the signature symmetry with
+// assembleTryBlock is visible at the call sites.
+func assembleNilBlock(lhs, innerText, indent string, zeros []string, _ string) string {
+	var b bytes.Buffer
+	fmt.Fprintf(&b, "%s := %s\n", lhs, innerText)
+	fmt.Fprintf(&b, "%sif %s == nil {\n", indent, lhs)
+	fmt.Fprintf(&b, "%s\treturn %s\n", indent, joinWith(zeros, ", "))
+	fmt.Fprintf(&b, "%s}", indent)
+	return b.String()
+}
+
+// assembleNilCatchBlock formats the NotNilE.Catch replacement. The
+// nil branch invokes the thunk; on (recovered, nil) the LHS is
+// rebound and execution falls through; on (zero, err) the err
+// bubbles.
+//
+//	<lhs> := <innerText>
+//	if <lhs> == nil {
+//	    var <retErrVar> error
+//	    <lhs>, <retErrVar> = (<fn>)()
+//	    if <retErrVar> != nil {
+//	        return <zeros>
+//	    }
+//	}
+func assembleNilCatchBlock(lhs, retErrVar, innerText, fn, indent string, zeros []string) string {
+	var b bytes.Buffer
+	fmt.Fprintf(&b, "%s := %s\n", lhs, innerText)
+	fmt.Fprintf(&b, "%sif %s == nil {\n", indent, lhs)
+	fmt.Fprintf(&b, "%s\tvar %s error\n", indent, retErrVar)
+	fmt.Fprintf(&b, "%s\t%s, %s = (%s)()\n", indent, lhs, retErrVar, fn)
+	fmt.Fprintf(&b, "%s\tif %s != nil {\n", indent, retErrVar)
+	fmt.Fprintf(&b, "%s\t\treturn %s\n", indent, joinWith(zeros, ", "))
+	fmt.Fprintf(&b, "%s\t}\n", indent)
+	fmt.Fprintf(&b, "%s}", indent)
+	return b.String()
 }
 
 // renderTry produces the inlined replacement text for the bare
@@ -193,8 +331,8 @@ func commonRenderInputs(fset *token.FileSet, src []byte, sh callShape, counter i
 	if err != nil {
 		return nil, "", "", "", err
 	}
-	innerStart := fset.Position(sh.InnerCall.Pos()).Offset
-	innerEnd := fset.Position(sh.InnerCall.End()).Offset
+	innerStart := fset.Position(sh.InnerExpr.Pos()).Offset
+	innerEnd := fset.Position(sh.InnerExpr.End()).Offset
 	innerText = string(src[innerStart:innerEnd])
 	errVar = fmt.Sprintf("_qErr%d", counter)
 	indent = indentOf(src, fset.Position(sh.Stmt.Pos()).Offset)
@@ -288,48 +426,44 @@ func hasImport(file *ast.File, path string) bool {
 	return false
 }
 
-// ensureFmtImport returns out with the `fmt` package added to the
-// file's import block. Two cases:
+// ensureImport returns out with the named package added to the file's
+// import block. Three cases:
 //
-//  1. File has a parenthesised import block: insert `\n\t"fmt"` just
-//     before the closing `)`.
+//  1. File has a parenthesised import block: insert `\n\t"<path>"`
+//     just before the closing `)`.
 //  2. File has a single-line `import "..."` form: replace the import
 //     declaration entirely with a parenthesised block containing the
-//     original import plus `"fmt"`.
-//  3. File has no imports at all: insert `import "fmt"` after the
+//     original import plus `"<path>"`.
+//  3. File has no imports at all: insert `import "<path>"` after the
 //     `package <name>` line.
 //
 // Detection works on the AST (parenthesised vs single) and the splice
-// is purely textual.
-func ensureFmtImport(file *ast.File, fset *token.FileSet, out []byte) []byte {
+// is purely textual. Caller is responsible for first checking
+// hasImport so we never emit a duplicate.
+func ensureImport(file *ast.File, fset *token.FileSet, out []byte, path string) []byte {
 	for _, decl := range file.Decls {
 		gd, ok := decl.(*ast.GenDecl)
 		if !ok || gd.Tok != token.IMPORT {
 			continue
 		}
 		if gd.Lparen.IsValid() {
-			// Parenthesised block: insert before the closing ).
 			rparenOff := fset.Position(gd.Rparen).Offset
-			insertion := []byte("\t\"fmt\"\n")
+			insertion := []byte(fmt.Sprintf("\t%q\n", path))
 			return append(out[:rparenOff], append(insertion, out[rparenOff:]...)...)
 		}
-		// Single-line import: replace the declaration with a
-		// parenthesised block of two specs.
 		start := fset.Position(gd.Pos()).Offset
 		end := fset.Position(gd.End()).Offset
-		// gd has exactly one Spec when Lparen is invalid.
 		spec := gd.Specs[0].(*ast.ImportSpec)
 		original := spec.Path.Value
 		var alias string
 		if spec.Name != nil {
 			alias = spec.Name.Name + " "
 		}
-		replacement := fmt.Sprintf("import (\n\t%s%s\n\t\"fmt\"\n)", alias, original)
+		replacement := fmt.Sprintf("import (\n\t%s%s\n\t%q\n)", alias, original, path)
 		return append(out[:start], append([]byte(replacement), out[end:]...)...)
 	}
-	// No import declaration at all: insert one after `package <name>`.
 	pkgEnd := fset.Position(file.Name.End()).Offset
-	insertion := []byte("\n\nimport \"fmt\"")
+	insertion := []byte(fmt.Sprintf("\n\nimport %q", path))
 	return append(out[:pkgEnd], append(insertion, out[pkgEnd:]...)...)
 }
 

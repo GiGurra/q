@@ -26,7 +26,7 @@ func loadUser(id int) (User, error) {
 
 ## Status
 
-Phase 1 (link gate) and the full Try-family rewriter are implemented and verified end-to-end. The rewriter handles bare `v := q.Try(call())` plus every `v := q.TryE(call()).<Method>(args...)` chain (Method ∈ {`Err`, `ErrF`, `Catch`, `Wrap`, `Wrapf`}). Other shapes (`q.NotNil` family, plain `=` assignment, discard form) emit a diagnostic and abort the build so half-rewritten code never happens silently. Roadmap and full architecture: see [`CLAUDE.md`](CLAUDE.md) and [`docs/design.md`](docs/design.md).
+Every entry helper in the public surface is rewritten end-to-end: bare `q.Try` / `q.NotNil` plus all five `q.TryE(...).Method(...)` and all five `q.NotNilE(...).Method(...)` chain methods. Less-common shapes (plain `=` assignment to an existing var, discard form `_ = q.Try(call())`) emit a diagnostic and abort the build so half-rewritten code never happens silently. Roadmap and full architecture: see [`CLAUDE.md`](CLAUDE.md) and [`docs/design.md`](docs/design.md).
 
 ## Install
 
