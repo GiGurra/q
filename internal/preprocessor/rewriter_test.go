@@ -436,6 +436,70 @@ func pick(p *int) (string, *int, error) {
 	}
 }
 
+func TestRewriteMultipleQInReturn(t *testing.T) {
+	// `return q.Try(a()) * q.Try(b()) / q.Try(c()), nil` — three q.*
+	// calls in one return expression. Each binds to its own temp,
+	// each has its own bubble check, and the final return substitutes
+	// all three spans.
+	src := `package p
+
+import "github.com/GiGurra/q/pkg/q"
+
+func compute(s string) (int, error) {
+	return q.Try(atoi(s)) * q.Try(atoi(s)) / q.Try(atoi(s)), nil
+}
+
+func atoi(s string) (int, error) { return 0, nil }
+`
+	got := mustRewrite(t, src)
+	wants := []string{
+		"_qTmp1, _qErr1 := atoi(s)",
+		"if _qErr1 != nil {",
+		"_qTmp2, _qErr2 := atoi(s)",
+		"if _qErr2 != nil {",
+		"_qTmp3, _qErr3 := atoi(s)",
+		"if _qErr3 != nil {",
+		"return _qTmp1 * _qTmp2 / _qTmp3, nil",
+	}
+	for _, w := range wants {
+		if !strings.Contains(got, w) {
+			t.Errorf("missing %q.\n--- output:\n%s", w, got)
+		}
+	}
+	if strings.Contains(got, "q.Try(") {
+		t.Errorf("q.Try call survived rewrite.\n--- output:\n%s", got)
+	}
+}
+
+func TestRewriteMixedFamiliesInReturn(t *testing.T) {
+	// Mix Try and NotNil in a single return to confirm per-sub-call
+	// family dispatch still works when rendered together.
+	src := `package p
+
+import "github.com/GiGurra/q/pkg/q"
+
+func mix(s string, p *int) (int, error) {
+	return q.Try(atoi(s)) + *q.NotNil(p), nil
+}
+
+func atoi(s string) (int, error) { return 0, nil }
+`
+	got := mustRewrite(t, src)
+	wants := []string{
+		"_qTmp1, _qErr1 := atoi(s)",
+		"if _qErr1 != nil {",
+		"_qTmp2 := p",
+		"if _qTmp2 == nil {",
+		"return *new(int), q.ErrNil",
+		"return _qTmp1 + *_qTmp2, nil",
+	}
+	for _, w := range wants {
+		if !strings.Contains(got, w) {
+			t.Errorf("missing %q.\n--- output:\n%s", w, got)
+		}
+	}
+}
+
 func TestRewriteTryAssign_NoQImport_NoChange(t *testing.T) {
 	src := `package p
 

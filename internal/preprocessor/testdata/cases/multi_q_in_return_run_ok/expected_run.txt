@@ -1,0 +1,14 @@
+compute.okok: ok=1
+compute.badA: err=strconv.Atoi: parsing "xx": invalid syntax
+compute.badB: err=strconv.Atoi: parsing "yy": invalid syntax
+compute.badC: err=strconv.Atoi: parsing "zz": invalid syntax
+mix.ok: ok=10
+mix.nilPtr: err=q: nil value
+mix.badS: err=strconv.Atoi: parsing "xx": invalid syntax
+twoWraps.okok: ok=13
+twoWraps.badA: err=first: strconv.Atoi: parsing "xx": invalid syntax
+twoWraps.badB: err=second: strconv.Atoi: parsing "yy": invalid syntax
+shortCircuit.badFirst: err=strconv.Atoi: parsing "xx": invalid syntax
+shortCircuit.callsAfterBadFirst=1
+shortCircuit.okok: ok=3
+shortCircuit.callsAfterOkOk=2

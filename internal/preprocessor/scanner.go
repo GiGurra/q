@@ -58,25 +58,12 @@ const (
 	formReturn
 )
 
-// callShape describes one recognised q.* call site, captured at scan
-// time so the rewriter can emit the inlined replacement without
-// re-walking the AST.
-type callShape struct {
-	// Stmt is the enclosing statement in the function body. Its source
-	// span is the unit the rewriter replaces; everything else inside
-	// the function stays intact.
-	Stmt ast.Stmt
-
-	// Form is the syntactic position — define, assign, or discard.
-	Form form
-
-	// LHSExpr is the AST node for the LHS in formDefine / formAssign;
-	// nil for formDiscard. Resolved to source text by the rewriter
-	// using its source-byte buffer (same flow as InnerExpr). For
-	// formDefine the AST node is always *ast.Ident; for formAssign
-	// it can be any addressable expression (ident, selector, index).
-	LHSExpr ast.Expr
-
+// qSubCall captures the per-call-site pieces of a recognised q.*
+// expression: which family/method, the inner (T, error) call or *T
+// expression, the outer call span, and any chain-method arguments.
+// One callShape holds one (non-return forms) or many (formReturn with
+// multiple q.*s in the same expression) of these.
+type qSubCall struct {
 	// Family identifies the source-monad entry — Try, TryE, etc.
 	Family family
 
@@ -95,10 +82,35 @@ type callShape struct {
 	InnerExpr ast.Expr
 
 	// OuterCall is the q.* call expression (bare `q.Try(...)` or the
-	// outer chain call `q.TryE(...).Method(...)`). Used by formReturn
-	// to splice `_qTmpN` into the reconstructed final return in place
-	// of the q.* sub-expression.
+	// outer chain call `q.TryE(...).Method(...)`). For formReturn,
+	// the rewriter splices `_qTmpN` into the reconstructed final
+	// return in place of this call's source span.
 	OuterCall ast.Expr
+}
+
+// callShape describes one recognised q.* call site, captured at scan
+// time so the rewriter can emit the inlined replacement without
+// re-walking the AST.
+type callShape struct {
+	// Stmt is the enclosing statement in the function body. Its source
+	// span is the unit the rewriter replaces; everything else inside
+	// the function stays intact.
+	Stmt ast.Stmt
+
+	// Form is the syntactic position — define, assign, discard, return.
+	Form form
+
+	// LHSExpr is the AST node for the LHS in formDefine / formAssign;
+	// nil for formDiscard and formReturn. Resolved to source text by
+	// the rewriter using its source-byte buffer. For formDefine the
+	// AST node is always *ast.Ident; for formAssign it can be any
+	// addressable expression (ident, selector, index).
+	LHSExpr ast.Expr
+
+	// Calls holds the recognised q.* sub-calls inside this statement.
+	// Always length 1 for non-return forms. formReturn can have
+	// length >= 1 (e.g. `return q.Try(a()) * q.Try(b()), nil`).
+	Calls []qSubCall
 
 	// EnclosingFuncType is the signature of the nearest-enclosing
 	// function — either the outer FuncDecl or an inner FuncLit. Its
@@ -332,38 +344,38 @@ func matchStatement(fset *token.FileSet, stmt ast.Stmt, alias string, fnType *as
 		if s.Tok == token.ASSIGN {
 			f = formAssign
 		}
-		shape, ok, err := classifyQCall(s.Rhs[0], alias)
+		sub, ok, err := classifyQCall(s.Rhs[0], alias)
 		if err != nil || !ok {
 			return callShape{}, ok, err
 		}
-		shape.Stmt = stmt
-		shape.Form = f
-		shape.LHSExpr = s.Lhs[0]
-		shape.EnclosingFuncType = fnType
-		return shape, true, nil
+		return callShape{
+			Stmt:              stmt,
+			Form:              f,
+			LHSExpr:           s.Lhs[0],
+			Calls:             []qSubCall{sub},
+			EnclosingFuncType: fnType,
+		}, true, nil
 
 	case *ast.ExprStmt:
-		shape, ok, err := classifyQCall(s.X, alias)
+		sub, ok, err := classifyQCall(s.X, alias)
 		if err != nil || !ok {
 			return callShape{}, ok, err
 		}
-		shape.Stmt = stmt
-		shape.Form = formDiscard
-		shape.EnclosingFuncType = fnType
-		return shape, true, nil
+		return callShape{
+			Stmt:              stmt,
+			Form:              formDiscard,
+			Calls:             []qSubCall{sub},
+			EnclosingFuncType: fnType,
+		}, true, nil
 
 	case *ast.ReturnStmt:
-		// Find a q.* call anywhere inside the return's result
+		// Find every q.* call anywhere inside the return's result
 		// expressions — not just top-level. This makes shapes like
-		// `return q.Try(call()) * 2, nil` work: the rewriter binds the
-		// q.* call to `_qTmpN` and the final return keeps the rest of
-		// the expression verbatim with `_qTmpN` spliced in.
-		//
-		// At most one q.* call per return for now; more is a
-		// diagnostic (the rewriter's single-shape-per-statement edit
-		// model would need ordering logic to support parallel binds).
-		var shape callShape
-		found := false
+		// `return q.Try(a()) * q.Try(b()), nil` work: each q.* call
+		// binds to its own `_qTmpN` with its own bubble check, and
+		// the final return keeps the rest of the expression verbatim
+		// with each `_qTmpN` spliced into its call's source span.
+		var subs []qSubCall
 		var walkErr error
 		for _, res := range s.Results {
 			ast.Inspect(res, func(n ast.Node) bool {
@@ -374,23 +386,17 @@ func matchStatement(fset *token.FileSet, stmt ast.Stmt, alias string, fnType *as
 				if !ok {
 					return true
 				}
-				sh, matched, err := classifyQCall(expr, alias)
+				sub, matched, err := classifyQCall(expr, alias)
 				if err != nil {
 					walkErr = err
 					return false
 				}
 				if matched {
-					if found {
-						walkErr = fmt.Errorf("multiple q.* calls in a single return statement are not yet supported; split into separate statements")
-						return false
-					}
-					found = true
-					shape = sh
+					subs = append(subs, sub)
 					// Stop descending — the matched call's inner sub-
 					// tree (InnerExpr for Try, MethodArgs for chain)
 					// is copied verbatim by the renderer; any q.* in
-					// there is out of scope and not worth flagging as
-					// a duplicate match.
+					// there is out of scope.
 					return false
 				}
 				return true
@@ -399,74 +405,76 @@ func matchStatement(fset *token.FileSet, stmt ast.Stmt, alias string, fnType *as
 				return callShape{}, false, walkErr
 			}
 		}
-		if !found {
+		if len(subs) == 0 {
 			return callShape{}, false, nil
 		}
-		shape.Stmt = stmt
-		shape.Form = formReturn
-		shape.EnclosingFuncType = fnType
-		return shape, true, nil
+		return callShape{
+			Stmt:              stmt,
+			Form:              formReturn,
+			Calls:             subs,
+			EnclosingFuncType: fnType,
+		}, true, nil
 	}
 	return callShape{}, false, nil
 }
 
 // classifyQCall examines a single expression and reports whether it is
-// one of the recognised q.* call shapes (bare or chain). Sets the
-// per-shape fields on the returned callShape but leaves Stmt, Form,
-// LHSText, and EnclosingFunc to the caller.
-func classifyQCall(expr ast.Expr, alias string) (callShape, bool, error) {
+// one of the recognised q.* call shapes (bare or chain). The per-call
+// fields are returned as a qSubCall; per-statement fields (Stmt,
+// Form, LHSExpr, EnclosingFuncType) are the caller's responsibility.
+func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
-		return callShape{}, false, nil
+		return qSubCall{}, false, nil
 	}
 
 	// Bare q.Try / q.NotNil.
 	if isSelector(call.Fun, alias, "Try") {
 		if len(call.Args) != 1 {
-			return callShape{}, false, fmt.Errorf("q.Try must take exactly one argument (a (T, error)-returning call); got %d", len(call.Args))
+			return qSubCall{}, false, fmt.Errorf("q.Try must take exactly one argument (a (T, error)-returning call); got %d", len(call.Args))
 		}
 		if _, ok := call.Args[0].(*ast.CallExpr); !ok {
-			return callShape{}, false, fmt.Errorf("q.Try's argument must itself be a call expression returning (T, error)")
+			return qSubCall{}, false, fmt.Errorf("q.Try's argument must itself be a call expression returning (T, error)")
 		}
-		return callShape{Family: familyTry, InnerExpr: call.Args[0], OuterCall: expr}, true, nil
+		return qSubCall{Family: familyTry, InnerExpr: call.Args[0], OuterCall: expr}, true, nil
 	}
 	if isSelector(call.Fun, alias, "NotNil") {
 		if len(call.Args) != 1 {
-			return callShape{}, false, fmt.Errorf("q.NotNil must take exactly one argument (a *T expression); got %d", len(call.Args))
+			return qSubCall{}, false, fmt.Errorf("q.NotNil must take exactly one argument (a *T expression); got %d", len(call.Args))
 		}
-		return callShape{Family: familyNotNil, InnerExpr: call.Args[0], OuterCall: expr}, true, nil
+		return qSubCall{Family: familyNotNil, InnerExpr: call.Args[0], OuterCall: expr}, true, nil
 	}
 
 	// Chain on q.TryE / q.NotNilE.
 	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 		entry, isEntry := sel.X.(*ast.CallExpr)
 		if !isEntry {
-			return callShape{}, false, nil
+			return qSubCall{}, false, nil
 		}
 		switch {
 		case isSelector(entry.Fun, alias, "TryE"):
 			if !chainMethods[sel.Sel.Name] {
-				return callShape{}, false, fmt.Errorf("q.TryE chain method %q not recognised; valid: Err, ErrF, Catch, Wrap, Wrapf", sel.Sel.Name)
+				return qSubCall{}, false, fmt.Errorf("q.TryE chain method %q not recognised; valid: Err, ErrF, Catch, Wrap, Wrapf", sel.Sel.Name)
 			}
 			if len(entry.Args) != 1 {
-				return callShape{}, false, fmt.Errorf("q.TryE must take exactly one argument (a (T, error)-returning call); got %d", len(entry.Args))
+				return qSubCall{}, false, fmt.Errorf("q.TryE must take exactly one argument (a (T, error)-returning call); got %d", len(entry.Args))
 			}
 			if _, ok := entry.Args[0].(*ast.CallExpr); !ok {
-				return callShape{}, false, fmt.Errorf("q.TryE's argument must itself be a call expression returning (T, error)")
+				return qSubCall{}, false, fmt.Errorf("q.TryE's argument must itself be a call expression returning (T, error)")
 			}
-			return callShape{Family: familyTryE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Args[0], OuterCall: expr}, true, nil
+			return qSubCall{Family: familyTryE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Args[0], OuterCall: expr}, true, nil
 		case isSelector(entry.Fun, alias, "NotNilE"):
 			if !chainMethods[sel.Sel.Name] {
-				return callShape{}, false, fmt.Errorf("q.NotNilE chain method %q not recognised; valid: Err, ErrF, Catch, Wrap, Wrapf", sel.Sel.Name)
+				return qSubCall{}, false, fmt.Errorf("q.NotNilE chain method %q not recognised; valid: Err, ErrF, Catch, Wrap, Wrapf", sel.Sel.Name)
 			}
 			if len(entry.Args) != 1 {
-				return callShape{}, false, fmt.Errorf("q.NotNilE must take exactly one argument (a *T expression); got %d", len(entry.Args))
+				return qSubCall{}, false, fmt.Errorf("q.NotNilE must take exactly one argument (a *T expression); got %d", len(entry.Args))
 			}
-			return callShape{Family: familyNotNilE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Args[0], OuterCall: expr}, true, nil
+			return qSubCall{Family: familyNotNilE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Args[0], OuterCall: expr}, true, nil
 		}
 	}
 
-	return callShape{}, false, nil
+	return qSubCall{}, false, nil
 }
 
 // isSelector reports whether expr has the shape `<alias>.<name>`.
