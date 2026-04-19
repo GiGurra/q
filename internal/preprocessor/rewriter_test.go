@@ -254,7 +254,8 @@ func TestRewriteFixtureSource_NoExceptions(t *testing.T) {
 					// q.TryE(...) sub-call, which we'd catch on this
 					// inner pass.
 					switch sel.Sel.Name {
-					case "Try", "TryE", "NotNil", "NotNilE":
+					case "Try", "TryE", "NotNil", "NotNilE",
+						"Check", "CheckE", "Open", "OpenE":
 						t.Errorf("rewriter left a q.%s call un-erased at %s",
 							sel.Sel.Name, fset.Position(call.Pos()))
 					}
