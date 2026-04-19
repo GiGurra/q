@@ -1,5 +1,9 @@
 # q — the question-mark operator for Go
 
+[![CI Status](https://github.com/GiGurra/q/actions/workflows/ci.yml/badge.svg)](https://github.com/GiGurra/q/actions/workflows/ci.yml)
+[![Go Report Card](https://goreportcard.com/badge/github.com/GiGurra/q)](https://goreportcard.com/report/github.com/GiGurra/q)
+[![Docs](https://img.shields.io/badge/docs-gigurra.github.io%2Fq-blue)](https://gigurra.github.io/q/)
+
 > **Experimental** — APIs and internals may change. Use at your own risk.
 
 `q` gives Go the flat error-handling shape Rust has with `?` and Swift has with `try`. Each `q.Try(...)` / `q.NotNil(...)` / chain call is rewritten at compile time into the conventional `if err != nil { return …, err }` shape. Call sites read flat, generated code is identical to hand-written error forwarding, runtime overhead is zero.
