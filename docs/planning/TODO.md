@@ -8,11 +8,12 @@ The persistent backlog for `q`. Mirrors the in-session task list so a fresh conv
 
 ### High-impact gaps in the public surface
 
-- [ ] **#16 — Support return-position, nested-in-call, multi-LHS.** Currently rejected with a diagnostic.
-  - **return-position** (`return q.Try(call())`): bind to a temp before the return, then restructure the return to use the temp. Tricky when the return has multiple values mixing q.* with regular expressions.
-  - **nested-in-call** (`f(q.Try(call()))`): hoist the q.* call into a preceding statement that binds to a temp, then rewrite the outer call to reference the temp. Needs careful AST manipulation around statement insertion.
+- [ ] **#16 — Remaining shape gaps: nested-in-call (non-return), multi-LHS.** Return-position is shipped (see Done); these two are what's left.
+  - **nested-in-call** (`f(q.Try(call()))`): hoist the q.* call into a preceding statement that binds to a temp, then rewrite the outer call to reference the temp. Needs careful AST manipulation around statement insertion. More general than the return-position case because we can't build a replacement statement tail — we have to *add* a preceding statement and edit the outer call's sub-expression in place.
   - **multi-LHS** (`v, w := q.Try(call())`): only meaningful if call returns 3+ values, e.g. q.Try3 family. Probably out of scope until we add multi-T support to the runtime helpers.
-  - Order of attack: return-position is most common in real code; nested-in-call second; multi-LHS depends on whether we add Try3/etc. Each shape gets a fixture under `internal/preprocessor/testdata/cases/`.
+  - Each shape gets a fixture under `internal/preprocessor/testdata/cases/`.
+
+- [ ] **#19 — q.* inside closures / anonymous functions.** Might already work since the scanner walks nested blocks and the rewriter derives zero-values from the EnclosingFunc's Results. But there's no fixture proving it, and the EnclosingFunc is always the outer `*ast.FuncDecl` — not the inner `*ast.FuncLit`, which has its own result list. An anonymous function with a different return shape than its enclosing FuncDecl would produce wrong zero-values in the bubble. Especially important for the `q.TryManage` defer-on-success design (#17), which inherently runs inside a deferred closure. Actions: write fixtures for `func() error { q.Try(...); return nil }` as a variable, as a defer target, and returned from an enclosing function. Fix the EnclosingFunc tracking to use the nearest-enclosing FuncLit *or* FuncDecl.
 
 - [ ] **#15 — Add `q.Check` (or final-named) for error-only returns.** Public-surface gap: `q.Try` requires `(T, error)`. For functions returning only `error` (`file.Close()`, `db.Ping()`, `validate(input)`), the user has to hand-write `if err := f(); err != nil { return ..., err }`.
   - Proposed name: `q.Check(fn())` (Johan suggested `q.TryValidate`; alternatives `Bail` / `OnErr`). Plus chain entry `q.CheckE(fn()).Wrapf` / `.Err` / `.ErrF` / `.Catch`.
@@ -37,6 +38,7 @@ The persistent backlog for `q`. Mirrors the in-session task list so a fresh conv
 
 A short ledger of what's shipped — newest first. Look at `git log` for the full story.
 
+- **#16a — Return-position rewrite.** New `formReturn` form: the scanner walks each return result's AST subtree for q.* calls (anywhere, not just top-level), and the rewriter binds the q.* call to `_qTmp<N>`, emits the usual bubble block, and rebuilds the final return with `_qTmp<N>` spliced into the q.* call's source span. Unlocks `return q.Try(strconv.Atoi(s)) * 2, nil`, `return "tag", q.NotNil(p), nil`, `return q.TryE(call()).Wrap("..."), nil`. Fixture: `return_position_run_ok`. Remaining sub-tasks (nested-in-call outside returns, multi-LHS) are tracked as the reshaped #16.
 - **#14 — Audit + extend runtime-behavior coverage.** Three new fixtures verify the runtime behavior: `multi_call_per_func_run_ok` (counter independence + short-circuit so a later q.* call doesn't run when an earlier one bubbles), `error_chain_unwrap_run_ok` (`errors.Is` / `errors.As` traverse `Wrap` / `Wrapf` correctly), `generics_run_ok` (q.Try / q.NotNil work in `func[T any]` and on methods of `Box[T]`). Plus a unit test `TestRewriteFixtureSource_NoExceptions` that AST-walks every fixture's rewritten output and asserts no `q.Try` / `q.TryE` / `q.NotNil` / `q.NotNilE` call survives the rewrite.
 - **#18 — Scanner: walk nested blocks (if/for/switch/range/select).** Bug surfaced by the `generics_run_ok` fixture. Scanner now recursively descends into every BlockStmt-bearing statement (if/else, for, range, switch, type-switch, select, case clauses, labelled stmts). `findQReference` is bounded to the leaf statement so container statements don't double-flag a recognised inner shape as "unsupported".
 - **#13 — q.Try shape gaps.** Define / assign / discard forms now all work for the Try and NotNil families, plus every chain method. Verified by `forms_assign_discard_run_ok`.

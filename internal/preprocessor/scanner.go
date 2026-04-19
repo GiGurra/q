@@ -48,12 +48,14 @@ const (
 //	formDefine  -> v   := q.Try(call())   (declares LHS via :=)
 //	formAssign  -> v    = q.Try(call())   (assigns to existing LHS)
 //	formDiscard -> 	      q.Try(call())   (ExprStmt; bubbles, drops T/p)
+//	formReturn  -> return …, q.Try(call()), …   (q.* is one top-level result)
 type form int
 
 const (
 	formDefine form = iota
 	formAssign
 	formDiscard
+	formReturn
 )
 
 // callShape describes one recognised q.* call site, captured at scan
@@ -91,6 +93,12 @@ type callShape struct {
 	// returning expression for the NotNil family. The rewriter copies
 	// its source span verbatim into the bind line.
 	InnerExpr ast.Expr
+
+	// OuterCall is the q.* call expression (bare `q.Try(...)` or the
+	// outer chain call `q.TryE(...).Method(...)`). Used by formReturn
+	// to splice `_qTmpN` into the reconstructed final return in place
+	// of the q.* sub-expression.
+	OuterCall ast.Expr
 
 	// EnclosingFunc is the FuncDecl containing this call. Its
 	// Type.Results gives the rewriter the result types from which to
@@ -158,7 +166,7 @@ func walkBlock(fset *token.FileSet, path string, block *ast.BlockStmt, alias str
 			*shapes = append(*shapes, shape)
 		} else if pos := findQReference(stmt, alias); pos.IsValid() {
 			*diags = append(*diags, diagAt(fset, path, pos,
-				fmt.Sprintf("unsupported q.* call shape; supported: `v := %s.Try/NotNil(...)`, `v = %s.Try/NotNil(...)`, `%s.Try/NotNil(...)` (discard), with optional .Err / .ErrF / .Catch / .Wrap / .Wrapf chain methods on the *E entries", alias, alias, alias)))
+				fmt.Sprintf("unsupported q.* call shape; supported: `v := %s.Try/NotNil(...)`, `v = %s.Try/NotNil(...)`, `%s.Try/NotNil(...)` (discard), `return %s.Try/NotNil(...), …` (q.* as one top-level return result), with optional .Err / .ErrF / .Catch / .Wrap / .Wrapf chain methods on the *E entries", alias, alias, alias, alias)))
 		}
 		walkChildBlocks(fset, path, stmt, alias, fn, shapes, diags)
 	}
@@ -205,7 +213,7 @@ func walkChildBlocks(fset *token.FileSet, path string, stmt ast.Stmt, alias stri
 				*shapes = append(*shapes, subShape)
 			} else if pos := findQReference(child, alias); pos.IsValid() {
 				*diags = append(*diags, diagAt(fset, path, pos,
-					fmt.Sprintf("unsupported q.* call shape; supported: `v := %s.Try/NotNil(...)`, `v = %s.Try/NotNil(...)`, `%s.Try/NotNil(...)` (discard), with optional .Err / .ErrF / .Catch / .Wrap / .Wrapf chain methods on the *E entries", alias, alias, alias)))
+					fmt.Sprintf("unsupported q.* call shape; supported: `v := %s.Try/NotNil(...)`, `v = %s.Try/NotNil(...)`, `%s.Try/NotNil(...)` (discard), `return %s.Try/NotNil(...), …` (q.* as one top-level return result), with optional .Err / .ErrF / .Catch / .Wrap / .Wrapf chain methods on the *E entries", alias, alias, alias, alias)))
 			}
 			walkChildBlocks(fset, path, child, alias, fn, shapes, diags)
 		}
@@ -218,7 +226,7 @@ func walkChildBlocks(fset *token.FileSet, path string, stmt ast.Stmt, alias stri
 				*shapes = append(*shapes, subShape)
 			} else if pos := findQReference(child, alias); pos.IsValid() {
 				*diags = append(*diags, diagAt(fset, path, pos,
-					fmt.Sprintf("unsupported q.* call shape; supported: `v := %s.Try/NotNil(...)`, `v = %s.Try/NotNil(...)`, `%s.Try/NotNil(...)` (discard), with optional .Err / .ErrF / .Catch / .Wrap / .Wrapf chain methods on the *E entries", alias, alias, alias)))
+					fmt.Sprintf("unsupported q.* call shape; supported: `v := %s.Try/NotNil(...)`, `v = %s.Try/NotNil(...)`, `%s.Try/NotNil(...)` (discard), `return %s.Try/NotNil(...), …` (q.* as one top-level return result), with optional .Err / .ErrF / .Catch / .Wrap / .Wrapf chain methods on the *E entries", alias, alias, alias, alias)))
 			}
 			walkChildBlocks(fset, path, child, alias, fn, shapes, diags)
 		}
@@ -302,6 +310,61 @@ func matchStatement(fset *token.FileSet, stmt ast.Stmt, alias string, fn *ast.Fu
 		shape.Form = formDiscard
 		shape.EnclosingFunc = fn
 		return shape, true, nil
+
+	case *ast.ReturnStmt:
+		// Find a q.* call anywhere inside the return's result
+		// expressions — not just top-level. This makes shapes like
+		// `return q.Try(call()) * 2, nil` work: the rewriter binds the
+		// q.* call to `_qTmpN` and the final return keeps the rest of
+		// the expression verbatim with `_qTmpN` spliced in.
+		//
+		// At most one q.* call per return for now; more is a
+		// diagnostic (the rewriter's single-shape-per-statement edit
+		// model would need ordering logic to support parallel binds).
+		var shape callShape
+		found := false
+		var walkErr error
+		for _, res := range s.Results {
+			ast.Inspect(res, func(n ast.Node) bool {
+				if walkErr != nil {
+					return false
+				}
+				expr, ok := n.(ast.Expr)
+				if !ok {
+					return true
+				}
+				sh, matched, err := classifyQCall(expr, alias)
+				if err != nil {
+					walkErr = err
+					return false
+				}
+				if matched {
+					if found {
+						walkErr = fmt.Errorf("multiple q.* calls in a single return statement are not yet supported; split into separate statements")
+						return false
+					}
+					found = true
+					shape = sh
+					// Stop descending — the matched call's inner sub-
+					// tree (InnerExpr for Try, MethodArgs for chain)
+					// is copied verbatim by the renderer; any q.* in
+					// there is out of scope and not worth flagging as
+					// a duplicate match.
+					return false
+				}
+				return true
+			})
+			if walkErr != nil {
+				return callShape{}, false, walkErr
+			}
+		}
+		if !found {
+			return callShape{}, false, nil
+		}
+		shape.Stmt = stmt
+		shape.Form = formReturn
+		shape.EnclosingFunc = fn
+		return shape, true, nil
 	}
 	return callShape{}, false, nil
 }
@@ -324,13 +387,13 @@ func classifyQCall(expr ast.Expr, alias string) (callShape, bool, error) {
 		if _, ok := call.Args[0].(*ast.CallExpr); !ok {
 			return callShape{}, false, fmt.Errorf("q.Try's argument must itself be a call expression returning (T, error)")
 		}
-		return callShape{Family: familyTry, InnerExpr: call.Args[0]}, true, nil
+		return callShape{Family: familyTry, InnerExpr: call.Args[0], OuterCall: expr}, true, nil
 	}
 	if isSelector(call.Fun, alias, "NotNil") {
 		if len(call.Args) != 1 {
 			return callShape{}, false, fmt.Errorf("q.NotNil must take exactly one argument (a *T expression); got %d", len(call.Args))
 		}
-		return callShape{Family: familyNotNil, InnerExpr: call.Args[0]}, true, nil
+		return callShape{Family: familyNotNil, InnerExpr: call.Args[0], OuterCall: expr}, true, nil
 	}
 
 	// Chain on q.TryE / q.NotNilE.
@@ -350,7 +413,7 @@ func classifyQCall(expr ast.Expr, alias string) (callShape, bool, error) {
 			if _, ok := entry.Args[0].(*ast.CallExpr); !ok {
 				return callShape{}, false, fmt.Errorf("q.TryE's argument must itself be a call expression returning (T, error)")
 			}
-			return callShape{Family: familyTryE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Args[0]}, true, nil
+			return callShape{Family: familyTryE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Args[0], OuterCall: expr}, true, nil
 		case isSelector(entry.Fun, alias, "NotNilE"):
 			if !chainMethods[sel.Sel.Name] {
 				return callShape{}, false, fmt.Errorf("q.NotNilE chain method %q not recognised; valid: Err, ErrF, Catch, Wrap, Wrapf", sel.Sel.Name)
@@ -358,7 +421,7 @@ func classifyQCall(expr ast.Expr, alias string) (callShape, bool, error) {
 			if len(entry.Args) != 1 {
 				return callShape{}, false, fmt.Errorf("q.NotNilE must take exactly one argument (a *T expression); got %d", len(entry.Args))
 			}
-			return callShape{Family: familyNotNilE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Args[0]}, true, nil
+			return callShape{Family: familyNotNilE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Args[0], OuterCall: expr}, true, nil
 		}
 	}
 

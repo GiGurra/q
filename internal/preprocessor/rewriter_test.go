@@ -321,6 +321,121 @@ func atoi(s string) (int, error) { return 0, nil }
 	}
 }
 
+func TestRewriteTryReturn_BasicShape(t *testing.T) {
+	// `return q.Try(call()), nil` — q.* sits as one top-level result in
+	// a return statement. The rewriter binds to `_qTmp1`, emits the
+	// bubble block, and reconstructs the return with `_qTmp1` spliced
+	// in place of the q.Try(...) sub-expression.
+	src := `package p
+
+import "github.com/GiGurra/q/pkg/q"
+
+func parse(s string) (int, error) {
+	return q.Try(atoi(s)), nil
+}
+
+func atoi(s string) (int, error) { return 0, nil }
+`
+	got := mustRewrite(t, src)
+	wants := []string{
+		"_qTmp1, _qErr1 := atoi(s)",
+		"if _qErr1 != nil {",
+		"return *new(int), _qErr1",
+		"return _qTmp1, nil",
+	}
+	for _, w := range wants {
+		if !strings.Contains(got, w) {
+			t.Errorf("missing %q.\n--- output:\n%s", w, got)
+		}
+	}
+	if strings.Contains(got, "q.Try(") {
+		t.Errorf("q.Try call survived rewrite.\n--- output:\n%s", got)
+	}
+}
+
+func TestRewriteTryReturn_NestedInExpression(t *testing.T) {
+	// `return q.Try(call()) * 2, nil` — q.* is nested inside an
+	// arithmetic expression in the first return result. The rewriter
+	// must still recognise it, bind the q.Try call to `_qTmp1`, and
+	// rebuild the return with just that sub-expression substituted.
+	src := `package p
+
+import "github.com/GiGurra/q/pkg/q"
+
+func parseDouble(s string) (int, error) {
+	return q.Try(atoi(s)) * 2, nil
+}
+
+func atoi(s string) (int, error) { return 0, nil }
+`
+	got := mustRewrite(t, src)
+	wants := []string{
+		"_qTmp1, _qErr1 := atoi(s)",
+		"return _qTmp1 * 2, nil",
+	}
+	for _, w := range wants {
+		if !strings.Contains(got, w) {
+			t.Errorf("missing %q.\n--- output:\n%s", w, got)
+		}
+	}
+	if strings.Contains(got, "q.Try(") {
+		t.Errorf("q.Try call survived rewrite.\n--- output:\n%s", got)
+	}
+}
+
+func TestRewriteTryEReturn_WrapChain(t *testing.T) {
+	// Chain method on a return-position q.TryE: error-branch wraps via
+	// fmt.Errorf, success-branch substitutes the temp into the rebuilt
+	// return.
+	src := `package p
+
+import "github.com/GiGurra/q/pkg/q"
+
+func parse(s string) (int, error) {
+	return q.TryE(atoi(s)).Wrap("parsing"), nil
+}
+
+func atoi(s string) (int, error) { return 0, nil }
+`
+	got := mustRewrite(t, src)
+	wants := []string{
+		"_qTmp1, _qErr1 := atoi(s)",
+		`fmt.Errorf("%s: %w", "parsing", _qErr1)`,
+		"return _qTmp1, nil",
+	}
+	for _, w := range wants {
+		if !strings.Contains(got, w) {
+			t.Errorf("missing %q.\n--- output:\n%s", w, got)
+		}
+	}
+}
+
+func TestRewriteNotNilReturn_MidPosition(t *testing.T) {
+	// q.NotNil as the middle of three return results. The final return
+	// should preserve the surrounding expressions verbatim and only
+	// substitute the q.NotNil(p) span with _qTmp1.
+	src := `package p
+
+import "github.com/GiGurra/q/pkg/q"
+
+func pick(p *int) (string, *int, error) {
+	return "tag", q.NotNil(p), nil
+}
+`
+	got := mustRewrite(t, src)
+	wants := []string{
+		"_qTmp1 := p",
+		"if _qTmp1 == nil {",
+		"return *new(string), *new(*int), q.ErrNil",
+		`return "tag", _qTmp1, nil`,
+	}
+	for _, w := range wants {
+		if !strings.Contains(got, w) {
+			t.Errorf("missing %q.\n--- output:\n%s", w, got)
+		}
+	}
+}
+
 func TestRewriteTryAssign_NoQImport_NoChange(t *testing.T) {
 	src := `package p
 

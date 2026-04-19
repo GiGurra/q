@@ -1,0 +1,8 @@
+parseDouble.ok: ok=42
+parseDouble.bad: err=strconv.Atoi: parsing "abc": invalid syntax
+parseWrap.ok: ok=7
+parseWrap.bad: err=parseWrap: strconv.Atoi: parsing "xyz": invalid syntax
+pickMiddle.ok: ok tag=tag val=9
+pickMiddle.bad: err=q: nil value
+getOrFail.ok: 9
+getOrFail.bad: err=missing

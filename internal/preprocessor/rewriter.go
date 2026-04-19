@@ -94,21 +94,53 @@ func rewriteFile(fset *token.FileSet, file *ast.File, src []byte, shapes []callS
 // Returns the replacement text, flags indicating whether fmt / errors
 // are used by the replacement (the caller injects imports if so), and
 // any error.
+//
+// For formReturn shapes, the renderer builds the usual bind + bubble
+// block; this wrapper appends the reconstructed final return using
+// `_qTmp<N>` in place of the q.* sub-expression.
 func renderShape(fset *token.FileSet, src []byte, sh callShape, counter int, alias string) (string, bool, bool, error) {
+	var (
+		text                   string
+		fmtUsed, errorsUsed    bool
+		err                    error
+	)
 	switch sh.Family {
 	case familyTry:
-		text, err := renderTry(fset, src, sh, counter)
-		return text, false, false, err
+		text, err = renderTry(fset, src, sh, counter)
 	case familyTryE:
-		text, fmtUsed, err := renderTryE(fset, src, sh, counter)
-		return text, fmtUsed, false, err
+		text, fmtUsed, err = renderTryE(fset, src, sh, counter)
 	case familyNotNil:
-		text, err := renderNotNil(fset, src, sh, counter, alias)
-		return text, false, false, err
+		text, err = renderNotNil(fset, src, sh, counter, alias)
 	case familyNotNilE:
-		return renderNotNilE(fset, src, sh, counter)
+		text, fmtUsed, errorsUsed, err = renderNotNilE(fset, src, sh, counter)
+	default:
+		return "", false, false, fmt.Errorf("renderShape: unknown family %v", sh.Family)
 	}
-	return "", false, false, fmt.Errorf("renderShape: unknown family %v", sh.Family)
+	if err != nil {
+		return "", false, false, err
+	}
+	if sh.Form == formReturn {
+		text += finalReturnSuffix(fset, src, sh, counter)
+	}
+	return text, fmtUsed, errorsUsed, nil
+}
+
+// finalReturnSuffix builds the `\n<indent>return <reconstructed>`
+// tail for a formReturn shape. The reconstructed return is the
+// original return statement's source text with the q.* outer call
+// span replaced by `_qTmp<N>`. This preserves the spelling of every
+// other result expression (user comments, literal formatting,
+// implicit conversions) verbatim.
+func finalReturnSuffix(fset *token.FileSet, src []byte, sh callShape, counter int) string {
+	indent := indentOf(src, fset.Position(sh.Stmt.Pos()).Offset)
+	retStart := fset.Position(sh.Stmt.Pos()).Offset
+	retEnd := fset.Position(sh.Stmt.End()).Offset
+	retText := string(src[retStart:retEnd])
+	callStartRel := fset.Position(sh.OuterCall.Pos()).Offset - retStart
+	callEndRel := fset.Position(sh.OuterCall.End()).Offset - retStart
+	tmp := fmt.Sprintf("_qTmp%d", counter)
+	reconstructed := retText[:callStartRel] + tmp + retText[callEndRel:]
+	return "\n" + indent + reconstructed
 }
 
 // renderTry produces the replacement for bare q.Try across all three
@@ -119,7 +151,7 @@ func renderTry(fset *token.FileSet, src []byte, sh callShape, counter int) (stri
 	if err != nil {
 		return "", err
 	}
-	bindLine := tryBindLine(fset, src, sh, errVar, innerText, indent)
+	bindLine := tryBindLine(fset, src, sh, errVar, innerText, indent, counter)
 	zeros[len(zeros)-1] = errVar
 	return assembleErrBlock(bindLine, errVar, indent, zeros), nil
 }
@@ -132,7 +164,7 @@ func renderTryE(fset *token.FileSet, src []byte, sh callShape, counter int) (str
 	if err != nil {
 		return "", false, err
 	}
-	bindLine := tryBindLine(fset, src, sh, errVar, innerText, indent)
+	bindLine := tryBindLine(fset, src, sh, errVar, innerText, indent, counter)
 
 	switch sh.Method {
 	case "Err":
@@ -287,13 +319,14 @@ func commonRenderInputs(fset *token.FileSet, src []byte, sh callShape, counter i
 }
 
 // tryBindLine builds the bind line for the Try family across all
-// three forms:
+// four forms:
 //
 //	formDefine:  v, _qErrN := <inner>
 //	formAssign:  var _qErrN error
 //	             v, _qErrN = <inner>
 //	formDiscard: _, _qErrN := <inner>
-func tryBindLine(fset *token.FileSet, src []byte, sh callShape, errVar, innerText, indent string) string {
+//	formReturn:  _qTmpN, _qErrN := <inner>
+func tryBindLine(fset *token.FileSet, src []byte, sh callShape, errVar, innerText, indent string, counter int) string {
 	switch sh.Form {
 	case formDefine:
 		return fmt.Sprintf("%s, %s := %s", exprText(fset, src, sh.LHSExpr), errVar, innerText)
@@ -301,6 +334,8 @@ func tryBindLine(fset *token.FileSet, src []byte, sh callShape, errVar, innerTex
 		return fmt.Sprintf("var %s error\n%s%s, %s = %s", errVar, indent, exprText(fset, src, sh.LHSExpr), errVar, innerText)
 	case formDiscard:
 		return fmt.Sprintf("_, %s := %s", errVar, innerText)
+	case formReturn:
+		return fmt.Sprintf("_qTmp%d, %s := %s", counter, errVar, innerText)
 	}
 	return fmt.Sprintf("/* unsupported form %v */", sh.Form)
 }
@@ -308,7 +343,9 @@ func tryBindLine(fset *token.FileSet, src []byte, sh callShape, errVar, innerTex
 // nilBindLineAndCheck builds the bind line for the NotNil family and
 // the variable name to test for nil. For define and assign forms the
 // LHS itself is the check variable; for discard, a fresh _qVal<N>
-// temporary holds the value being tested.
+// temporary holds the value being tested; for return, `_qTmp<N>`
+// doubles as the check var and the value spliced into the final
+// return.
 func nilBindLineAndCheck(fset *token.FileSet, src []byte, sh callShape, innerText string, counter int) (bindLine, checkVar string) {
 	switch sh.Form {
 	case formDefine:
@@ -319,6 +356,9 @@ func nilBindLineAndCheck(fset *token.FileSet, src []byte, sh callShape, innerTex
 		return fmt.Sprintf("%s = %s", lhs, innerText), lhs
 	case formDiscard:
 		tmp := fmt.Sprintf("_qVal%d", counter)
+		return fmt.Sprintf("%s := %s", tmp, innerText), tmp
+	case formReturn:
+		tmp := fmt.Sprintf("_qTmp%d", counter)
 		return fmt.Sprintf("%s := %s", tmp, innerText), tmp
 	}
 	return "/* unsupported form */", "_"
