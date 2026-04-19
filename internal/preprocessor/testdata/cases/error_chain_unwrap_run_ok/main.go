@@ -42,6 +42,35 @@ func wrappedNoF(mode string) (int, error) {
 	return v, nil
 }
 
+// openConn returns a toy conn plus one of the failure modes. Same
+// shape as inner but producing *Conn instead of int so we can exercise
+// q.OpenE.
+type Conn struct{ id int }
+
+func (*Conn) Close() {}
+
+func openConn(mode string) (*Conn, error) {
+	switch mode {
+	case "eof":
+		return nil, io.EOF
+	case "syntax":
+		return nil, &SyntaxErr{Token: "[bad]"}
+	case "anon":
+		return nil, errors.New("anonymous failure")
+	}
+	return &Conn{id: 1}, nil
+}
+
+func openWrappedF(mode string) (*Conn, error) {
+	c := q.OpenE(openConn(mode)).Wrapf("opening %q", mode).Release((*Conn).Close)
+	return c, nil
+}
+
+func openWrappedNoF(mode string) (*Conn, error) {
+	c := q.OpenE(openConn(mode)).Wrap("opening").Release((*Conn).Close)
+	return c, nil
+}
+
 func main() {
 	// errors.Is should find io.EOF through the wrap.
 	_, err := wrappedF("eof")
@@ -77,4 +106,23 @@ func main() {
 	// Sanity: success path leaves err nil.
 	n, err := wrappedF("ok")
 	fmt.Printf("Wrapf success: n=%d err=%v\n", n, err)
+
+	// Same chain checks for q.OpenE — the wrap shape is identical to
+	// TryE's, so errors.Is / errors.As must still traverse correctly.
+	_, err = openWrappedF("eof")
+	fmt.Printf("Open Wrapf+Is(io.EOF): %v\n", errors.Is(err, io.EOF))
+
+	_, err = openWrappedNoF("eof")
+	fmt.Printf("Open Wrap+Is(io.EOF):  %v\n", errors.Is(err, io.EOF))
+
+	_, err = openWrappedF("syntax")
+	var osErr *SyntaxErr
+	if errors.As(err, &osErr) {
+		fmt.Printf("Open Wrapf+As(*SyntaxErr): token=%s\n", osErr.Token)
+	} else {
+		fmt.Println("Open Wrapf+As(*SyntaxErr): MISSED")
+	}
+
+	_, err = openWrappedF("anon")
+	fmt.Printf("Open Wrapf message: %s\n", err)
 }

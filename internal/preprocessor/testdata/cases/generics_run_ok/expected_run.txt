@@ -5,3 +5,7 @@ hello <nil>
 42 <nil>
 0 boom
 ok <nil>
+openGeneric.ok v="abc" err=<nil> log=[abc]
+openGeneric.bad v="" err=nope log=[]
+openHolder.ok v="held" err=<nil> log=[held]
+openHolder.bad v="" err=hold failed log=[]

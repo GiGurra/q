@@ -10,3 +10,7 @@ nestedClosures.ok: ok=6
 nestedClosures.bad: err=strconv.Atoi: parsing "xyz": invalid syntax
 closureChainWrap.ok: ok=8
 closureChainWrap.bad: err=inner: strconv.Atoi: parsing "pqr": invalid syntax
+openInClosure.ok: ok
+openInClosure.ok log=[71]
+openInClosure.bad: err=makeBox failed
+openInClosure.bad log=[]

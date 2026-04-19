@@ -87,6 +87,39 @@ func closureChainWrap(s string) (int, error) {
 	return parse(s)
 }
 
+// q.Open inside a closure. The deferred cleanup must register on the
+// closure's own scope (fire when the closure returns), not on the
+// outer function. closeTag is appended per-invocation so the caller
+// can verify both the bubble path and the defer path by reading the
+// log at the end.
+type Box struct{ id int }
+
+var closureCloseLog []int
+
+func trackClose(b *Box) {
+	closureCloseLog = append(closureCloseLog, b.id)
+}
+
+// openInClosure takes fn to control whether the inner Open fails.
+// On success the closure's defer fires, appending to closureCloseLog.
+// On failure the closure returns the error without running defer
+// (no resource was acquired); callers can observe both paths.
+func openInClosure(id int, fail bool) error {
+	run := func() error {
+		box := q.Open(makeBox(id, fail)).Release(trackClose)
+		_ = box
+		return nil
+	}
+	return run()
+}
+
+func makeBox(id int, fail bool) (*Box, error) {
+	if fail {
+		return nil, errors.New("makeBox failed")
+	}
+	return &Box{id: id}, nil
+}
+
 func report(name string, n int, err error) {
 	if err != nil {
 		fmt.Printf("%s: err=%s\n", name, err)
@@ -129,4 +162,11 @@ func main() {
 	report("closureChainWrap.ok", n, err)
 	n, err = closureChainWrap("pqr")
 	report("closureChainWrap.bad", n, err)
+
+	closureCloseLog = closureCloseLog[:0]
+	reportE("openInClosure.ok", openInClosure(71, false))
+	fmt.Printf("openInClosure.ok log=%v\n", closureCloseLog)
+	closureCloseLog = closureCloseLog[:0]
+	reportE("openInClosure.bad", openInClosure(72, true))
+	fmt.Printf("openInClosure.bad log=%v\n", closureCloseLog)
 }

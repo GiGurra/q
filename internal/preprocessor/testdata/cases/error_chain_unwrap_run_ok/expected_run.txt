@@ -5,3 +5,7 @@ Wrap+As(*SyntaxErr):  token=[bad]
 Wrapf message: processing "anon": anonymous failure
 Wrap message:  processing: anonymous failure
 Wrapf success: n=42 err=<nil>
+Open Wrapf+Is(io.EOF): true
+Open Wrap+Is(io.EOF):  true
+Open Wrapf+As(*SyntaxErr): token=[bad]
+Open Wrapf message: opening "anon": anonymous failure
