@@ -1,0 +1,37 @@
+version: '3'
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+
+  build:
+    desc: Build all packages
+    cmds:
+      - go build ./...
+
+  install:
+    desc: Install the q binary
+    cmds:
+      - go install ./cmd/q/
+
+  test:
+    desc: Run all tests (the e2e harness builds its own cmd/q and owns GOCACHE)
+    cmds:
+      - go test ./... -count=1
+
+  test:unit:
+    desc: Run fast AST-level tests, skipping the e2e fixture harness
+    cmds:
+      - go test ./internal/preprocessor/ -skip '^(TestFixtures|TestChainAndThen_|TestLinkGate)' -count=1
+
+  test:e2e:
+    desc: Run the e2e fixture harness (builds cmd/q, runs every testdata/cases/* fixture, plus chain and link-gate tests)
+    cmds:
+      - go test ./internal/preprocessor/ -run '^(TestFixtures|TestChainAndThen_|TestLinkGate)' -count=1
+
+  clean:
+    desc: Remove build artifacts
+    cmds:
+      - go clean ./...
