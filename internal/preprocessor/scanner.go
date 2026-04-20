@@ -154,6 +154,16 @@ var chainMethods = map[string]bool{
 	"Wrapf": true,
 }
 
+// qRuntimeHelpers is the set of q.* function names whose call sites
+// are left untouched by the preprocessor — they have real bodies
+// and execute at runtime. Scanner's "unsupported q.* shape"
+// diagnostic path (findQReference / qCallRootPos) ignores these
+// so a standalone `q.ToErr(...)` call doesn't trip the fallback
+// flag.
+var qRuntimeHelpers = map[string]bool{
+	"ToErr": true,
+}
+
 // scanFile walks one parsed source file and returns the list of
 // recognised q.* call sites it contains, plus diagnostics for any
 // q.* calls that did not match a recognised shape.
@@ -763,24 +773,40 @@ func findQReference(stmt ast.Stmt, alias string) token.Pos {
 // qCallRootPos reports the position of call's outer selector when
 // call is rooted at the q alias (directly or through a chain),
 // or token.NoPos otherwise.
+//
+// Calls whose entry name (the segment immediately after the alias)
+// is in qRuntimeHelpers are treated as non-q for flagging purposes
+// — they are plain runtime helpers the preprocessor never rewrites,
+// so a standalone `q.ToErr(...)` should not trip the
+// "unsupported shape" diagnostic.
 func qCallRootPos(call *ast.CallExpr, alias string) token.Pos {
 	sel, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok {
 		return token.NoPos
 	}
+	// entryName tracks the segment immediately after the alias.
+	// For bare `q.Try(...)`, entryName == sel.Sel.Name. For a
+	// chain like `q.TryE(...).Wrap(...)`, entryName is picked up
+	// when the walk reaches the inner call (q.TryE) whose .X is
+	// the alias ident.
+	entryName := sel.Sel.Name
 	root := sel.X
 	for {
 		switch v := root.(type) {
 		case *ast.Ident:
-			if v.Name == alias {
-				return sel.Pos()
+			if v.Name != alias {
+				return token.NoPos
 			}
-			return token.NoPos
+			if qRuntimeHelpers[entryName] {
+				return token.NoPos
+			}
+			return sel.Pos()
 		case *ast.CallExpr:
 			innerSel, ok := v.Fun.(*ast.SelectorExpr)
 			if !ok {
 				return token.NoPos
 			}
+			entryName = innerSel.Sel.Name
 			root = innerSel.X
 		default:
 			return token.NoPos

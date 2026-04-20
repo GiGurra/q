@@ -47,4 +47,5 @@ nav:
     - Basic bubbling: examples/basic.md
     - Error shaping:  examples/error-shaping.md
     - Resources:      examples/resources.md
+  - Typed-nil guard: typed-nil-guard.md
   - Design: design.md

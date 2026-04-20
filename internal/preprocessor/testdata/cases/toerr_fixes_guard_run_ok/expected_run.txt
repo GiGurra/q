@@ -1,0 +1,2 @@
+ok: v=42 err_nil=true
+bad: err=bad input

@@ -180,6 +180,7 @@ Cross-package cases (e.g. a user wraps `q.Try` in their own helper) are out of s
 - **Phase 4 — return-position + nested-in-expression.** Done. `return q.Try(call()), nil` and nested q.* inside any expression via the hoist form. Multi-q-per-statement composes (including `q.Try(Foo(q.Try(Bar())))`).
 - **Phase 5 — error-only (Check) + resource-with-cleanup (Open).** Done. Adds `q.Check` / `q.CheckE` for functions returning just `error`, and `q.Open` / `q.OpenE` for defer-on-success cleanup.
 - **Phase 6 — closures / anonymous functions.** Done. Scanner recurses into `*ast.FuncLit` bodies; each uses its own `FuncType.Results` for the bubble.
+- **Phase 7 — typed-nil-interface guard.** Done. `internal/preprocessor/typecheck.go` runs a `go/types` pass over each user-package compile (importer backed by the compile's `-importcfg`) and requires every q.* error-slot type to be exactly the built-in `error` interface. Concrete types that satisfy `error` via method sets (e.g. `*MyErr`) are rejected with a diagnostic naming the offending type. Motivated by Go's implicit concrete-to-interface conversion: a nil `*MyErr` becomes a *non-nil* `error` interface value, so the rewritten `if err != nil` would fire for a notionally-nil error. Canonically mistake [#45 in 100 Go Mistakes](https://100go.co/#returning-a-nil-receiver-45). Ships with `q.ToErr`, a runtime adapter helper that unblocks legitimate `(T, *E)` callees by collapsing typed-nil to literal nil. See [Typed-nil guard](typed-nil-guard.md) for the user-facing spelling.
 
 Future / deferred:
 

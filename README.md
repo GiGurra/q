@@ -247,6 +247,18 @@ GOCACHE="$HOME/.cache/q-build" go clean -cache
 
 When the rewriter encounters an unsupported shape, it emits a `file:line:col: q: …` diagnostic in the same format Go's compiler uses (so editor click-through works) and aborts the build. Half-rewritten code never happens silently.
 
+### Typed-nil-interface guard
+
+The preprocessor runs a `go/types` pass over each user package and requires every q.* error slot to be the built-in `error` interface — not a concrete type that merely satisfies it. A callee like `func Foo() (int, *MyErr)` passed to `q.Try(Foo())` compiles fine under plain Go (`*MyErr` is assignable to `error`), but Go's implicit concrete-to-interface conversion makes a nil `*MyErr` appear as a *non-nil* `error` value — so the rewritten `if err != nil` would fire for a notionally-nil error. q rejects this at build time with a diagnostic naming the offending type.
+
+Three ways to fix a rejected build:
+
+1. Change the callee to return `error` (preferred).
+2. Use the `q.ToErr` adapter: `v := q.Try(q.ToErr(Foo()))`. Ships in `pkg/q`, also useful standalone.
+3. Convert explicitly at the call site via a closure.
+
+See [Typed-nil guard](https://gigurra.github.io/q/typed-nil-guard/) for the full story, including why this matches mistake #45 in *100 Go Mistakes*.
+
 </details>
 
 ## Related work

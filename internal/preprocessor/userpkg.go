@@ -18,6 +18,7 @@ package preprocessor
 
 import (
 	"fmt"
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
@@ -34,12 +35,51 @@ func planUserPackage(pkgPath string, toolArgs []string) (*Plan, error) {
 		return nil, nil
 	}
 
+	type parsed struct {
+		src    string
+		file   *ast.File
+		shapes []callShape
+	}
 	type rewritten struct {
 		origPath string
 		newPath  string
 	}
 
 	var diags []Diagnostic
+	var parsedFiles []parsed
+	var allShapes []callShape
+	var allFiles []*ast.File
+
+	fset := token.NewFileSet()
+	for _, src := range sources {
+		file, err := parser.ParseFile(fset, src, nil, parser.ParseComments)
+		if err != nil {
+			return nil, fmt.Errorf("parse %s: %w", src, err)
+		}
+		shapes, srcDiags, err := scanFile(fset, src, file)
+		if err != nil {
+			return nil, err
+		}
+		diags = append(diags, srcDiags...)
+		parsedFiles = append(parsedFiles, parsed{src: src, file: file, shapes: shapes})
+		allFiles = append(allFiles, file)
+		allShapes = append(allShapes, shapes...)
+	}
+
+	// Types-pass guard: every q.* call site must have the built-in
+	// `error` interface at its error slot. Concrete types (like
+	// `*MyErr`) are rejected here with a clear diagnostic — Go's
+	// implicit interface conversion would otherwise mask a typed
+	// nil as a non-nil `error`, making the rewritten bubble check
+	// fire for a notionally-nil error. See typecheck.go.
+	importcfgPath := compileImportcfg(toolArgs)
+	slotDiags := checkErrorSlots(fset, pkgPath, importcfgPath, allFiles, allShapes)
+	diags = append(diags, slotDiags...)
+
+	if len(diags) > 0 {
+		return &Plan{Diags: diags}, nil
+	}
+
 	var rewrittenFiles []rewritten
 	var cleanups []func()
 	importsToInject := map[string]bool{}
@@ -50,34 +90,21 @@ func planUserPackage(pkgPath string, toolArgs []string) (*Plan, error) {
 		}
 	}
 
-	fset := token.NewFileSet()
-	for _, src := range sources {
-		file, err := parser.ParseFile(fset, src, nil, parser.ParseComments)
-		if err != nil {
-			cleanupAll()
-			return nil, fmt.Errorf("parse %s: %w", src, err)
-		}
-		shapes, srcDiags, err := scanFile(fset, src, file)
-		if err != nil {
-			cleanupAll()
-			return nil, err
-		}
-		diags = append(diags, srcDiags...)
-		if len(shapes) == 0 {
+	for _, pf := range parsedFiles {
+		if len(pf.shapes) == 0 {
 			continue
 		}
-
-		original, err := os.ReadFile(src)
+		original, err := os.ReadFile(pf.src)
 		if err != nil {
 			cleanupAll()
-			return nil, fmt.Errorf("read %s: %w", src, err)
+			return nil, fmt.Errorf("read %s: %w", pf.src, err)
 		}
-		alias := qImportAlias(file)
-		absSrc, absErr := filepath.Abs(src)
+		alias := qImportAlias(pf.file)
+		absSrc, absErr := filepath.Abs(pf.src)
 		if absErr != nil {
-			absSrc = src
+			absSrc = pf.src
 		}
-		rewrittenBytes, addedImports, err := rewriteFile(fset, file, original, shapes, alias, absSrc)
+		rewrittenBytes, addedImports, err := rewriteFile(fset, pf.file, original, pf.shapes, alias, absSrc)
 		if err != nil {
 			cleanupAll()
 			return nil, err
@@ -91,13 +118,9 @@ func planUserPackage(pkgPath string, toolArgs []string) (*Plan, error) {
 			return nil, err
 		}
 		cleanups = append(cleanups, cleanup)
-		rewrittenFiles = append(rewrittenFiles, rewritten{origPath: src, newPath: newPath})
+		rewrittenFiles = append(rewrittenFiles, rewritten{origPath: pf.src, newPath: newPath})
 	}
 
-	if len(diags) > 0 {
-		cleanupAll()
-		return &Plan{Diags: diags}, nil
-	}
 	if len(rewrittenFiles) == 0 {
 		return nil, nil
 	}
