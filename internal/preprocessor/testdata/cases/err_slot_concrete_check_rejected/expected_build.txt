@@ -1,0 +1,1 @@
+q.Check requires the built-in `error` interface at the argument to q.Check, but got *main.MyErr

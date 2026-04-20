@@ -1,0 +1,1 @@
+q.Open requires the built-in `error` interface at the last return value of the wrapped call, but got *main.MyErr

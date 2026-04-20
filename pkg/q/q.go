@@ -377,3 +377,31 @@ func (r OpenResultE[T]) Release(cleanup func(T)) T {
 	panicUnrewritten("q.OpenE(...).Release")
 	return r.v
 }
+
+// ToErr adapts a `(T, *E)` call — where `*E` satisfies `error` —
+// into `(T, error)` with a nil-check that collapses a typed-nil
+// `*E` into a literal nil error. Use this to unblock a call
+// rejected by q's typed-nil-interface guard:
+//
+//	// Foo declared as `func Foo() (int, *MyErr)`.
+//	v := q.Try(q.ToErr(Foo()))
+//
+// Unlike every other helper in this package, ToErr is a plain
+// runtime function — it is NOT rewritten by the preprocessor. Its
+// body executes at runtime. The `interface{ *E; error }`
+// constraint forces `*E` to implement error at compile time, so
+// Go's type inference can figure out T/E/P from the call, and
+// misuse (passing a non-error pointer) is caught statically.
+//
+// ToErr is intentionally small and standalone — it's also useful
+// outside q, for any API that returns a concrete error pointer
+// and gets assigned into an `error` slot elsewhere.
+func ToErr[T any, E any, P interface {
+	*E
+	error
+}](v T, e P) (T, error) {
+	if e == nil {
+		return v, nil
+	}
+	return v, e
+}
