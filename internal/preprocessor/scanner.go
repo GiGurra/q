@@ -45,6 +45,25 @@ const (
 	familyCheckE  // q.CheckE(err).<method> — void chain, always formDiscard
 	familyOpen    // q.Open(v, err).Release(cleanup) — value chain, always Release-terminated
 	familyOpenE   // q.OpenE(v, err).<shape?>.Release(cleanup) — value chain with optional shape
+	familyOk      // q.Ok(v, ok) — comma-ok bubble using ErrNotOk sentinel
+	familyOkE     // q.OkE(v, ok).<method> — comma-ok chain
+	familyTrace   // q.Trace(v, err) — bubble prefixed with call-site file:line
+	familyTraceE  // q.TraceE(v, err).<method> — trace-prefixed chain
+	familyDefault     // q.Default(v, err, fb) — swallow err, replace with fb; no bubble
+	familyDefaultE    // q.DefaultE(v, err, fb).When(pred) — conditional swallow
+	familyLock        // q.Lock(l) — Lock + defer Unlock
+	familyGo          // q.Go(fn) — goroutine with recover+log
+	familyTODO        // q.TODO([msg]) — panic with file:line prefix
+	familyUnreachable // q.Unreachable([msg]) — panic with file:line prefix
+	familyAssert      // q.Assert(cond, [msg]) — panic when cond is false
+	familyRecv        // q.Recv(ch) — channel receive with close bubble
+	familyRecvE       // q.RecvE(ch).<method> — chain variant
+	familyAs          // q.As[T](x) — type assertion with failure bubble
+	familyAsE         // q.AsE[T](x).<method> — chain variant
+	familyDebug       // q.Debug(v) — in-place rewrite to q.DebugAt("label", v)
+	familyAwait       // q.Await(f) — Try-like bubble using q.AwaitRaw as the source
+	familyAwaitE      // q.AwaitE(f).<method> — TryE-like chain over q.AwaitRaw
+	familyTryCatch    // q.TryCatch(try).Catch(handle) — IIFE with defer-recover
 )
 
 // form is the syntactic position of a recognised q.* call:
@@ -107,6 +126,27 @@ type qSubCall struct {
 	// (<cleanup>)(<resultVar>)` line on the success path so the
 	// cleanup fires when the enclosing function returns.
 	ReleaseArg ast.Expr
+
+	// OkArgs is the raw argument list of the q.Ok / q.OkE entry
+	// call. nil for every other family. Ok accepts either a single
+	// (T, bool)-returning CallExpr or two separate expressions
+	// (value, ok); the rewriter reads the source span from the
+	// first arg's Pos to the last arg's End to produce an inner-text
+	// that drops straight into a tuple bind (`v, _qOkN := <span>`).
+	OkArgs []ast.Expr
+
+	// DefaultInner is the (T, error)-producing expression span for
+	// a q.Default / q.DefaultE call — either a single CallExpr (two-
+	// arg form `q.Default(call(), fb)`) or the pair `v, err` (three-
+	// arg form `q.Default(v, err, fb)`). DefaultFallback is the
+	// fallback expression. Both nil for non-Default families.
+	DefaultInner    []ast.Expr
+	DefaultFallback ast.Expr
+
+	// AsType is the explicit type argument in a q.As[T] / q.AsE[T]
+	// call; nil for every other family. The rewriter splices its
+	// source text into the generated type-assertion `<x>.(<T>)`.
+	AsType ast.Expr
 }
 
 // callShape describes one recognised q.* call site, captured at scan
@@ -161,7 +201,12 @@ var chainMethods = map[string]bool{
 // so a standalone `q.ToErr(...)` call doesn't trip the fallback
 // flag.
 var qRuntimeHelpers = map[string]bool{
-	"ToErr": true,
+	"ToErr":    true,
+	"DebugAt":  true,
+	"Async":    true,
+	"AwaitRaw": true,
+	"Recover":  true,
+	"RecoverE": true,
 }
 
 // scanFile walks one parsed source file and returns the list of
@@ -217,13 +262,31 @@ func walkBlock(fset *token.FileSet, path string, block *ast.BlockStmt, alias str
 			*diags = append(*diags, diagAt(fset, path, stmt.Pos(), err.Error()))
 		} else if ok {
 			*shapes = append(*shapes, shape)
-		} else if pos := findQReference(stmt, alias); pos.IsValid() {
-			*diags = append(*diags, diagAt(fset, path, pos,
-				fmt.Sprintf("unsupported q.* call shape; supported: `v := %s.Try/NotNil(...)`, `v = %s.Try/NotNil(...)`, `%s.Try/NotNil(...)` (discard), `return %s.Try/NotNil(...), …` (q.* as one top-level return result), with optional .Err / .ErrF / .Catch / .Wrap / .Wrapf chain methods on the *E entries", alias, alias, alias, alias)))
+		} else if !isContainerStmt(stmt) {
+			if pos := findQReference(stmt, alias); pos.IsValid() {
+				*diags = append(*diags, diagAt(fset, path, pos,
+					fmt.Sprintf("unsupported q.* call shape; supported: `v := %s.Try/NotNil(...)`, `v = %s.Try/NotNil(...)`, `%s.Try/NotNil(...)` (discard), `return %s.Try/NotNil(...), …` (q.* as one top-level return result), with optional .Err / .ErrF / .Catch / .Wrap / .Wrapf chain methods on the *E entries", alias, alias, alias, alias)))
+			}
 		}
 		walkChildBlocks(fset, path, stmt, alias, fnType, shapes, diags)
 		walkFuncLits(fset, path, stmt, alias, shapes, diags)
 	}
+}
+
+// isContainerStmt reports whether stmt's role is to hold further
+// statements rather than to be one itself. Such statements should
+// not trigger the "unsupported q.* shape" fallback — walkChildBlocks
+// descends into them and matches their contents properly. Missing
+// this check for CaseClause / CommClause causes findQReference to
+// false-positive on every q.* call inside a switch default.
+func isContainerStmt(stmt ast.Stmt) bool {
+	switch stmt.(type) {
+	case *ast.BlockStmt, *ast.IfStmt, *ast.ForStmt, *ast.RangeStmt,
+		*ast.SwitchStmt, *ast.TypeSwitchStmt, *ast.SelectStmt,
+		*ast.CaseClause, *ast.CommClause, *ast.LabeledStmt:
+		return true
+	}
+	return false
 }
 
 // walkFuncLits finds *ast.FuncLit expressions reachable from stmt
@@ -286,16 +349,16 @@ func walkChildBlocks(fset *token.FileSet, path string, stmt ast.Stmt, alias stri
 		// case clause Body is a []ast.Stmt without its own BlockStmt
 		// wrapper, so we walk it inline.
 		for _, child := range s.Body {
-			// Synthesise the same per-stmt logic walkBlock applies, but
-			// without the BlockStmt wrapper.
 			subShape, ok, err := matchStatement(child, alias, fnType)
 			if err != nil {
 				*diags = append(*diags, diagAt(fset, path, child.Pos(), err.Error()))
 			} else if ok {
 				*shapes = append(*shapes, subShape)
-			} else if pos := findQReference(child, alias); pos.IsValid() {
-				*diags = append(*diags, diagAt(fset, path, pos,
-					fmt.Sprintf("unsupported q.* call shape; supported: `v := %s.Try/NotNil(...)`, `v = %s.Try/NotNil(...)`, `%s.Try/NotNil(...)` (discard), `return %s.Try/NotNil(...), …` (q.* as one top-level return result), with optional .Err / .ErrF / .Catch / .Wrap / .Wrapf chain methods on the *E entries", alias, alias, alias, alias)))
+			} else if !isContainerStmt(child) {
+				if pos := findQReference(child, alias); pos.IsValid() {
+					*diags = append(*diags, diagAt(fset, path, pos,
+						fmt.Sprintf("unsupported q.* call shape; supported: `v := %s.Try/NotNil(...)`, `v = %s.Try/NotNil(...)`, `%s.Try/NotNil(...)` (discard), `return %s.Try/NotNil(...), …` (q.* as one top-level return result), with optional .Err / .ErrF / .Catch / .Wrap / .Wrapf chain methods on the *E entries", alias, alias, alias, alias)))
+				}
 			}
 			walkChildBlocks(fset, path, child, alias, fnType, shapes, diags)
 			walkFuncLits(fset, path, child, alias, shapes, diags)
@@ -307,9 +370,11 @@ func walkChildBlocks(fset *token.FileSet, path string, stmt ast.Stmt, alias stri
 				*diags = append(*diags, diagAt(fset, path, child.Pos(), err.Error()))
 			} else if ok {
 				*shapes = append(*shapes, subShape)
-			} else if pos := findQReference(child, alias); pos.IsValid() {
-				*diags = append(*diags, diagAt(fset, path, pos,
-					fmt.Sprintf("unsupported q.* call shape; supported: `v := %s.Try/NotNil(...)`, `v = %s.Try/NotNil(...)`, `%s.Try/NotNil(...)` (discard), `return %s.Try/NotNil(...), …` (q.* as one top-level return result), with optional .Err / .ErrF / .Catch / .Wrap / .Wrapf chain methods on the *E entries", alias, alias, alias, alias)))
+			} else if !isContainerStmt(child) {
+				if pos := findQReference(child, alias); pos.IsValid() {
+					*diags = append(*diags, diagAt(fset, path, pos,
+						fmt.Sprintf("unsupported q.* call shape; supported: `v := %s.Try/NotNil(...)`, `v = %s.Try/NotNil(...)`, `%s.Try/NotNil(...)` (discard), `return %s.Try/NotNil(...), …` (q.* as one top-level return result), with optional .Err / .ErrF / .Catch / .Wrap / .Wrapf chain methods on the *E entries", alias, alias, alias, alias)))
+				}
 			}
 			walkChildBlocks(fset, path, child, alias, fnType, shapes, diags)
 			walkFuncLits(fset, path, child, alias, shapes, diags)
@@ -577,6 +642,95 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 		}
 		return qSubCall{Family: familyNotNil, InnerExpr: call.Args[0], OuterCall: expr}, true, nil
 	}
+	// Bare q.Await — blocks on Future, bubbles err.
+	if isSelector(call.Fun, alias, "Await") {
+		if len(call.Args) != 1 {
+			return qSubCall{}, false, fmt.Errorf("q.Await must take exactly one argument (a Future); got %d", len(call.Args))
+		}
+		return qSubCall{Family: familyAwait, InnerExpr: call.Args[0], OuterCall: expr}, true, nil
+	}
+	// Bare q.Debug — in-place rewrite to q.DebugAt with an
+	// auto-generated label carrying call-site file:line and the
+	// source text of the argument expression.
+	if isSelector(call.Fun, alias, "Debug") {
+		if len(call.Args) != 1 {
+			return qSubCall{}, false, fmt.Errorf("q.Debug must take exactly one argument (the value to print); got %d", len(call.Args))
+		}
+		return qSubCall{Family: familyDebug, InnerExpr: call.Args[0], OuterCall: expr}, true, nil
+	}
+	// Bare q.Recv — channel receive with close bubble.
+	if isSelector(call.Fun, alias, "Recv") {
+		if len(call.Args) != 1 {
+			return qSubCall{}, false, fmt.Errorf("q.Recv must take exactly one argument (a channel); got %d", len(call.Args))
+		}
+		return qSubCall{Family: familyRecv, InnerExpr: call.Args[0], OuterCall: expr}, true, nil
+	}
+	// Bare q.As[T](x) — type assertion with failure bubble.
+	if typeArg, ok := isIndexedSelector(call.Fun, alias, "As"); ok {
+		if len(call.Args) != 1 {
+			return qSubCall{}, false, fmt.Errorf("q.As[T] must take exactly one argument (the value to assert); got %d", len(call.Args))
+		}
+		return qSubCall{Family: familyAs, InnerExpr: call.Args[0], AsType: typeArg, OuterCall: expr}, true, nil
+	}
+	// Statement-only helpers with no chain — panic/defer shapes.
+	if isSelector(call.Fun, alias, "Lock") {
+		if len(call.Args) != 1 {
+			return qSubCall{}, false, fmt.Errorf("q.Lock must take exactly one argument (a sync.Locker); got %d", len(call.Args))
+		}
+		return qSubCall{Family: familyLock, InnerExpr: call.Args[0], OuterCall: expr}, true, nil
+	}
+	if isSelector(call.Fun, alias, "Go") {
+		if len(call.Args) != 1 {
+			return qSubCall{}, false, fmt.Errorf("q.Go must take exactly one argument (a func()); got %d", len(call.Args))
+		}
+		return qSubCall{Family: familyGo, InnerExpr: call.Args[0], OuterCall: expr}, true, nil
+	}
+	if isSelector(call.Fun, alias, "TODO") {
+		if len(call.Args) > 1 {
+			return qSubCall{}, false, fmt.Errorf("q.TODO takes at most one argument (an optional message string); got %d", len(call.Args))
+		}
+		return qSubCall{Family: familyTODO, MethodArgs: call.Args, OuterCall: expr}, true, nil
+	}
+	if isSelector(call.Fun, alias, "Unreachable") {
+		if len(call.Args) > 1 {
+			return qSubCall{}, false, fmt.Errorf("q.Unreachable takes at most one argument (an optional message string); got %d", len(call.Args))
+		}
+		return qSubCall{Family: familyUnreachable, MethodArgs: call.Args, OuterCall: expr}, true, nil
+	}
+	if isSelector(call.Fun, alias, "Assert") {
+		if len(call.Args) < 1 || len(call.Args) > 2 {
+			return qSubCall{}, false, fmt.Errorf("q.Assert takes 1 or 2 arguments (cond, [msg]); got %d", len(call.Args))
+		}
+		return qSubCall{Family: familyAssert, InnerExpr: call.Args[0], MethodArgs: call.Args[1:], OuterCall: expr}, true, nil
+	}
+	// Bare q.Default — swallow err, use fallback. No bubble.
+	if isSelector(call.Fun, alias, "Default") {
+		inner, fb, err := splitDefaultArgs("q.Default", call.Args)
+		if err != nil {
+			return qSubCall{}, false, err
+		}
+		return qSubCall{Family: familyDefault, InnerExpr: inner[0], DefaultInner: inner, DefaultFallback: fb, OuterCall: expr}, true, nil
+	}
+	// Bare q.Trace — Try-shape with file:line-prefixed bubble.
+	if isSelector(call.Fun, alias, "Trace") {
+		if len(call.Args) != 1 {
+			return qSubCall{}, false, fmt.Errorf("q.Trace must take exactly one argument (a (T, error)-returning call); got %d", len(call.Args))
+		}
+		if _, ok := call.Args[0].(*ast.CallExpr); !ok {
+			return qSubCall{}, false, fmt.Errorf("q.Trace's argument must itself be a call expression returning (T, error)")
+		}
+		return qSubCall{Family: familyTrace, InnerExpr: call.Args[0], OuterCall: expr}, true, nil
+	}
+	// Bare q.Ok — comma-ok bubble. Two valid arg shapes:
+	//   q.Ok(fn())       — one CallExpr returning (T, bool)
+	//   q.Ok(v, okExpr)  — two exprs, a T and a bool
+	// The rewriter handles both by binding from the joined source span.
+	if isSelector(call.Fun, alias, "Ok") {
+		if err := validateOkArgs("q.Ok", call.Args); err != nil {
+			return qSubCall{}, false, err
+		}
+		return qSubCall{Family: familyOk, InnerExpr: call.Args[0], OkArgs: call.Args, OuterCall: expr}, true, nil
+	}
 	// Bare q.Check — error-only bubble, no chain.
 	if isSelector(call.Fun, alias, "Check") {
 		if len(call.Args) != 1 {
@@ -625,6 +779,78 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 				return qSubCall{}, false, fmt.Errorf("q.CheckE must take exactly one argument (an error expression); got %d", len(entry.Args))
 			}
 			return qSubCall{Family: familyCheckE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Args[0], OuterCall: expr}, true, nil
+		case isSelector(entry.Fun, alias, "DefaultE"):
+			if sel.Sel.Name != "When" {
+				return qSubCall{}, false, fmt.Errorf("q.DefaultE chain method %q not recognised; valid: When", sel.Sel.Name)
+			}
+			if len(call.Args) != 1 {
+				return qSubCall{}, false, fmt.Errorf("q.DefaultE(...).When requires exactly one argument (a func(error) bool predicate); got %d", len(call.Args))
+			}
+			inner, fb, err := splitDefaultArgs("q.DefaultE", entry.Args)
+			if err != nil {
+				return qSubCall{}, false, err
+			}
+			return qSubCall{Family: familyDefaultE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: inner[0], DefaultInner: inner, DefaultFallback: fb, OuterCall: expr}, true, nil
+		case isSelector(entry.Fun, alias, "TraceE"):
+			if !chainMethods[sel.Sel.Name] {
+				return qSubCall{}, false, fmt.Errorf("q.TraceE chain method %q not recognised; valid: Err, ErrF, Catch, Wrap, Wrapf", sel.Sel.Name)
+			}
+			if len(entry.Args) != 1 {
+				return qSubCall{}, false, fmt.Errorf("q.TraceE must take exactly one argument (a (T, error)-returning call); got %d", len(entry.Args))
+			}
+			if _, ok := entry.Args[0].(*ast.CallExpr); !ok {
+				return qSubCall{}, false, fmt.Errorf("q.TraceE's argument must itself be a call expression returning (T, error)")
+			}
+			return qSubCall{Family: familyTraceE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Args[0], OuterCall: expr}, true, nil
+		case isSelector(entry.Fun, alias, "AwaitE"):
+			if !chainMethods[sel.Sel.Name] {
+				return qSubCall{}, false, fmt.Errorf("q.AwaitE chain method %q not recognised; valid: Err, ErrF, Catch, Wrap, Wrapf", sel.Sel.Name)
+			}
+			if len(entry.Args) != 1 {
+				return qSubCall{}, false, fmt.Errorf("q.AwaitE must take exactly one argument (a Future); got %d", len(entry.Args))
+			}
+			return qSubCall{Family: familyAwaitE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Args[0], OuterCall: expr}, true, nil
+		case isSelector(entry.Fun, alias, "TryCatch"):
+			if sel.Sel.Name != "Catch" {
+				return qSubCall{}, false, fmt.Errorf("q.TryCatch chain method %q not recognised; valid: Catch", sel.Sel.Name)
+			}
+			if len(call.Args) != 1 {
+				return qSubCall{}, false, fmt.Errorf("q.TryCatch(...).Catch requires exactly one argument (a func(any) handler); got %d", len(call.Args))
+			}
+			if len(entry.Args) != 1 {
+				return qSubCall{}, false, fmt.Errorf("q.TryCatch must take exactly one argument (a func() try body); got %d", len(entry.Args))
+			}
+			return qSubCall{Family: familyTryCatch, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Args[0], OuterCall: expr}, true, nil
+		case isSelector(entry.Fun, alias, "RecvE"):
+			if !chainMethods[sel.Sel.Name] {
+				return qSubCall{}, false, fmt.Errorf("q.RecvE chain method %q not recognised; valid: Err, ErrF, Catch, Wrap, Wrapf", sel.Sel.Name)
+			}
+			if len(entry.Args) != 1 {
+				return qSubCall{}, false, fmt.Errorf("q.RecvE must take exactly one argument (a channel); got %d", len(entry.Args))
+			}
+			return qSubCall{Family: familyRecvE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Args[0], OuterCall: expr}, true, nil
+		}
+		// AsE needs a dedicated check because its entry.Fun is an
+		// IndexExpr carrying the type argument, not a plain selector
+		// that the switch cases above cover.
+		if typeArg, ok := isIndexedSelector(entry.Fun, alias, "AsE"); ok {
+			if !chainMethods[sel.Sel.Name] {
+				return qSubCall{}, false, fmt.Errorf("q.AsE chain method %q not recognised; valid: Err, ErrF, Catch, Wrap, Wrapf", sel.Sel.Name)
+			}
+			if len(entry.Args) != 1 {
+				return qSubCall{}, false, fmt.Errorf("q.AsE[T] must take exactly one argument (the value to assert); got %d", len(entry.Args))
+			}
+			return qSubCall{Family: familyAsE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Args[0], AsType: typeArg, OuterCall: expr}, true, nil
+		}
+		switch {
+		case isSelector(entry.Fun, alias, "OkE"):
+			if !chainMethods[sel.Sel.Name] {
+				return qSubCall{}, false, fmt.Errorf("q.OkE chain method %q not recognised; valid: Err, ErrF, Catch, Wrap, Wrapf", sel.Sel.Name)
+			}
+			if err := validateOkArgs("q.OkE", entry.Args); err != nil {
+				return qSubCall{}, false, err
+			}
+			return qSubCall{Family: familyOkE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Args[0], OkArgs: entry.Args, OuterCall: expr}, true, nil
 		}
 	}
 
@@ -705,6 +931,45 @@ func classifyOpenChain(call *ast.CallExpr, sel *ast.SelectorExpr, alias string) 
 	}, true, nil
 }
 
+// validateOkArgs enforces Ok / OkE's two valid arg shapes: one
+// CallExpr returning (T, bool), or two separate expressions (T, bool).
+// The rewriter reads the source span from Args[0].Pos() to
+// Args[last].End(), so either shape drops straight into a tuple-
+// binding `<LHS>, _qOkN := <span>` line.
+func validateOkArgs(name string, args []ast.Expr) error {
+	switch len(args) {
+	case 1:
+		if _, ok := args[0].(*ast.CallExpr); !ok {
+			return fmt.Errorf("%s's single argument must be a call expression returning (T, bool); pass two separate arguments (value, ok) otherwise", name)
+		}
+		return nil
+	case 2:
+		return nil
+	default:
+		return fmt.Errorf("%s must take one (T, bool)-returning call or two arguments (value, ok); got %d", name, len(args))
+	}
+}
+
+// splitDefaultArgs validates q.Default / q.DefaultE argument shape
+// and returns the (T, error) span and the fallback expression.
+// Two valid shapes:
+//
+//	q.Default(call(), fb)      — 2 args, first is a (T, error) CallExpr
+//	q.Default(v, err, fb)      — 3 args, pre-destructured
+func splitDefaultArgs(name string, args []ast.Expr) (inner []ast.Expr, fallback ast.Expr, err error) {
+	switch len(args) {
+	case 2:
+		if _, ok := args[0].(*ast.CallExpr); !ok {
+			return nil, nil, fmt.Errorf("%s's first argument in the 2-arg form must be a call expression returning (T, error); use the 3-arg form to pass (v, err, fb) separately", name)
+		}
+		return args[:1], args[1], nil
+	case 3:
+		return args[:2], args[2], nil
+	default:
+		return nil, nil, fmt.Errorf("%s must take (callExpr, fallback) or (v, err, fallback); got %d args", name, len(args))
+	}
+}
+
 // matchOpenEntry reports whether c is a direct q.Open / q.OpenE call
 // under the local alias, and which family it belongs to.
 func matchOpenEntry(c *ast.CallExpr, alias string) (family, *ast.CallExpr, bool) {
@@ -715,6 +980,22 @@ func matchOpenEntry(c *ast.CallExpr, alias string) (family, *ast.CallExpr, bool)
 		return familyOpenE, c, true
 	}
 	return 0, nil, false
+}
+
+// isIndexedSelector reports whether expr has the shape
+// `<alias>.<name>[<typeArg>]` (a generic call with an explicit type
+// argument). Returns the type-argument expression plus ok=true on
+// match, nil + false otherwise. Handles the single-type-arg case
+// only — q.As[T](x), q.AsE[T](x).
+func isIndexedSelector(expr ast.Expr, alias, name string) (ast.Expr, bool) {
+	ix, ok := expr.(*ast.IndexExpr)
+	if !ok {
+		return nil, false
+	}
+	if !isSelector(ix.X, alias, name) {
+		return nil, false
+	}
+	return ix.Index, true
 }
 
 // isSelector reports whether expr has the shape `<alias>.<name>`.

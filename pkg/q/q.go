@@ -25,15 +25,41 @@ package q
 
 import (
 	"errors"
+	"fmt"
+	"io"
+	"os"
+	"runtime/debug"
+	"sync"
 
 	_ "unsafe" // for //go:linkname
 )
+
+// DebugWriter is the destination q.DebugAt writes to. Defaults to
+// os.Stderr; tests and library users can reassign it to capture
+// Debug output for assertions.
+var DebugWriter io.Writer = os.Stderr
 
 // ErrNil is the sentinel error the bare q.NotNil bubble produces when
 // its supplied pointer is nil. Callers can errors.Is against it to
 // detect "this came from q.NotNil specifically". Reach for q.NotNilE
 // when a richer error is needed.
 var ErrNil = errors.New("q: nil value")
+
+// ErrNotOk is the sentinel error the bare q.Ok bubble produces when
+// its supplied ok flag is false. Mirrors ErrNil's role for the
+// comma-ok family (map lookups, type assertions, channel receives).
+// Reach for q.OkE when a richer error is needed.
+var ErrNotOk = errors.New("q: not ok")
+
+// ErrChanClosed is the sentinel error the bare q.Recv bubble
+// produces when the channel is closed (i.e. the receive's ok flag
+// is false). Use q.RecvE to supply a richer error.
+var ErrChanClosed = errors.New("q: channel closed")
+
+// ErrBadAssert is the sentinel error the bare q.As bubble produces
+// when the type assertion's ok flag is false. Use q.AsE to supply a
+// richer error.
+var ErrBadAssert = errors.New("q: type assertion failed")
 
 // _qLink is the bodyless link-gate symbol. //go:linkname binds it to
 // the external _q_atCompileTime symbol that only the q preprocessor's
@@ -375,6 +401,483 @@ func (r OpenResultE[T]) Catch(fn func(error) (T, error)) OpenResultE[T] {
 // success.
 func (r OpenResultE[T]) Release(cleanup func(T)) T {
 	panicUnrewritten("q.OpenE(...).Release")
+	return r.v
+}
+
+// PanicError wraps a recovered panic value and the stack captured
+// at recovery time. Produced by q.Recover and by the default
+// q.RecoverE path when no user-supplied mapper is provided. Callers
+// recover the original panic data with:
+//
+//	var pe *q.PanicError
+//	if errors.As(err, &pe) { fmt.Println(pe.Value, string(pe.Stack)) }
+type PanicError struct {
+	Value any
+	Stack []byte
+}
+
+// Error renders the panic value and a short stack hint. The full
+// stack is available on the Stack field.
+func (e *PanicError) Error() string {
+	return fmt.Sprintf("q: recovered panic: %v", e.Value)
+}
+
+// Recover is the runtime helper paired with `defer q.Recover(&err)`.
+// When a panic is in flight at defer-time, the recovered value and
+// a debug.Stack() snapshot are wrapped in *PanicError and stored
+// via errPtr. Plain runtime function (NOT rewritten) — Go's
+// recover() sees the panic because Recover IS the deferred
+// function. Calling Recover without defer is a no-op.
+//
+// Example:
+//
+//	func doWork() (err error) {
+//	    defer q.Recover(&err)
+//	    riskyPanics()
+//	    return nil
+//	}
+func Recover(errPtr *error) {
+	if r := recover(); r != nil {
+		*errPtr = &PanicError{Value: r, Stack: debug.Stack()}
+	}
+}
+
+// RecoverE begins a RecoverE chain. The chain method decides how
+// the recovered panic (if any) maps to the error stored via
+// errPtr. Runtime function (not rewritten) — like Recover, the
+// chain's terminal method IS the deferred function, so
+// recover() catches the panic correctly.
+//
+// Example:
+//
+//	defer q.RecoverE(&err).Map(func(r any) error {
+//	    return &MyErr{Cause: r}
+//	})
+func RecoverE(errPtr *error) RecoverResult {
+	return RecoverResult{errPtr: errPtr}
+}
+
+// RecoverResult carries the errPtr through the q.RecoverE chain.
+// The terminal method (Map, Err, ErrF, Wrap, Wrapf) is the actual
+// deferred function.
+type RecoverResult struct {
+	errPtr *error
+}
+
+// Map runs fn on the recovered panic value; the returned error is
+// stored via errPtr. Use for custom panic-shape translation.
+func (r RecoverResult) Map(fn func(any) error) {
+	if rec := recover(); rec != nil {
+		*r.errPtr = fn(rec)
+	}
+}
+
+// Err stores the supplied replacement error on panic, discarding
+// the original panic value and stack.
+func (r RecoverResult) Err(replacement error) {
+	if rec := recover(); rec != nil {
+		_ = rec
+		*r.errPtr = replacement
+	}
+}
+
+// ErrF transforms the default *PanicError wrapper via fn before
+// storing. Useful when the caller wants to prepend context but
+// still preserve the original panic metadata.
+func (r RecoverResult) ErrF(fn func(*PanicError) error) {
+	if rec := recover(); rec != nil {
+		*r.errPtr = fn(&PanicError{Value: rec, Stack: debug.Stack()})
+	}
+}
+
+// Wrap prefixes the default PanicError with msg via fmt.Errorf.
+func (r RecoverResult) Wrap(msg string) {
+	if rec := recover(); rec != nil {
+		*r.errPtr = fmt.Errorf("%s: %w", msg, &PanicError{Value: rec, Stack: debug.Stack()})
+	}
+}
+
+// Wrapf prefixes the default PanicError with a formatted message.
+func (r RecoverResult) Wrapf(format string, args ...any) {
+	if rec := recover(); rec != nil {
+		*r.errPtr = fmt.Errorf(format+": %w", append(args, &PanicError{Value: rec, Stack: debug.Stack()})...)
+	}
+}
+
+// Future is the promise-like handle returned by q.Async. Internal
+// state: a buffered channel the spawned goroutine sends the result
+// on, consumed at-most-once by q.Await / q.AwaitRaw.
+type Future[T any] struct {
+	done chan futureResult[T]
+}
+
+type futureResult[T any] struct {
+	v   T
+	err error
+}
+
+// Async spawns fn in a goroutine and returns a Future that q.Await
+// or q.AwaitRaw can pull the result from. Plain runtime function —
+// not rewritten by the preprocessor. Usable standalone.
+func Async[T any](fn func() (T, error)) Future[T] {
+	f := Future[T]{done: make(chan futureResult[T], 1)}
+	go func() {
+		v, err := fn()
+		f.done <- futureResult[T]{v: v, err: err}
+	}()
+	return f
+}
+
+// AwaitRaw blocks on the Future and returns its (T, error) result.
+// Plain runtime function (not rewritten). The preprocessor rewrites
+// q.Await / q.AwaitE internally into calls to AwaitRaw — user code
+// may also call it directly when they want the raw tuple.
+func AwaitRaw[T any](f Future[T]) (T, error) {
+	r := <-f.done
+	return r.v, r.err
+}
+
+// Await blocks on the Future and forwards the value; the
+// preprocessor rewrites the call site into the inlined `v, err :=
+// q.AwaitRaw(f); if err != nil { return zero, err }` shape. Reach
+// for q.AwaitE for chain-style custom error handling on the
+// await's bubble.
+func Await[T any](f Future[T]) T {
+	panicUnrewritten("q.Await")
+	var zero T
+	return zero
+}
+
+// AwaitE is the chain variant of Await; reuses ErrResult[T] so the
+// chain vocabulary is identical to TryE.
+func AwaitE[T any](f Future[T]) ErrResult[T] {
+	panicUnrewritten("q.AwaitE")
+	return ErrResult[T]{}
+}
+
+// TryCatch begins a try/catch block. The terminal `.Catch(handler)`
+// call defines both scopes:
+//
+//	q.TryCatch(func() {
+//	    risky()
+//	}).Catch(func(r any) {
+//	    log.Println("recovered:", r)
+//	})
+//
+// Rewritten by the preprocessor into an IIFE wrapping try with a
+// deferred recover that dispatches to handler on panic. Primarily
+// a demo of what the preprocessor makes expressible — Go's
+// explicit error returns are still the idiomatic choice.
+func TryCatch(try func()) TryCatchResult {
+	panicUnrewritten("q.TryCatch")
+	return TryCatchResult{}
+}
+
+// TryCatchResult is the chain carrier for q.TryCatch. Only method
+// is .Catch, which terminates the chain.
+type TryCatchResult struct{}
+
+// Catch attaches the handler to the try block. Always an expression
+// statement — the whole chain returns void.
+func (TryCatchResult) Catch(handler func(any)) {
+	panicUnrewritten("q.TryCatch(...).Catch")
+}
+
+// Debug prints v to stderr prefixed with the call-site file:line
+// and the source text of the argument expression, then returns v
+// unchanged so the call can sit mid-expression. Go's missing `dbg!`
+// macro. Usable anywhere a value expression is valid:
+//
+//	return q.Debug(loadUser(q.Debug(id)))
+//
+// Both prints fire in source order, then the return flows through.
+// Only the preprocessor knows the source text and file:line —
+// without it, q.Debug is a panic stub. Every rewritten site calls
+// q.DebugAt internally, which is also exported for direct use when
+// a custom label is wanted.
+func Debug[T any](v T) T {
+	panicUnrewritten("q.Debug")
+	return v
+}
+
+// DebugAt is the runtime half of q.Debug. The preprocessor rewrites
+// every `q.Debug(x)` call site into `q.DebugAt("<file>:<line> <src>", x)`,
+// but users who want a custom label (or who need to construct the
+// label at runtime) can call DebugAt directly without going through
+// the preprocessor path.
+func DebugAt[T any](label string, v T) T {
+	_, _ = fmt.Fprintf(DebugWriter, "%s = %+v\n", label, v)
+	return v
+}
+
+// Recv receives from ch and forwards the value; the preprocessor
+// rewrites the call site into the inlined `v, _ok := <-ch; if !_ok
+// { return zero, q.ErrChanClosed }` shape. Use q.RecvE to supply a
+// richer error.
+func Recv[T any](ch <-chan T) T {
+	panicUnrewritten("q.Recv")
+	var zero T
+	return zero
+}
+
+// RecvE wraps a channel receive into an OkResult (shared with Ok),
+// so the full OkE chain vocabulary shapes the bubble when the
+// channel is closed.
+func RecvE[T any](ch <-chan T) OkResult[T] {
+	panicUnrewritten("q.RecvE")
+	return OkResult[T]{}
+}
+
+// As asserts x holds a T and forwards it; the preprocessor rewrites
+// the call site into the inlined `v, _ok := x.(T); if !_ok { return
+// zero, q.ErrBadAssert }` shape. Use q.AsE to supply a richer error.
+func As[T any](x any) T {
+	panicUnrewritten("q.As")
+	var zero T
+	return zero
+}
+
+// AsE wraps a type assertion into an OkResult so the OkE chain
+// vocabulary shapes the bubble when the assertion fails.
+func AsE[T any](x any) OkResult[T] {
+	panicUnrewritten("q.AsE")
+	return OkResult[T]{}
+}
+
+// Lock acquires l and registers a deferred Unlock in the enclosing
+// function. Always an expression statement — returns nothing.
+// Accepts any sync.Locker (*sync.Mutex, *sync.RWMutex for the write
+// side, rwm.RLocker() for the read side, user-defined types).
+//
+// Example:
+//
+//	func (s *store) Set(k, v string) {
+//	    q.Lock(&s.mu)
+//	    s.data[k] = v
+//	}
+func Lock(l sync.Locker) {
+	panicUnrewritten("q.Lock")
+}
+
+// Go spawns fn in a goroutine wrapped in a defer-recover that logs
+// the panic value and captured file:line to stderr. Lets a panic in
+// a detached goroutine fail loudly without crashing the whole
+// process.
+func Go(fn func()) {
+	panicUnrewritten("q.Go")
+}
+
+// TODO panics with "q.TODO <file>:<line>[: <msg>]" to mark an
+// unfinished branch. Always an expression statement. Reach for
+// q.Unreachable for code paths the author believes cannot execute.
+func TODO(msg ...string) {
+	panicUnrewritten("q.TODO")
+}
+
+// Unreachable panics with "q.Unreachable <file>:<line>[: <msg>]" to
+// mark code paths the author believes cannot execute. Always an
+// expression statement.
+func Unreachable(msg ...string) {
+	panicUnrewritten("q.Unreachable")
+}
+
+// Assert panics with "q.Assert failed <file>:<line>[: <msg>]" when
+// cond is false. Always an expression statement. Use for internal
+// invariants — preconditions that should never be violated by
+// correctly-written callers.
+func Assert(cond bool, msg ...string) {
+	panicUnrewritten("q.Assert")
+}
+
+// Default returns v when err is nil and fallback otherwise; the
+// preprocessor rewrites the call site so the error is never
+// bubbled — it's replaced by fallback. Opt-in by the call site;
+// does not alter behavior for any other error in the function.
+// Reach for q.DefaultE to fall back only when a predicate matches
+// and bubble otherwise.
+//
+// Accepts either two or three arguments via Go's f(g()) rule:
+//
+//	q.Default(call(), fallback)        // call() returns (T, error)
+//	q.Default(v, err, fallback)        // pre-destructured
+func Default[T any](v T, err error, fallback T) T {
+	panicUnrewritten("q.Default")
+	return v
+}
+
+// DefaultE begins a DefaultE chain. The only chain method is
+// `.When(pred)` which gates the fallback: when pred(err) is true
+// the fallback is used; when false the captured error bubbles
+// unchanged. Mirrors Default's call-argument shape.
+func DefaultE[T any](v T, err error, fallback T) DefaultResult[T] {
+	panicUnrewritten("q.DefaultE")
+	return DefaultResult[T]{}
+}
+
+// DefaultResult carries a captured (value, err, fallback) for the
+// q.DefaultE chain. The only method is .When.
+type DefaultResult[T any] struct {
+	v   T
+	err error //nolint:unused // documented as part of the chain contract
+	fb  T     //nolint:unused // documented as part of the chain contract
+}
+
+// When gates the fallback. pred receives the captured error; when
+// pred returns true the fallback is used in place of the failed
+// value, when false the captured error bubbles unchanged.
+func (r DefaultResult[T]) When(pred func(error) bool) T {
+	panicUnrewritten("q.DefaultE(...).When")
+	return r.v
+}
+
+// Trace forwards v when err is nil; otherwise the preprocessor
+// rewrites the call site to bubble an error prefixed with the call
+// site's file:line captured at compile time. Plain Go can't express
+// this — runtime code has no access to its own source location
+// without a stack walk. Reach for q.TraceE when the prefix needs to
+// compose with the standard error-shape vocabulary.
+//
+// Example:
+//
+//	func loadUser(id int) (User, error) {
+//	    row := q.Trace(db.Query(id)) // bubble prefixed with "users.go:42: "
+//	    ...
+//	}
+func Trace[T any](v T, err error) T {
+	panicUnrewritten("q.Trace")
+	return v
+}
+
+// TraceE is the chain variant of Trace. Each shape method composes
+// over the location prefix — `q.TraceE(call).Wrap("ctx")` bubbles
+// `"file.go:42: ctx: <inner>"`. Mirrors TryE's vocabulary.
+func TraceE[T any](v T, err error) TraceResult[T] {
+	panicUnrewritten("q.TraceE")
+	return TraceResult[T]{}
+}
+
+// TraceResult carries a captured (value, err) pair for q.TraceE.
+// Every method bubbles with a call-site `file:line` prefix injected
+// by the preprocessor.
+type TraceResult[T any] struct {
+	v   T
+	err error //nolint:unused // documented as part of the chain contract
+}
+
+// Err bubbles the supplied replacement error, still prefixed with
+// the call-site file:line.
+func (r TraceResult[T]) Err(replacement error) T {
+	panicUnrewritten("q.TraceE(...).Err")
+	return r.v
+}
+
+// ErrF bubbles fn(capturedErr), prefixed with the call-site
+// file:line.
+func (r TraceResult[T]) ErrF(fn func(error) error) T {
+	panicUnrewritten("q.TraceE(...).ErrF")
+	return r.v
+}
+
+// Catch recovers or transforms; the returned error (if any) is
+// still prefixed with the call-site file:line.
+func (r TraceResult[T]) Catch(fn func(error) (T, error)) T {
+	panicUnrewritten("q.TraceE(...).Catch")
+	return r.v
+}
+
+// Wrap is fmt.Errorf("<file>:<line>: <msg>: %w", err) sugar.
+func (r TraceResult[T]) Wrap(msg string) T {
+	panicUnrewritten("q.TraceE(...).Wrap")
+	return r.v
+}
+
+// Wrapf is fmt.Errorf("<file>:<line>: <format>: %w", args..., err)
+// sugar.
+func (r TraceResult[T]) Wrapf(format string, args ...any) T {
+	panicUnrewritten("q.TraceE(...).Wrapf")
+	return r.v
+}
+
+// Ok forwards v when ok is true; the preprocessor rewrites the call
+// site into the inlined `if !ok { return zero, q.ErrNotOk }` shape.
+// Use Ok for comma-ok patterns: map lookups, type assertions, channel
+// receives. Reach for q.OkE to provide a richer error.
+//
+// Example:
+//
+//	func findUser(id int) (User, error) {
+//	    user := q.Ok(users[id])         // map lookup (v, ok)
+//	    admin := q.Ok(user.(Admin))     // type assertion (v, ok)
+//	    return admin, nil
+//	}
+func Ok[T any](v T, ok bool) T {
+	panicUnrewritten("q.Ok")
+	return v
+}
+
+// OkE wraps a (T, bool) pair into an OkResult so the caller can chain
+// a custom error handler. The full chain — q.OkE(call).Method(…) —
+// is rewritten as one expression by the preprocessor. Mirrors
+// NotNilE's vocabulary: there is no source error on the false-ok
+// branch, so ErrF takes a thunk and Wrap/Wrapf build the error from
+// scratch (errors.New / fmt.Errorf without %w).
+func OkE[T any](v T, ok bool) OkResult[T] {
+	panicUnrewritten("q.OkE")
+	return OkResult[T]{}
+}
+
+// OkResult carries a captured (value, ok) pair for the q.OkE chain.
+// The receiver fields are extracted by the preprocessor when emitting
+// the rewritten if-not-ok-then-return shape; the struct itself is
+// never materialized in production code.
+type OkResult[T any] struct {
+	v T
+	// ok is documented as part of the chain contract — the rewriter
+	// erases every call site before the binary runs, so the run-time
+	// method bodies (which panic if reached) never read it.
+	ok bool //nolint:unused // documented as part of the chain contract
+}
+
+// Err bubbles the supplied constant error when the captured ok is
+// false.
+func (r OkResult[T]) Err(replacement error) T {
+	panicUnrewritten("q.OkE(...).Err")
+	return r.v
+}
+
+// ErrF computes the bubble error via fn — useful when the error needs
+// runtime work to assemble. No captured source error (the not-ok
+// branch has none), so fn takes no arguments.
+func (r OkResult[T]) ErrF(fn func() error) T {
+	panicUnrewritten("q.OkE(...).ErrF")
+	return r.v
+}
+
+// Catch handles a not-ok value via fn, which returns either a
+// recovered (T, nil) — used in place of the bubble — or a new error
+// (zero, err) — bubbled. Mirrors NotNilE.Catch's shape.
+func (r OkResult[T]) Catch(fn func() (T, error)) T {
+	panicUnrewritten("q.OkE(...).Catch")
+	return r.v
+}
+
+// Wrap bubbles errors.New(msg). There is no source error to %w-wrap
+// on the not-ok branch; the message stands alone.
+func (r OkResult[T]) Wrap(msg string) T {
+	panicUnrewritten("q.OkE(...).Wrap")
+	return r.v
+}
+
+// Wrapf bubbles fmt.Errorf(format, args...). No %w is appended —
+// there is no source error on the not-ok branch — so the supplied
+// format is the full message.
+//
+// Example:
+//
+//	user := q.OkE(users[id]).Wrapf("no user %d", id)
+//	// rewrites to: if !ok { return zero, fmt.Errorf("no user %d", id) }
+func (r OkResult[T]) Wrapf(format string, args ...any) T {
+	panicUnrewritten("q.OkE(...).Wrapf")
 	return r.v
 }
 

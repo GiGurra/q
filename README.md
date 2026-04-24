@@ -58,6 +58,7 @@ See [Setup](#setup--ide-and-cache-configuration) below for the dedicated GOCACHE
 ```go
 n := q.Try(strconv.Atoi(s))      // (T, error)  → bubble err
 u := q.NotNil(table[id])         // (*T)        → bubble q.ErrNil
+v := q.Ok(lookup(k))             // (T, bool)   → bubble q.ErrNotOk
      q.Check(db.Ping())          // error alone → bubble err (stmt only)
 c := q.Open(dial(a)).Release((*Conn).Close)  // (T, error) + defer cleanup(v) on success
 ```
@@ -89,6 +90,16 @@ u := q.NotNilE(table[id]).ErrF(func() error { ... })             // computed err
 u := q.NotNilE(table[id]).Wrap("user not found")                 // errors.New(msg)
 u := q.NotNilE(table[id]).Wrapf("no user %d", id)                // fmt.Errorf(format, args...)
 u := q.NotNilE(table[id]).Catch(func() (*User, error) { ... })   // computed value OR error
+```
+
+For `(T, bool)` via `q.OkE` — map lookups, type assertions, channel receives:
+
+```go
+v := q.OkE(users[id]).Err(ErrNotFound)                           // replace with constant error
+v := q.OkE(users[id]).ErrF(func() error { ... })                 // computed error (thunk)
+v := q.OkE(users[id]).Wrap("user not found")                     // errors.New(msg)
+v := q.OkE(users[id]).Wrapf("no user %d", id)                    // fmt.Errorf(format, args...)
+v := q.OkE(users[id]).Catch(func() (User, error) { ... })        // computed value OR error
 ```
 
 For error-only via `q.CheckE` (void — always an expression statement):

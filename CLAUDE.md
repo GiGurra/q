@@ -21,17 +21,47 @@
 - `pkg/q/q.go` — public surface:
   - `Try[T any](v T, err error) T` — bare error bubble.
   - `NotNil[T any](p *T) *T` — bare nil bubble using sentinel `q.ErrNil`.
+  - `Ok[T any](v T, ok bool) T` — bare comma-ok bubble using sentinel `q.ErrNotOk`. Accepts either two separate args (`q.Ok(v, ok)`) or a single `(T, bool)`-returning call (`q.Ok(fn())`) via Go's f(g()) forwarding rule.
   - `Check(err error)` — void error-only bubble (for `db.Ping`, `file.Close`, `validate(x)`). Always an expression statement.
   - `Open[T any](v T, err error) OpenResult[T]` — resource acquisition; the only method is `.Release(cleanup func(T)) T` which bubbles on error and registers `defer cleanup(v)` on success.
   - `TryE[T any](v T, err error) ErrResult[T]` — chain entry for custom error handling on the Try family.
   - `NotNilE[T any](p *T) NilResult[T]` — chain entry for custom nil handling on the NotNil family.
+  - `OkE[T any](v T, ok bool) OkResult[T]` — chain entry for custom handling on the Ok family.
   - `CheckE(err error) CheckResult` — chain entry for custom error handling on Check (void).
   - `OpenE[T any](v T, err error) OpenResultE[T]` — chain entry for Open with shape methods that return `OpenResultE[T]` so `.Release` can still terminate the chain.
   - `ErrResult[T]` methods: `.Err(error)`, `.ErrF(func(error) error)`, `.Catch(func(error) (T, error))`, `.Wrap(string)`, `.Wrapf(string, ...any)`.
   - `NilResult[T]` methods: `.Err(error)`, `.ErrF(func() error)`, `.Catch(func() (*T, error))`, `.Wrap(string)`, `.Wrapf(string, ...any)`.
+  - `OkResult[T]` methods: `.Err(error)`, `.ErrF(func() error)`, `.Catch(func() (T, error))`, `.Wrap(string)`, `.Wrapf(string, ...any)` — mirrors NilResult's vocabulary (no captured source error on the not-ok branch, so Wrap uses `errors.New` and Wrapf uses `fmt.Errorf` without `%w`).
   - `CheckResult` methods (all return void): `.Err(error)`, `.ErrF(func(error) error)`, `.Catch(func(error) error)` (nil suppresses, non-nil bubbles), `.Wrap(string)`, `.Wrapf(string, ...any)`.
   - `OpenResultE[T]` shape methods: `.Err(error)`, `.ErrF(func(error) error)`, `.Catch(func(error) (T, error))`, `.Wrap(string)`, `.Wrapf(string, ...any)` — each returns `OpenResultE[T]` so `.Release(cleanup func(T)) T` can follow as terminal.
+  - `Trace[T any](v T, err error) T` — Try-shape with call-site `file:line` prefix injected into the bubble at compile time.
+  - `TraceE[T any](v T, err error) TraceResult[T]` — chain variant; every method composes over the location prefix.
+  - `Default[T any](v T, err error, fallback T) T` — swallows err, returns fallback on bubble (no early return). Supports 2-arg (`q.Default(call(), fb)`) and 3-arg (`q.Default(v, err, fb)`) call shapes.
+  - `DefaultE[T any](v T, err error, fallback T) DefaultResult[T]` — single method `.When(pred func(error) bool)`: matching errors fall back, others bubble.
+  - `Recv[T any](ch <-chan T) T` — channel receive that bubbles `q.ErrChanClosed` on closed channel.
+  - `RecvE[T any](ch <-chan T) OkResult[T]` — chain variant (reuses OkResult).
+  - `As[T any](x any) T` — type assertion that bubbles `q.ErrBadAssert` on failure. Explicit type arg required (`q.As[User](x)`).
+  - `AsE[T any](x any) OkResult[T]` — chain variant.
+  - `Lock(l sync.Locker)` — statement-only; emits `_qLockN := l; _qLockN.Lock(); defer _qLockN.Unlock()`.
+  - `Go(fn func())` — statement-only; spawns `fn` in a goroutine wrapped in `defer recover+println` with compile-time file:line.
+  - `TODO(msg ...string)` / `Unreachable(msg ...string)` — statement-only panics with file:line-prefixed messages.
+  - `Assert(cond bool, msg ...string)` — statement-only; panics on false with file:line-prefixed message.
+  - `Debug[T any](v T) T` — panic stub; the preprocessor rewrites each call site to `q.DebugAt("<file>:<line> <src-text>", v)`. Usable mid-expression.
+  - `DebugAt[T any](label string, v T) T` — runtime helper paired with Debug. Writes to `q.DebugWriter` (default `os.Stderr`, reassignable for test capture).
+  - `DebugWriter io.Writer = os.Stderr` — user-reassignable destination for DebugAt output.
+  - `Async[T any](fn func() (T, error)) Future[T]` — runtime helper; spawns `fn` in a goroutine, returns a `Future[T]` backed by a buffered channel.
+  - `AwaitRaw[T any](f Future[T]) (T, error)` — runtime helper; blocks on the Future and returns the tuple.
+  - `Await[T any](f Future[T]) T` — Try-like bubble over `q.AwaitRaw(f)`.
+  - `AwaitE[T any](f Future[T]) ErrResult[T]` — chain variant; reuses `ErrResult` so the vocabulary matches TryE.
+  - `TryCatch(try func()) TryCatchResult` + `.Catch(handler func(any))` — statement-only IIFE with defer-recover (Java-style try/catch demo).
+  - `Recover(errPtr *error)` — runtime helper; `defer q.Recover(&err)` converts any panic into `*q.PanicError` assigned via errPtr.
+  - `RecoverE(errPtr *error) RecoverResult` — chain variant; methods `.Map(func(any) error)`, `.Err(error)`, `.ErrF(func(*PanicError) error)`, `.Wrap(string)`, `.Wrapf(string, ...any)`. All terminal (each is the deferred function; recover() sees the panic).
+  - `PanicError{Value any; Stack []byte}` — `error` type produced by Recover / RecoverE (except when Err/Map overrides). `errors.As` extracts it.
   - `ErrNil` sentinel, exposed for `errors.Is` checks against the bare `q.NotNil` bubble.
+  - `ErrNotOk` sentinel, exposed for `errors.Is` checks against the bare `q.Ok` bubble.
+  - `ErrChanClosed` sentinel, exposed for `errors.Is` checks against the bare `q.Recv` bubble.
+  - `ErrBadAssert` sentinel, exposed for `errors.Is` checks against the bare `q.As` bubble.
+  - `qRuntimeHelpers` carve-out (scanner): `ToErr`, `DebugAt`, `Async`, `AwaitRaw`, `Recover`, `RecoverE`. These are NOT rewritten and run at runtime.
   - `ToErr[T any, E any, P interface{ *E; error }](v T, e P) (T, error)` — runtime helper (NOT rewritten, real body executes) that adapts a `(T, *E)` callee into `(T, error)` while collapsing a typed-nil `*E` into a literal nil `error`. Satisfies the typed-nil guard (its return type is literally `error`). Usable standalone, not tied to the rest of q.
   - `_qLink` plus `func init() { _qLink() }` — the package-level link gate.
 - `cmd/q/main.go` — toolexec shim, thin wrapper around `internal/preprocessor.Run`.
@@ -49,6 +79,14 @@
 - `internal/preprocessor/testdata/cases/try_simple_run_ok/` — Phase 2 fixture for bare `q.Try`: runs the binary on both a successful input ("21" → 42) and a failing one ("abc" → propagated `strconv.Atoi` error).
 - `internal/preprocessor/testdata/cases/tryE_chain_methods_run_ok/` — Phase 2 fixture for the full TryE chain: one helper function per method (`Err`, `ErrF`, `Wrap`, `Wrapf`, `Catch`-recovery, `Catch`-transform), each invoked on both the success and bubble paths, asserted line-by-line in expected_run.txt.
 - `internal/preprocessor/testdata/cases/notnil_family_run_ok/` — Phase 2 fixture for the full NotNil family: bare `q.NotNil` plus every `q.NotNilE` chain method, each invoked on both the pointer-present and pointer-absent paths.
+- `internal/preprocessor/testdata/cases/ok_family_run_ok/` — fixture for the full Ok family: bare `q.Ok` in both call-argument shapes (two-arg `q.Ok(v, ok)` and single-call `q.Ok(fn())`), every `q.OkE` chain method on both ok and not-ok paths, the assign + chain-discard forms (ordered so the discard fires before the later assign's bare bubble), the hoist form (q.Ok nested inside a regular call arg), and a sentinel-identity check `errors.Is(err, q.ErrNotOk)`.
+- `internal/preprocessor/testdata/cases/trace_family_run_ok/` — fixture for `q.Trace` / `q.TraceE`. Asserts the bubbled error starts with `main.go:<line>:` (line number normalised to `N` for stability) across every chain method plus errors.As / errors.Is chain integrity.
+- `internal/preprocessor/testdata/cases/default_family_run_ok/` — fixture for `q.Default` / `q.DefaultE`. Covers 2-arg and 3-arg call shapes, define/assign/return/hoist forms, `.When(pred)` matching and non-matching paths.
+- `internal/preprocessor/testdata/cases/panic_defer_family_run_ok/` — fixture for Phase 2 (q.Lock on Mutex + RWMutex.RLocker, q.Go happy path, q.TODO/Unreachable/Assert with and without messages). Includes `stripLineNumber` helper to normalise panic messages.
+- `internal/preprocessor/testdata/cases/recv_as_family_run_ok/` — fixture for `q.Recv` / `q.RecvE` and `q.As[T]` / `q.AsE[T]`. Both bare sentinels, Wrap/Wrapf/Err/Catch on both paths, errors.Is identity for both sentinels.
+- `internal/preprocessor/testdata/cases/debug_run_ok/` — fixture for `q.Debug`. Captures DebugWriter into a bytes.Buffer, line-number-normalises output, asserts pass-through semantics for int/string/arithmetic + direct DebugAt call.
+- `internal/preprocessor/testdata/cases/satire_lane_run_ok/` — fixture for q.Async + q.Await/AwaitE + q.TryCatch. Ok/err/wrap paths for Await, AwaitE.Catch recover+bubble, TryCatch happy/panic paths.
+- `internal/preprocessor/testdata/cases/recover_family_run_ok/` — fixture for `q.Recover` + every `q.RecoverE` method (Map/Err/Wrap/Wrapf/ErrF). errors.As extracts *PanicError, stack trace non-empty, user-supplied Map translates panic shapes to typed errors, Err replaces the bubble.
 - `internal/preprocessor/testdata/cases/forms_assign_discard_run_ok/` — Phase 2 fixture for the assign and discard forms: `v = q.Try(...)`, `q.Try(...)` discard, `v = q.TryE(...).Wrapf(...)` chain assign, `q.TryE(...).Err(...)` chain discard, plus the NotNil counterparts. 14 expected_run.txt lines locking in every form × family combination.
 - `internal/preprocessor/testdata/cases/return_position_run_ok/` — Phase 3 fixture for the return form: `return q.Try(...) * 2, nil` (nested inside an arithmetic expression), `return q.TryE(...).Wrap("..."), nil`, `return "tag", q.NotNil(p), nil` (q.* as the middle of three results), and `return q.NotNilE(p).Err(...), nil`. Eight expected_run.txt lines covering ok+bad for each shape.
 - `internal/preprocessor/testdata/cases/multi_q_in_return_run_ok/` — Phase 4 fixture for multiple q.* calls in one return expression: `q.Try(a()) * q.Try(b()) / q.Try(c())` (three Trys in arithmetic), mixed `q.Try + *q.NotNil` (two families in one return), two `q.TryE(...).Wrap(...)` with different messages, plus a counter-based short-circuit check (`calls=1` proves a failing first call skips the second). 14 expected_run.txt lines.

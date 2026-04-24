@@ -1,0 +1,12 @@
+noPanic.err=<nil>
+bare.isPanicErr=true
+bare.value=boom
+bare.stackNonEmpty=true
+map.isMyErr=true tag=my/tag1
+map.intPanic=unknown: 42
+err.replaced=fixed-error
+wrap.msg=during work: q: recovered panic: x
+wrap.unwrap=true
+wrap.value=x
+wrapf.msg=label=job-7: q: recovered panic: x
+errF.msg=custom[z]

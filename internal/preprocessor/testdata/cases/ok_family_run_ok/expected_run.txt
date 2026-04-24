@@ -1,0 +1,21 @@
+bareTwo.ok: ok=7
+bareTwo.bad: err=q: not ok
+bareOne.ok: ok=7
+bareOne.bad: err=q: not ok
+Err.ok: ok=7
+Err.bad: err=not found
+ErrF.ok: ok=7
+ErrF.bad: err=computed
+Wrap.ok: ok=7
+Wrap.bad: err=ok-context
+Wrapf.ok: ok=7
+Wrapf.bad: err=no entry for "missing"
+CatchRec.ok: ok=7
+CatchRec.bad: ok=99
+CatchXf.ok: ok=7
+CatchXf.bad: err=catch-transformed not-ok
+hoist.ok: ok=7
+hoist.bad: err=q: not ok
+forms.ok: ok=7
+forms.bad: err=not found
+isErrNotOk: true

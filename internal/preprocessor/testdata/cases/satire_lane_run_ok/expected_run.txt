@@ -1,0 +1,7 @@
+await.ok: ok=42
+await.err: err=boom
+awaitWrap.err: err=fetching: boom
+awaitCatch.soft: ok=99
+awaitCatch.hard: err=hard
+try.ran: no-panic
+catch.caught: boom

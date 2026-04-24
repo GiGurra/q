@@ -100,7 +100,7 @@ func checkErrorSlots(fset *token.FileSet, pkgPath, importcfgPath string, files [
 // anything other than the built-in `error` interface.
 func validateSlot(fset *token.FileSet, sc qSubCall, info *types.Info, errType types.Type) (Diagnostic, bool) {
 	switch sc.Family {
-	case familyTry, familyTryE, familyOpen, familyOpenE:
+	case familyTry, familyTryE, familyOpen, familyOpenE, familyTrace, familyTraceE:
 		// InnerExpr is a (T, error)-returning CallExpr. Inspect
 		// the tuple's last element.
 		t := info.TypeOf(sc.InnerExpr)
@@ -168,6 +168,10 @@ func familyLabel(f family) string {
 		return "q.Open"
 	case familyOpenE:
 		return "q.OpenE"
+	case familyTrace:
+		return "q.Trace"
+	case familyTraceE:
+		return "q.TraceE"
 	}
 	return "q.*"
 }

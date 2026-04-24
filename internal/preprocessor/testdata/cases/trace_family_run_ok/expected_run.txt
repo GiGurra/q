@@ -1,0 +1,9 @@
+bare: err=main.go:N: strconv.Atoi: parsing "abc": invalid syntax
+Err: err=main.go:N: replaced
+ErrF: err=main.go:N: f: strconv.Atoi: parsing "abc": invalid syntax
+Wrap: err=main.go:N: parsing: strconv.Atoi: parsing "abc": invalid syntax
+Wrapf: err=main.go:N: parsing "abc": strconv.Atoi: parsing "abc": invalid syntax
+CatchRec: ok=42
+CatchXf: err=main.go:N: catch: strconv.Atoi: parsing "abc": invalid syntax
+unwrap.As: true
+unwrap.Is(Replaced): true

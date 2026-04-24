@@ -10,15 +10,49 @@ The persistent backlog for `q`. Mirrors the in-session task list so a fresh conv
 
 ### High-impact gaps in the public surface
 
+**E-variant convention.** Every bubble-shaped feature gets both a bare form and an `…E` chain form that exposes the standard vocabulary — `.Err(error)`, `.ErrF(fn)`, `.Wrap(msg)`, `.Wrapf(format, args…)`, `.Catch(…)` — matching what Try/NotNil/Check/Open already expose. Features that do not bubble (compile-time prints, panics, defer sugar) explicitly have no E-variant.
+
+_(All of #21–#30 and #32 shipped — see the Done ledger. Open list is now empty of top-priority items; reach for the parking lot below or propose something new.)_
+
+**Dropped from the plan**
+
+- ~~**#31 — `q.Must` / `q.MustE`**~~ — removed. Panicking is the opposite of what q exists to enable; the library's pitch is IDE-friendly explicit error forwarding, not abort. Callers who need "fail loudly at startup" already have `if err != nil { panic(err) }`. Not tracked for future implementation.
+
 ### Future / parking lot
 
-- [ ] **#11 — `q.<X>` for is-nil-as-failure / comma-ok / etc.** Open question from design discussion: a counterpart helper for cases where the bubble-trigger isn't `(T, error)` or `*T == nil`. Possible shapes: `q.IfNil(x)` — bubble when x is nil; `q.Ok(v, ok)` — bubble when ok is false (comma-ok pattern); `q.Recv(ch)` — bubble on channel close. Get exact semantic from user before designing.
+- [ ] **#11 — `q.<X>` for is-nil-as-failure / comma-ok / etc.** Umbrella ticket — superseded by #20, #24. Keep open as the catch-all for any additional bubble triggers that surface later (e.g. `q.IfNil(x)` for error-less nil checks that don't want to spell `q.NotNilE(…).Err(ErrSomething)`).
 
 - [ ] **#16 — Multi-LHS from a single q.\*** (deferred). `v, w := q.Try(call())` where we'd want q.Try to split a multi-result producer. Requires new runtime helpers `q.Try2[T1, T2]` / `q.Try3` and matching rewrite templates. The hoist infrastructure already handles *incidental* multi-LHS (where the RHS call itself returns multi, and a q.* is nested in its args — see `multiLHS` in the hoist fixture). This parking-lot item is strictly the shape where q.* IS the multi-result producer; deprioritised in favour of #15 / #17.
 
 ## Done
 
 A short ledger of what's shipped — newest first. Look at `git log` for the full story.
+
+- **#32 — q.Recover / q.RecoverE (panic→error).** Pure runtime helpers (no preprocessor rewriting — Go's `recover()` sees the panic because the terminal method IS the deferred function). `q.Recover(&err)` wraps any panic in `*q.PanicError` (preserves panic value + `debug.Stack()`). `q.RecoverE(&err)` exposes `.Map(func(any) error)`, `.Err`, `.ErrF(func(*PanicError) error)`, `.Wrap`, `.Wrapf`. `qRuntimeHelpers` extended with `Recover` and `RecoverE`. Fixture `recover_family_run_ok` covers errors.As extraction, stack preservation, Map / Err / Wrap / Wrapf / ErrF on both panic and no-panic paths.
+
+- **#30 — q.Async / q.Await / q.AwaitE.** `q.Async(fn)` spawns a goroutine and returns `Future[T]` via a buffered channel (plain runtime fn; `Async` + `AwaitRaw` are in `qRuntimeHelpers`). `q.Await(f)` rewrites to `Try` shape with `q.AwaitRaw(f)` as the source; `q.AwaitE(f).<method>` rewrites to `TryE` shape with the same inner. Shares the existing ErrResult type so the chain vocabulary is identical to TryE. Fixture `satire_lane_run_ok` covers happy path, err-bubble, .Wrap, .Catch-recover / .Catch-bubble.
+
+- **#29 — q.TryCatch / .Catch (satire).** `q.TryCatch(tryFn).Catch(handler)` rewrites to an IIFE with `defer func() { if r := recover(); r != nil { handler(r) } }(); tryFn()`. Statement-only. Satire-lane demo of Java-style exception blocks expressible via the preprocessor. Same fixture as #30.
+
+- **#28 — q.Go (crash-isolated goroutine).** Rewrites to `go func() { defer <recover+println with file:line>; fn() }()`. Uses Go's `println` builtin so no new imports. Statement-only. Fixture `panic_defer_family_run_ok` covers the happy path (panic-recovery path covered by scanner acceptance; explicit runtime assertion of panic-recovery deferred to a dedicated fixture because of stdout/stderr timing races with `go run`'s combined output).
+
+- **#27 — q.Lock (Lock + defer Unlock).** Rewrites to `_qLockN := <locker>; _qLockN.Lock(); defer _qLockN.Unlock()`. Accepts any `sync.Locker` — covers `*sync.Mutex`, `*sync.RWMutex`, `rwm.RLocker()`. Statement-only. Same fixture as #25/#26/#28.
+
+- **#26 — q.Assert (panic-on-false).** Rewrites to `if !(<cond>) { panic("q.Assert failed <file>:<line>: <msg>") }`. Statement-only. Optional message via variadic. Same fixture as above. Build-tag compile-out (`-tags=qrelease`) deferred — current implementation always emits the check.
+
+- **#25 — q.TODO / q.Unreachable (panic markers).** Rewrite to `panic("q.TODO <file>:<line>[: <msg>]")` / `"q.Unreachable ..."`. Statement-only, optional message. Same fixture as above. Build-time aggregation (TODO count summary) deferred.
+
+- **#24 — q.Recv / q.RecvE / q.As / q.AsE (Ok-family extensions).** Share the Ok family's check+bubble shape through a new `okBindLineFromInner` helper that accepts a pre-computed inner text. Recv's inner is `<-(<chExpr>)`; As[T]'s inner is `(<xExpr>).(<T>)`. Bubble sentinels: `q.ErrChanClosed`, `q.ErrBadAssert`. `q.As[T]` uses `IndexExpr` detection (via new `isIndexedSelector` helper) to capture the explicit type argument. Scanner handles both bare and chain cases; rewriter reuses `assembleOkBlock` / `assembleOkCatchBlock` through a new `renderOkLikeE` dispatcher. `lhsTextOrUnderscore` got `counter` added to resolve formReturn/formHoist crashes when Catch appears in return position (latent bug in OkE/NotNilE Catch). Fixture `recv_as_family_run_ok` covers 11 assertions across bare, Wrap, Wrapf, Err, Catch, errors.Is sentinel identity on both paths.
+
+- **#22 — q.Debug (Go's missing dbg!).** `q.Debug(x)` rewrites in-place to `q.DebugAt("<file>:<line> <src-text>", x)` where DebugAt is a runtime helper. Plain runtime default destination is `os.Stderr`, overridable via package-level `q.DebugWriter io.Writer` — the fixture uses that to capture and normalise output for assertions. Return value is unchanged, so `q.Debug` is usable mid-expression: `q.Try(loadUser(q.Debug(id)))`. The rewriter refactor: `substituteSpans` now takes per-sub replacement text (`subTexts []string`) instead of always generating `_qTmpN`, so Debug's in-place substitution ships alongside the bubble family's temp substitutions. Fixture `debug_run_ok` locks in pass-through semantics for int, string, and arithmetic-embedded usage plus direct DebugAt call.
+
+- **#21 — q.Trace / q.TraceE (compile-time file:line).** Same shape as Try/TryE but the bubble wraps with `fmt.Errorf("<basename>:<line>: ...: %w", err)` using the call-site position captured at rewrite time. Every chain method (`Err`, `ErrF`, `Wrap`, `Wrapf`, `Catch`) composes over the prefix. Prefix is built via a new `tracePrefix(fset, pos)` helper. `Wrapf` round-trips the user's literal through strconv.Unquote/Quote to splice prefix + format + `: %w` safely. Typecheck guard extended to familyTrace/TraceE. Fixture `trace_family_run_ok` normalizes the line number to N and asserts prefix + unwrap chain integrity.
+
+- **#23 — q.Default / q.DefaultE (swallow with fallback).** `q.Default(callOrVE, fb)` swallows err and substitutes fallback — no bubble. Accepts either `(CallExpr, fb)` (2 args) or `(v, err, fb)` (3 args) via Go's f(g()) rule. `q.DefaultE(..., fb).When(pred)` gates the fallback: pred-matching errors → fallback, others bubble with the plain captured err (requires a return list). Scanner adds `DefaultInner[]ast.Expr` and `DefaultFallback ast.Expr` fields; rewriter introduces `renderDefault`/`renderDefaultE` with a dedicated `defaultBindLine` helper — the first family that skips `commonRenderInputs` since bare Default works in void-return functions. Fixture `default_family_run_ok` covers all forms × both arg shapes + When.matched/When.missed.
+
+- **Bug fix: findQReference container boundaries.** `findQReference`'s recursive descent was firing false positives on `q.*` calls nested inside `*ast.CaseClause` / `*ast.CommClause` bodies — those containers hold statements directly (no BlockStmt wrap) so the existing BlockStmt guard wasn't enough. New `isContainerStmt` helper skips the unsupported-shape fallback for container stmts; `walkChildBlocks` already descends into their bodies and matches the contents properly. Surfaced by `panic_defer_family_run_ok` putting `q.Unreachable()` in a switch default.
+
+- **#20 — q.Ok / q.OkE (comma-ok bubble).** New family that bubbles `q.ErrNotOk` when `ok` is false. Accepts two call-argument shapes — `q.Ok(v, ok)` (two separate exprs) and `q.Ok(fn())` (single CallExpr returning `(T, bool)`, expanded via Go's f(g()) rule). OkE exposes the standard chain vocabulary mirroring NotNilE: no captured source error on the not-ok branch, so `Wrap` emits `errors.New` and `Wrapf` emits `fmt.Errorf` without `%w`. Rewriter adds `okBindLineAndCheck` (tuple-binds value + `_qOkN`), `assembleOkBlock` (check is `!<okVar>`), and `assembleOkCatchBlock`. Fixture `ok_family_run_ok` asserts 21 lines covering bare × both arg shapes, every chain method on both paths, hoist form, assign + discard forms, and `errors.Is(err, q.ErrNotOk)` sentinel identity.
 
 - **#15 + #17 — q.Check / q.CheckE + q.Open / q.OpenE.** Two new public-surface families landed together:
   - **q.Check** (void, error-only): `q.Check(file.Close())` bubbles non-nil err, otherwise no-op. Always an expression statement — the helper's return type is `()`, so `v := q.Check(...)` is a Go type error. `q.CheckE(...).<Err|ErrF|Wrap|Wrapf|Catch>` supports the same error-shape vocabulary as TryE; Catch's fn signature is `func(error) error` (nil = suppress, non-nil = bubble) since there's no value to recover.

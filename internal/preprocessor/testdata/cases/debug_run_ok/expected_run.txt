@@ -1,0 +1,12 @@
+x=42
+double=14
+y=15
+s=hello
+z=100
+--- debug ---
+main.go:N 42 = 42
+main.go:N 7 = 7
+main.go:N 10 = 10
+main.go:N 5 = 5
+main.go:N "hello" = hello
+custom-label = 100

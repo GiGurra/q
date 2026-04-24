@@ -1,0 +1,11 @@
+recv.ok: ok=7
+recv.closed: err=q: channel closed
+recv.is: true
+recvWrap.closed: err=reading work
+recvCatch.closed: ok=-1
+as.int: ok=42
+as.bad: err=q: type assertion failed
+as.is: true
+asWrap.bad: err=not int: hello
+asErr.bad: err=replaced
+asCatch.bad: ok=42

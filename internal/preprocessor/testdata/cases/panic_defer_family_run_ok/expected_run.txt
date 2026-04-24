@@ -1,0 +1,10 @@
+Get(a)=1
+Get(b)=2
+CacheRead(x)=99
+assertPasses: survived
+assertFails: q.Assert failed main.go:N: forced fail
+assertNoMsg: q.Assert failed main.go:N
+todoNoMsg: q.TODO main.go:N
+todoWithMsg: q.TODO main.go:N: implement parser
+reached 3
+goNormal: 7
