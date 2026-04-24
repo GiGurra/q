@@ -1,0 +1,15 @@
+recvAny.first: ok=7
+recvAny.closed: err=q: channel closed
+recvAny.catchClose: ok=-1
+recvAny.ctx: err=context canceled
+drain.three: [10,20,30]
+drain.empty: []
+drainCtx.cancel: err=context deadline exceeded
+drainCtx.ok: [1,2,3]
+drainCtx.wrap: err=drain: context deadline exceeded
+drainAll.0: [1,2]
+drainAll.1: [10]
+drainAll.2: [100,200,300]
+drainAllCtx.cancel: err=context deadline exceeded
+drainAllCtx.ok.0: [5,6]
+drainAllCtx.ok.1: [7,8,9]

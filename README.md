@@ -65,6 +65,12 @@ See [Setup](#setup--ide-and-cache-configuration) below for the dedicated GOCACHE
 | [`q.Recover` / `q.RecoverE`](docs/api/recover.md) | `defer q.Recover(&err)` — function-wide panic→error.          |
 | [`q.Lock`](docs/api/lock.md)                      | `Lock()` + `defer Unlock()` for any `sync.Locker`.            |
 | [`q.Async` / `q.Await` / `q.AwaitE`](docs/api/async.md) | JS-flavour promises on top of goroutines + channels.    |
+| [`q.AwaitAll` / `q.AwaitAny`](docs/api/await_multi.md) | Fan-in over many futures (`[]T` all-must-succeed / `T` first-success-wins). |
+| [`q.RecvAny` / `q.Drain` / `q.DrainAll`](docs/api/channel_multi.md) | Multi-channel select / drain-until-close / per-channel drain-all.   |
+| [`q.Bubble` / `q.BubbleE`](docs/api/bubble.md)    | `ctx.Err()` cancellation checkpoint.                          |
+| [`q.RecvCtx` / `q.RecvCtxE`](docs/api/recv_ctx.md) | ctx-aware channel receive — bubbles on close or cancel.       |
+| [`q.AwaitCtx` / `q.AwaitCtxE`](docs/api/await_ctx.md) | ctx-aware future await.                                    |
+| [`q.Timeout` / `q.Deadline`](docs/api/timeout.md) | derive a child ctx with an auto-`defer cancel()`.             |
 | [`q.Debug`](docs/api/debug.md)                    | Go's missing `dbg!` — prints `file:line src = value`.         |
 | [`q.TODO` / `q.Unreachable`](docs/api/todo.md)    | Rust-style panic markers with file:line.                      |
 | [`q.Assert`](docs/api/assert.md)                  | Runtime assertion — panic on false.                           |
@@ -190,6 +196,21 @@ func (s *Store) Set(k, v string) {
 f := q.Async(func() (int, error) { return fetchSize(url) })
 size := q.Await(f)                            // blocks, bubbles on err
 size := q.AwaitE(f).Wrapf("fetching %s", url)
+```
+
+### Context + cancellation — `q.Bubble`, `q.Timeout` / `q.Deadline`, `q.RecvCtx`, `q.AwaitCtx`
+
+```go
+q.Bubble(ctx)                                 // if ctx.Err() != nil: bubble it
+q.BubbleE(ctx).Wrap("loading")                // shape the bubble with ErrResult vocab
+
+ctx = q.Timeout(ctx, 2*time.Second)           // ctx, _qCancel := WithTimeout(...); defer cancel()
+ctx = q.Deadline(ctx, deadline)               // same with WithDeadline
+
+msg := q.RecvCtx(ctx, inbox)                  // select on ctx.Done() + inbox
+msg := q.RecvCtxE(ctx, inbox).Wrap("inbox")
+
+v := q.AwaitCtx(ctx, future)                  // select on ctx.Done() + future channel
 ```
 
 ### Dev tools — `q.Debug`, `q.TODO`, `q.Unreachable`, `q.Assert`

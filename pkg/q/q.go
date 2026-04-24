@@ -24,12 +24,15 @@
 package q
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"reflect"
 	"runtime/debug"
 	"sync"
+	"time"
 
 	_ "unsafe" // for //go:linkname
 )
@@ -819,6 +822,533 @@ func (r OkResult[T]) Wrap(msg string) T {
 func (r OkResult[T]) Wrapf(format string, args ...any) T {
 	panicUnrewritten("q.OkE(...).Wrapf")
 	return r.v
+}
+
+// Bubble is a cancellation/deadline checkpoint. Statement-only:
+// when ctx has been cancelled (ctx.Err() != nil), the preprocessor
+// rewrites the call site into the inlined `if err := ctx.Err(); err
+// != nil { return zero, err }` shape; otherwise execution falls
+// through. Use Bubble at natural yield points in long-running
+// work (between iterations, between expensive calls) to surface
+// context cancellation as a normal error bubble.
+//
+// Example:
+//
+//	for _, item := range items {
+//	    q.Bubble(ctx)
+//	    process(item)
+//	}
+//
+// Reach for q.BubbleE to shape the bubbled error via the ErrResult
+// vocabulary (Err / ErrF / Catch / Wrap / Wrapf).
+func Bubble(ctx context.Context) {
+	panicUnrewritten("q.Bubble")
+}
+
+// BubbleE starts a chain on a context-cancellation checkpoint. The
+// chain method shapes the bubbled error (Err / ErrF / Wrap / Wrapf /
+// Catch). Reuses CheckResult — BubbleE has no value to thread, only
+// an error to shape.
+func BubbleE(ctx context.Context) CheckResult {
+	panicUnrewritten("q.BubbleE")
+	return CheckResult{}
+}
+
+// RecvRawCtx is the runtime helper for q.RecvCtx. select-blocks on
+// ch and ctx.Done(); returns (v, nil) on a successful receive,
+// (zero, ErrChanClosed) on a closed channel, and (zero, ctx.Err())
+// on context cancellation. Plain runtime function — callable
+// directly when the raw tuple is wanted.
+func RecvRawCtx[T any](ctx context.Context, ch <-chan T) (T, error) {
+	select {
+	case <-ctx.Done():
+		var zero T
+		return zero, ctx.Err()
+	case v, ok := <-ch:
+		if !ok {
+			var zero T
+			return zero, ErrChanClosed
+		}
+		return v, nil
+	}
+}
+
+// RecvCtx receives from ch while honouring ctx cancellation. The
+// preprocessor rewrites the call site into `v, err := q.RecvRawCtx(ctx,
+// ch); if err != nil { return zero, err }`. Use q.RecvCtxE to shape
+// the bubbled error with the ErrResult vocabulary.
+func RecvCtx[T any](ctx context.Context, ch <-chan T) T {
+	panicUnrewritten("q.RecvCtx")
+	var zero T
+	return zero
+}
+
+// RecvCtxE is the chain variant of RecvCtx. Reuses ErrResult[T] so
+// the chain vocabulary is identical to TryE — the bubbled error is
+// either ctx.Err() or q.ErrChanClosed, shaped by the chain method.
+func RecvCtxE[T any](ctx context.Context, ch <-chan T) ErrResult[T] {
+	panicUnrewritten("q.RecvCtxE")
+	return ErrResult[T]{}
+}
+
+// AwaitRawCtx is the runtime helper for q.AwaitCtx. Blocks on the
+// Future's result channel and ctx.Done(); returns the Future's
+// (v, err) on completion or (zero, ctx.Err()) on cancellation. If
+// ctx fires first, the underlying goroutine continues until fn
+// returns on its own — Go has no goroutine-kill. Thread the same
+// ctx into the q.Async closure when early cancellation of the
+// spawned work is needed.
+func AwaitRawCtx[T any](ctx context.Context, f Future[T]) (T, error) {
+	select {
+	case <-ctx.Done():
+		var zero T
+		return zero, ctx.Err()
+	case r := <-f.done:
+		return r.v, r.err
+	}
+}
+
+// AwaitAllRaw waits for every future to complete in parallel, then
+// returns the collected values in the order the futures were passed.
+// Bubbles the first error observed — either a future's own error —
+// and returns (nil, err) immediately; remaining futures' goroutines
+// keep running until they finish on their own (Go has no
+// goroutine-kill).
+//
+// Plain runtime function (NOT rewritten by the preprocessor),
+// callable directly when the raw ([]T, error) tuple is wanted.
+func AwaitAllRaw[T any](futures ...Future[T]) ([]T, error) {
+	if len(futures) == 0 {
+		return nil, nil
+	}
+	type indexed struct {
+		i   int
+		v   T
+		err error
+	}
+	ch := make(chan indexed, len(futures))
+	for i, f := range futures {
+		go func(i int, f Future[T]) {
+			v, err := AwaitRaw(f)
+			ch <- indexed{i: i, v: v, err: err}
+		}(i, f)
+	}
+	results := make([]T, len(futures))
+	for range len(futures) {
+		r := <-ch
+		if r.err != nil {
+			return nil, r.err
+		}
+		results[r.i] = r.v
+	}
+	return results, nil
+}
+
+// AwaitAllRawCtx is AwaitAllRaw with context cancellation: if ctx
+// fires before all futures complete, returns (nil, ctx.Err())
+// immediately (without aggregating the pending futures' Ctx-error
+// duplicates). Same goroutine-leak caveat as AwaitRawCtx — thread
+// ctx into each q.Async closure for true early cancellation of the
+// spawned work.
+func AwaitAllRawCtx[T any](ctx context.Context, futures ...Future[T]) ([]T, error) {
+	if len(futures) == 0 {
+		return nil, nil
+	}
+	type indexed struct {
+		i   int
+		v   T
+		err error
+	}
+	ch := make(chan indexed, len(futures))
+	for i, f := range futures {
+		go func(i int, f Future[T]) {
+			v, err := AwaitRaw(f)
+			ch <- indexed{i: i, v: v, err: err}
+		}(i, f)
+	}
+	results := make([]T, len(futures))
+	for range len(futures) {
+		select {
+		case r := <-ch:
+			if r.err != nil {
+				return nil, r.err
+			}
+			results[r.i] = r.v
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return results, nil
+}
+
+// AwaitAll waits for every future to succeed and returns their
+// collected values in input order. The preprocessor rewrites the
+// call site into `vs, err := q.AwaitAllRaw(futures...); if err !=
+// nil { return zero, err }`.
+func AwaitAll[T any](futures ...Future[T]) []T {
+	panicUnrewritten("q.AwaitAll")
+	return nil
+}
+
+// AwaitAllE is the chain variant of AwaitAll. Reuses ErrResult
+// with element type []T — the bubbled error is whichever error
+// AwaitAllRaw saw first.
+func AwaitAllE[T any](futures ...Future[T]) ErrResult[[]T] {
+	panicUnrewritten("q.AwaitAllE")
+	return ErrResult[[]T]{}
+}
+
+// AwaitAllCtx is AwaitAll with context cancellation; the rewriter
+// emits q.AwaitAllRawCtx as the inner helper.
+func AwaitAllCtx[T any](ctx context.Context, futures ...Future[T]) []T {
+	panicUnrewritten("q.AwaitAllCtx")
+	return nil
+}
+
+// AwaitAllCtxE is the chain variant of AwaitAllCtx.
+func AwaitAllCtxE[T any](ctx context.Context, futures ...Future[T]) ErrResult[[]T] {
+	panicUnrewritten("q.AwaitAllCtxE")
+	return ErrResult[[]T]{}
+}
+
+// AwaitAnyRaw returns the first future to complete successfully.
+// If every future returns an error, returns (zero, errors.Join(…))
+// of each collected error in completion order.
+//
+// Plain runtime function (NOT rewritten by the preprocessor).
+func AwaitAnyRaw[T any](futures ...Future[T]) (T, error) {
+	var zero T
+	if len(futures) == 0 {
+		return zero, errors.New("q.AwaitAny: no futures to await")
+	}
+	type indexed struct {
+		v   T
+		err error
+	}
+	ch := make(chan indexed, len(futures))
+	for _, f := range futures {
+		go func(f Future[T]) {
+			v, err := AwaitRaw(f)
+			ch <- indexed{v: v, err: err}
+		}(f)
+	}
+	var errs []error
+	for range len(futures) {
+		r := <-ch
+		if r.err == nil {
+			return r.v, nil
+		}
+		errs = append(errs, r.err)
+	}
+	return zero, errors.Join(errs...)
+}
+
+// AwaitAnyRawCtx is AwaitAnyRaw with context cancellation: if ctx
+// fires before any success, returns (zero, ctx.Err()) once — any
+// already-collected per-future errors are discarded in favour of
+// ctx.Err().
+func AwaitAnyRawCtx[T any](ctx context.Context, futures ...Future[T]) (T, error) {
+	var zero T
+	if len(futures) == 0 {
+		return zero, errors.New("q.AwaitAnyCtx: no futures to await")
+	}
+	type indexed struct {
+		v   T
+		err error
+	}
+	ch := make(chan indexed, len(futures))
+	for _, f := range futures {
+		go func(f Future[T]) {
+			v, err := AwaitRaw(f)
+			ch <- indexed{v: v, err: err}
+		}(f)
+	}
+	var errs []error
+	for range len(futures) {
+		select {
+		case r := <-ch:
+			if r.err == nil {
+				return r.v, nil
+			}
+			errs = append(errs, r.err)
+		case <-ctx.Done():
+			return zero, ctx.Err()
+		}
+	}
+	return zero, errors.Join(errs...)
+}
+
+// AwaitAny returns the first future to succeed. If every future
+// fails, bubbles an errors.Join of each failure. Preprocessor-
+// rewritten like q.Await.
+func AwaitAny[T any](futures ...Future[T]) T {
+	panicUnrewritten("q.AwaitAny")
+	var zero T
+	return zero
+}
+
+// AwaitAnyE is the chain variant of AwaitAny.
+func AwaitAnyE[T any](futures ...Future[T]) ErrResult[T] {
+	panicUnrewritten("q.AwaitAnyE")
+	return ErrResult[T]{}
+}
+
+// AwaitAnyCtx is AwaitAny with context cancellation.
+func AwaitAnyCtx[T any](ctx context.Context, futures ...Future[T]) T {
+	panicUnrewritten("q.AwaitAnyCtx")
+	var zero T
+	return zero
+}
+
+// AwaitAnyCtxE is the chain variant of AwaitAnyCtx.
+func AwaitAnyCtxE[T any](ctx context.Context, futures ...Future[T]) ErrResult[T] {
+	panicUnrewritten("q.AwaitAnyCtxE")
+	return ErrResult[T]{}
+}
+
+// AwaitCtx blocks on a Future while honouring ctx cancellation.
+// The preprocessor rewrites the call site into the inlined `v, err
+// := q.AwaitRawCtx(ctx, f); if err != nil { return zero, err }`
+// shape. Reach for q.AwaitCtxE for chain-style custom error handling.
+func AwaitCtx[T any](ctx context.Context, f Future[T]) T {
+	panicUnrewritten("q.AwaitCtx")
+	var zero T
+	return zero
+}
+
+// AwaitCtxE is the chain variant of AwaitCtx; reuses ErrResult[T]
+// so the chain vocabulary is identical to TryE / AwaitE.
+func AwaitCtxE[T any](ctx context.Context, f Future[T]) ErrResult[T] {
+	panicUnrewritten("q.AwaitCtxE")
+	return ErrResult[T]{}
+}
+
+// Timeout derives a child context cancelled after dur. The
+// preprocessor rewrites `ctx = q.Timeout(ctx, 5*time.Second)` (or
+// `newCtx := q.Timeout(ctx, 5*time.Second)`) into the two-line
+// idiom `ctx, _qCancelN := context.WithTimeout(ctx, dur); defer
+// _qCancelN()` — the cancel function is hidden and auto-deferred
+// in the enclosing function. Only valid in define (`:=`) or
+// assign (`=`) position with a single LHS.
+//
+// Example:
+//
+//	ctx = q.Timeout(ctx, 5*time.Second)
+//	reply := q.Try(call(ctx))
+//
+// For "cancel early from another goroutine" flows, write
+// `ctx, cancel := context.WithCancel(parent)` by hand — q.Timeout
+// hides the cancel function, which is the wrong default when
+// outside code needs to invoke it.
+func Timeout(ctx context.Context, dur time.Duration) context.Context {
+	panicUnrewritten("q.Timeout")
+	return ctx
+}
+
+// Deadline derives a child context cancelled at t. Same shape as
+// Timeout but takes a time.Time for propagating an inherited
+// deadline (e.g. from an HTTP header or parent job) rather than a
+// fresh relative timeout.
+func Deadline(ctx context.Context, t time.Time) context.Context {
+	panicUnrewritten("q.Deadline")
+	return ctx
+}
+
+// RecvAnyRaw performs a dynamic N-way select over the supplied
+// channels and returns the first value received. On any channel
+// close, returns (zero, ErrChanClosed). If len(chans) == 0,
+// returns a descriptive error (a 0-way select would block forever).
+//
+// Uses reflect.Select under the hood — necessary because the
+// channel count is runtime-sized. Plain runtime function (NOT
+// rewritten by the preprocessor).
+func RecvAnyRaw[T any](chans ...<-chan T) (T, error) {
+	var zero T
+	if len(chans) == 0 {
+		return zero, errors.New("q.RecvAny: no channels to select on")
+	}
+	cases := make([]reflect.SelectCase, len(chans))
+	for i, c := range chans {
+		cases[i] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(c)}
+	}
+	_, rv, ok := reflect.Select(cases)
+	if !ok {
+		return zero, ErrChanClosed
+	}
+	return rv.Interface().(T), nil
+}
+
+// RecvAnyRawCtx is RecvAnyRaw with ctx cancellation. If ctx fires
+// before any channel delivers, returns (zero, ctx.Err()).
+func RecvAnyRawCtx[T any](ctx context.Context, chans ...<-chan T) (T, error) {
+	var zero T
+	if len(chans) == 0 {
+		return zero, errors.New("q.RecvAnyCtx: no channels to select on")
+	}
+	cases := make([]reflect.SelectCase, len(chans)+1)
+	for i, c := range chans {
+		cases[i] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(c)}
+	}
+	cases[len(chans)] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ctx.Done())}
+	idx, rv, ok := reflect.Select(cases)
+	if idx == len(chans) {
+		return zero, ctx.Err()
+	}
+	if !ok {
+		return zero, ErrChanClosed
+	}
+	return rv.Interface().(T), nil
+}
+
+// RecvAny returns the first value received across the supplied
+// channels. Preprocessor-rewritten as Try-like bubble over
+// q.RecvAnyRaw; reach for q.RecvAnyCtx when ctx cancellation
+// should bail early, q.RecvAnyE / q.RecvAnyCtxE for chain-style
+// error shaping (including "ignore close, keep waiting" via
+// Catch+recover).
+func RecvAny[T any](chans ...<-chan T) T {
+	panicUnrewritten("q.RecvAny")
+	var zero T
+	return zero
+}
+
+// RecvAnyE is the chain variant of RecvAny.
+func RecvAnyE[T any](chans ...<-chan T) ErrResult[T] {
+	panicUnrewritten("q.RecvAnyE")
+	return ErrResult[T]{}
+}
+
+// RecvAnyCtx is RecvAny with ctx cancellation.
+func RecvAnyCtx[T any](ctx context.Context, chans ...<-chan T) T {
+	panicUnrewritten("q.RecvAnyCtx")
+	var zero T
+	return zero
+}
+
+// RecvAnyCtxE is the chain variant of RecvAnyCtx.
+func RecvAnyCtxE[T any](ctx context.Context, chans ...<-chan T) ErrResult[T] {
+	panicUnrewritten("q.RecvAnyCtxE")
+	return ErrResult[T]{}
+}
+
+// Drain receives from ch until it closes, returning the collected
+// values in reception order. Plain runtime function — no error
+// path (the only way to fail is ctx cancellation, and this form
+// doesn't take one). If ch never closes, Drain blocks forever;
+// reach for q.DrainCtx when a cancellable wait is needed.
+func Drain[T any](ch <-chan T) []T {
+	var out []T
+	for v := range ch {
+		out = append(out, v)
+	}
+	return out
+}
+
+// DrainAll drains every supplied channel concurrently until all
+// close, returning the per-channel collected values in input order.
+// Plain runtime function — same no-error-path semantics as Drain.
+func DrainAll[T any](chans ...<-chan T) [][]T {
+	results := make([][]T, len(chans))
+	var wg sync.WaitGroup
+	for i, ch := range chans {
+		wg.Add(1)
+		go func(i int, ch <-chan T) {
+			defer wg.Done()
+			results[i] = Drain(ch)
+		}(i, ch)
+	}
+	wg.Wait()
+	return results
+}
+
+// DrainRawCtx receives from ch until it closes or ctx cancels. On
+// cancel, returns (nil, ctx.Err()) — the already-gathered values
+// are discarded on the bubble path.
+func DrainRawCtx[T any](ctx context.Context, ch <-chan T) ([]T, error) {
+	var out []T
+	for {
+		select {
+		case v, ok := <-ch:
+			if !ok {
+				return out, nil
+			}
+			out = append(out, v)
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+}
+
+// DrainCtx drains ch until close or ctx cancellation. Preprocessor-
+// rewritten as Try-like bubble over q.DrainRawCtx. Bubbles ctx.Err()
+// on cancel.
+func DrainCtx[T any](ctx context.Context, ch <-chan T) []T {
+	panicUnrewritten("q.DrainCtx")
+	return nil
+}
+
+// DrainCtxE is the chain variant of DrainCtx.
+func DrainCtxE[T any](ctx context.Context, ch <-chan T) ErrResult[[]T] {
+	panicUnrewritten("q.DrainCtxE")
+	return ErrResult[[]T]{}
+}
+
+// DrainAllRawCtx drains every supplied channel concurrently until
+// all close or ctx cancels. On cancel, returns (nil, ctx.Err()) —
+// partial per-channel results are discarded on the bubble path.
+// Background goroutines continue draining until each source closes
+// (Go has no goroutine-kill); thread ctx into the producer side
+// for true early shutdown.
+func DrainAllRawCtx[T any](ctx context.Context, chans ...<-chan T) ([][]T, error) {
+	if len(chans) == 0 {
+		return nil, nil
+	}
+	type indexed struct {
+		i  int
+		vs []T
+	}
+	ch := make(chan indexed, len(chans))
+	for i, c := range chans {
+		go func(i int, c <-chan T) {
+			var out []T
+			for {
+				select {
+				case v, ok := <-c:
+					if !ok {
+						ch <- indexed{i: i, vs: out}
+						return
+					}
+					out = append(out, v)
+				case <-ctx.Done():
+					ch <- indexed{i: i, vs: out}
+					return
+				}
+			}
+		}(i, c)
+	}
+	results := make([][]T, len(chans))
+	for range len(chans) {
+		select {
+		case r := <-ch:
+			results[r.i] = r.vs
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return results, nil
+}
+
+// DrainAllCtx drains every channel until all close or ctx cancels.
+// Preprocessor-rewritten as Try-like bubble over q.DrainAllRawCtx.
+func DrainAllCtx[T any](ctx context.Context, chans ...<-chan T) [][]T {
+	panicUnrewritten("q.DrainAllCtx")
+	return nil
+}
+
+// DrainAllCtxE is the chain variant of DrainAllCtx.
+func DrainAllCtxE[T any](ctx context.Context, chans ...<-chan T) ErrResult[[]T] {
+	panicUnrewritten("q.DrainAllCtxE")
+	return ErrResult[[]T]{}
 }
 
 // ToErr adapts a `(T, *E)` call — where `*E` satisfies `error` —

@@ -1,0 +1,11 @@
+recv.ok: ok=7
+recv.closed: err=q: channel closed
+recv.cancelled: err=context canceled
+recv.wrap.closed: err=recv: q: channel closed
+recv.catch.closed: ok=99
+recv.catch.cancelled: err=context canceled
+await.ok: ok=42
+await.timeout: err=context deadline exceeded
+await.fail: err=boom
+await.wrap.fail: err=await: boom
+await.err.isTimedOut: true

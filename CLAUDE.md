@@ -50,6 +50,35 @@
   - `AwaitRaw[T any](f Future[T]) (T, error)` — runtime helper; blocks on the Future and returns the tuple.
   - `Await[T any](f Future[T]) T` — Try-like bubble over `q.AwaitRaw(f)`.
   - `AwaitE[T any](f Future[T]) ErrResult[T]` — chain variant; reuses `ErrResult` so the vocabulary matches TryE.
+  - `Bubble(ctx context.Context)` — statement-only ctx.Err() checkpoint; rewrites to `_qErrN := (ctx).Err(); if _qErrN != nil { return zero, _qErrN }`.
+  - `BubbleE(ctx context.Context) CheckResult` — chain variant; reuses `CheckResult` vocabulary (Err/ErrF/Wrap/Wrapf/Catch); always statement-only.
+  - `RecvRawCtx[T any](ctx, ch) (T, error)` — runtime helper (NOT rewritten); `select` on ctx.Done + ch; returns `(zero, ctx.Err())` on cancel, `(zero, ErrChanClosed)` on close, `(v, nil)` on receive.
+  - `RecvCtx[T any](ctx, ch) T` — Try-like bubble over `q.RecvRawCtx(ctx, ch)`.
+  - `RecvCtxE[T any](ctx, ch) ErrResult[T]` — chain variant; reuses `ErrResult`.
+  - `AwaitRawCtx[T any](ctx, f) (T, error)` — runtime helper (NOT rewritten); `select` on ctx.Done + Future channel.
+  - `AwaitCtx[T any](ctx, f) T` / `AwaitCtxE[T any](ctx, f) ErrResult[T]` — rewritten like Await / AwaitE but inner text is `q.AwaitRawCtx(ctx, f)`.
+  - `Timeout(ctx context.Context, dur time.Duration) context.Context` — rewritten in define/assign position only; emits `<lhs>, _qCancelN := context.WithTimeout(ctx, dur); defer _qCancelN()`. Auto-injects `context` import. Other forms (hoist/return/discard) are diagnostics — the `defer cancel()` has no home.
+  - `Deadline(ctx context.Context, t time.Time) context.Context` — same shape as Timeout but emits `context.WithDeadline`.
+  - `AwaitAllRaw[T any](futures ...Future[T]) ([]T, error)` — runtime helper (NOT rewritten); spawns one collector goroutine per future, gathers in input order, bubbles first error.
+  - `AwaitAllRawCtx[T any](ctx, futures ...Future[T]) ([]T, error)` — same with outer `select` on ctx.Done — returns `ctx.Err()` once, not an N-copy aggregate.
+  - `AwaitAll[T any](futures ...Future[T]) []T` — rewritten; Try-like bubble over `q.AwaitAllRaw`. Supports variadic spread (`fs...`) via `EntryEllipsis` on `qSubCall`.
+  - `AwaitAllE[T any](futures ...Future[T]) ErrResult[[]T]` — chain variant.
+  - `AwaitAllCtx[T any](ctx, futures ...Future[T]) []T` / `AwaitAllCtxE` — ctx-aware; inner is `q.AwaitAllRawCtx`.
+  - `AwaitAnyRaw[T any](futures ...Future[T]) (T, error)` — runtime helper; returns first-success, else `errors.Join(...)` of all per-future errors in completion order.
+  - `AwaitAnyRawCtx[T any](ctx, futures ...Future[T]) (T, error)` — same with outer `select` on ctx.Done.
+  - `AwaitAny[T any](futures ...Future[T]) T` / `AwaitAnyE` / `AwaitAnyCtx` / `AwaitAnyCtxE` — rewritten variants, symmetrical to AwaitAll.
+  - `RecvAnyRaw[T any](chans ...<-chan T) (T, error)` — runtime helper; dynamic N-way `reflect.Select` across channels, bubbles `ErrChanClosed` on any close.
+  - `RecvAnyRawCtx[T any](ctx, chans ...<-chan T) (T, error)` — same with an extra ctx.Done case in the Select.
+  - `RecvAny[T any](chans ...<-chan T) T` / `RecvAnyE` / `RecvAnyCtx` / `RecvAnyCtxE` — rewritten; Try-like bubble over the corresponding runtime helper.
+  - `Drain[T any](ch <-chan T) []T` — runtime helper (NOT rewritten); for-range until close, returns collected values. No error path.
+  - `DrainAll[T any](chans ...<-chan T) [][]T` — runtime helper; one goroutine per channel drains until close, results in input order. `sync.WaitGroup`-based.
+  - `DrainRawCtx[T any](ctx, ch <-chan T) ([]T, error)` — runtime helper; `select`-based for-range; returns `(nil, ctx.Err())` on cancel.
+  - `DrainAllRawCtx[T any](ctx, chans ...<-chan T) ([][]T, error)` — same per-channel fan-out with outer `select` on ctx.Done.
+  - `DrainCtx[T any](ctx, ch) []T` / `DrainCtxE` — rewritten; Try-like bubble over DrainRawCtx.
+  - `DrainAllCtx[T any](ctx, chans ...<-chan T) [][]T` / `DrainAllCtxE` — rewritten; bubble over DrainAllRawCtx.
+  - No `DrainE` / `DrainAllE` non-ctx forms exist — without ctx, Drain can't fail, so the E chain has nothing to shape. Skipped deliberately.
+  - No `DrainAny` — ambiguous semantics; handwritten composition is clearer. Skipped deliberately.
+  - No `RecvAll` — would confuse with Drain. Skipped deliberately.
   - `Recover(errPtr *error)` — runtime helper; `defer q.Recover(&err)` converts any panic into `*q.PanicError` assigned via errPtr.
   - `RecoverE(errPtr *error) RecoverResult` — chain variant; methods `.Map(func(any) error)`, `.Err(error)`, `.ErrF(func(*PanicError) error)`, `.Wrap(string)`, `.Wrapf(string, ...any)`. All terminal (each is the deferred function; recover() sees the panic).
   - `PanicError{Value any; Stack []byte}` — `error` type produced by Recover / RecoverE (except when Err/Map overrides). `errors.As` extracts it.
@@ -57,7 +86,7 @@
   - `ErrNotOk` sentinel, exposed for `errors.Is` checks against the bare `q.Ok` bubble.
   - `ErrChanClosed` sentinel, exposed for `errors.Is` checks against the bare `q.Recv` bubble.
   - `ErrBadAssert` sentinel, exposed for `errors.Is` checks against the bare `q.As` bubble.
-  - `qRuntimeHelpers` carve-out (scanner): `ToErr`, `DebugAt`, `Async`, `AwaitRaw`, `Recover`, `RecoverE`. These are NOT rewritten and run at runtime.
+  - `qRuntimeHelpers` carve-out (scanner): `ToErr`, `DebugAt`, `Async`, `AwaitRaw`, `AwaitRawCtx`, `AwaitAllRaw`, `AwaitAllRawCtx`, `AwaitAnyRaw`, `AwaitAnyRawCtx`, `RecvRawCtx`, `RecvAnyRaw`, `RecvAnyRawCtx`, `Drain`, `DrainAll`, `DrainRawCtx`, `DrainAllRawCtx`, `Recover`, `RecoverE`. These are NOT rewritten and run at runtime.
   - `ToErr[T any, E any, P interface{ *E; error }](v T, e P) (T, error)` — runtime helper (NOT rewritten, real body executes) that adapts a `(T, *E)` callee into `(T, error)` while collapsing a typed-nil `*E` into a literal nil `error`. Satisfies the typed-nil guard (its return type is literally `error`). Usable standalone, not tied to the rest of q.
   - `_qLink` plus `func init() { _qLink() }` — the package-level link gate.
 - `cmd/q/main.go` — toolexec shim, thin wrapper around `internal/preprocessor.Run`.
@@ -82,6 +111,11 @@
 - `internal/preprocessor/testdata/cases/recv_as_family_run_ok/` — fixture for `q.Recv` / `q.RecvE` and `q.As[T]` / `q.AsE[T]`. Both bare sentinels, Wrap/Wrapf/Err/Catch on both paths, errors.Is identity for both sentinels.
 - `internal/preprocessor/testdata/cases/debug_run_ok/` — fixture for `q.Debug`. Captures DebugWriter into a bytes.Buffer, line-number-normalises output, asserts pass-through semantics for int/string/arithmetic + direct DebugAt call.
 - `internal/preprocessor/testdata/cases/async_await_run_ok/` — fixture for q.Async + q.Await + q.AwaitE. Ok/err/wrap paths for Await, AwaitE.Catch recover+bubble.
+- `internal/preprocessor/testdata/cases/bubble_ctx_run_ok/` — fixture for q.Bubble + q.BubbleE. Covers bare checkpoint (both `error`-only and `(T, error)` signatures) plus every BubbleE chain method (Err/ErrF/Wrap/Wrapf/Catch-suppress/Catch-bubble) on live + cancelled ctx. Asserts `errors.Is(err, context.Canceled)` survives a Wrap.
+- `internal/preprocessor/testdata/cases/recv_await_ctx_run_ok/` — fixture for q.RecvCtx / q.RecvCtxE / q.AwaitCtx / q.AwaitCtxE. Covers happy path, channel close (ErrChanClosed), ctx cancel (Canceled / DeadlineExceeded), chain Wrap, chain Catch recover, and chain Err-replacement with sentinel identity check.
+- `internal/preprocessor/testdata/cases/timeout_deadline_run_ok/` — fixture for q.Timeout / q.Deadline. Covers define form (`newCtx := q.Timeout(...)`), assign form (`ctx = q.Timeout(...)`), deadline form, and the auto-cancel semantics on return (`context.Canceled` when the timer hasn't fired, `context.DeadlineExceeded` when it has).
+- `internal/preprocessor/testdata/cases/await_all_any_run_ok/` — fixture for q.AwaitAll / q.AwaitAny and their Ctx + E variants. Covers: (1) AwaitAll gather-in-input-order with happy path + first-error bubble + Wrap chain, (2) variadic-spread `fs...` survives the rewrite via EntryEllipsis, (3) AwaitAllCtx ctx.Err() bubble, (4) AwaitAny first-success wins, (5) AwaitAny all-fail → errors.Join aggregate (fixture matches substrings, not exact format, since errors.Join uses newlines), (6) AwaitAnyCtx ctx-fires-first bubble, (7) AwaitAnyE.Wrap prefix check.
+- `internal/preprocessor/testdata/cases/channel_multi_run_ok/` — fixture for q.RecvAny / q.Drain / q.DrainAll and their Ctx + E variants. Covers: (1) RecvAny buffered-first-wins + close bubble + RecvAnyE.Catch sentinel recovery + RecvAnyCtx cancel, (2) Drain on closed channel + empty channel, (3) DrainCtx cancel bubble + happy path + DrainCtxE.Wrap, (4) DrainAll per-channel slices in input order, (5) DrainAllCtx cancel bubble + happy path (via feedDelayed producer goroutines).
 - `internal/preprocessor/testdata/cases/recover_family_run_ok/` — fixture for `q.Recover` + every `q.RecoverE` method (Map/Err/Wrap/Wrapf/ErrF). errors.As extracts *PanicError, stack trace non-empty, user-supplied Map translates panic shapes to typed errors, Err replaces the bubble.
 - `internal/preprocessor/testdata/cases/forms_assign_discard_run_ok/` — Phase 2 fixture for the assign and discard forms: `v = q.Try(...)`, `q.Try(...)` discard, `v = q.TryE(...).Wrapf(...)` chain assign, `q.TryE(...).Err(...)` chain discard, plus the NotNil counterparts. 14 expected_run.txt lines locking in every form × family combination.
 - `internal/preprocessor/testdata/cases/return_position_run_ok/` — Phase 3 fixture for the return form: `return q.Try(...) * 2, nil` (nested inside an arithmetic expression), `return q.TryE(...).Wrap("..."), nil`, `return "tag", q.NotNil(p), nil` (q.* as the middle of three results), and `return q.NotNilE(p).Err(...), nil`. Eight expected_run.txt lines covering ok+bad for each shape.

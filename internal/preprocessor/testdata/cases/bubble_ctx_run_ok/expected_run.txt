@@ -1,0 +1,15 @@
+bare.live: ok
+bare.cancelled: context canceled
+pair.live: n=42 err=<nil>
+pair.cancelled: context canceled
+err.live: ok
+err.cancelled: business
+errF.live: ok
+errF.cancelled: translated: context canceled
+wrap.live: ok
+wrap.cancelled: loading: context canceled
+wrapf.live: ok
+wrapf.cancelled: loading item 7: context canceled
+catch.suppress.cancelled: ok
+catch.bubble.cancelled: caught: context canceled
+wrap.isCanceled: true

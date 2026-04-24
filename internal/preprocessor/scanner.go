@@ -62,6 +62,30 @@ const (
 	familyAwaitE      // q.AwaitE(f).<method> — TryE-like chain over q.AwaitRaw
 	familyRecoverAuto  // defer q.Recover()       — inject &err from enclosing sig
 	familyRecoverEAuto // defer q.RecoverE().M(x) — same, for the chain variant
+	familyBubble       // q.Bubble(ctx) — ctx.Err() checkpoint
+	familyBubbleE      // q.BubbleE(ctx).<method> — chain variant
+	familyRecvCtx      // q.RecvCtx(ctx, ch) — ctx-aware channel receive
+	familyRecvCtxE     // q.RecvCtxE(ctx, ch).<method> — chain variant
+	familyAwaitCtx     // q.AwaitCtx(ctx, f) — ctx-aware future await
+	familyAwaitCtxE    // q.AwaitCtxE(ctx, f).<method> — chain variant
+	familyTimeout      // ctx = q.Timeout(ctx, dur) — WithTimeout + defer cancel
+	familyDeadline     // ctx = q.Deadline(ctx, t)  — WithDeadline + defer cancel
+	familyAwaitAll     // q.AwaitAll(futures...) — fan-in, bubble first err
+	familyAwaitAllE    // chain variant
+	familyAwaitAllCtx  // q.AwaitAllCtx(ctx, futures...) — same with ctx cancel
+	familyAwaitAllCtxE // chain variant
+	familyAwaitAny     // q.AwaitAny(futures...) — first success wins
+	familyAwaitAnyE    // chain variant
+	familyAwaitAnyCtx  // q.AwaitAnyCtx(ctx, futures...) — same with ctx cancel
+	familyAwaitAnyCtxE // chain variant
+	familyRecvAny      // q.RecvAny(chans...) — first-value-wins multi-channel select
+	familyRecvAnyE     // chain variant
+	familyRecvAnyCtx   // q.RecvAnyCtx(ctx, chans...)
+	familyRecvAnyCtxE  // chain variant
+	familyDrainCtx     // q.DrainCtx(ctx, ch) — drain until close or cancel
+	familyDrainCtxE    // chain variant
+	familyDrainAllCtx  // q.DrainAllCtx(ctx, chans...)
+	familyDrainAllCtxE // chain variant
 )
 
 // form is the syntactic position of a recognised q.* call:
@@ -137,6 +161,14 @@ type qSubCall struct {
 	// call; nil for every other family. The rewriter splices its
 	// source text into the generated type-assertion `<x>.(<T>)`.
 	AsType ast.Expr
+
+	// EntryEllipsis is the position of the variadic spread `...` on
+	// the entry call's last argument, or token.NoPos if the call is
+	// not variadic-spread. Only meaningful for the AwaitAll / AwaitAny
+	// families whose entry signatures accept `...Future[T]`. When
+	// valid, the rewriter appends `...` to the raw-helper call it
+	// emits so the variadic spread survives the rewrite.
+	EntryEllipsis token.Pos
 }
 
 // callShape describes one recognised q.* call site, captured at scan
@@ -191,12 +223,24 @@ var chainMethods = map[string]bool{
 // so a standalone `q.ToErr(...)` call doesn't trip the fallback
 // flag.
 var qRuntimeHelpers = map[string]bool{
-	"ToErr":    true,
-	"DebugAt":  true,
-	"Async":    true,
-	"AwaitRaw": true,
-	"Recover":  true,
-	"RecoverE": true,
+	"ToErr":           true,
+	"DebugAt":         true,
+	"Async":           true,
+	"AwaitRaw":        true,
+	"AwaitRawCtx":     true,
+	"AwaitAllRaw":     true,
+	"AwaitAllRawCtx":  true,
+	"AwaitAnyRaw":     true,
+	"AwaitAnyRawCtx":  true,
+	"RecvRawCtx":      true,
+	"RecvAnyRaw":      true,
+	"RecvAnyRawCtx":   true,
+	"Drain":           true,
+	"DrainAll":        true,
+	"DrainRawCtx":     true,
+	"DrainAllRawCtx":  true,
+	"Recover":         true,
+	"RecoverE":        true,
 }
 
 // scanFile walks one parsed source file and returns the list of
@@ -677,6 +721,93 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 		}
 		return qSubCall{Family: familyAs, InnerExpr: call.Args[0], AsType: typeArg, OuterCall: expr}, true, nil
 	}
+	// Bare q.Bubble — ctx.Err() checkpoint. Statement-only (discard).
+	if isSelector(call.Fun, alias, "Bubble") {
+		if len(call.Args) != 1 {
+			return qSubCall{}, false, fmt.Errorf("q.Bubble must take exactly one argument (a context.Context); got %d", len(call.Args))
+		}
+		return qSubCall{Family: familyBubble, InnerExpr: call.Args[0], OuterCall: expr}, true, nil
+	}
+	// Bare q.RecvCtx(ctx, ch) — ctx-aware receive.
+	if isSelector(call.Fun, alias, "RecvCtx") {
+		if len(call.Args) != 2 {
+			return qSubCall{}, false, fmt.Errorf("q.RecvCtx must take exactly two arguments (ctx, ch); got %d", len(call.Args))
+		}
+		return qSubCall{Family: familyRecvCtx, InnerExpr: call.Args[0], OkArgs: call.Args, OuterCall: expr}, true, nil
+	}
+	// Bare q.AwaitCtx(ctx, future) — ctx-aware await.
+	if isSelector(call.Fun, alias, "AwaitCtx") {
+		if len(call.Args) != 2 {
+			return qSubCall{}, false, fmt.Errorf("q.AwaitCtx must take exactly two arguments (ctx, future); got %d", len(call.Args))
+		}
+		return qSubCall{Family: familyAwaitCtx, InnerExpr: call.Args[0], OkArgs: call.Args, OuterCall: expr}, true, nil
+	}
+	// Bare q.AwaitAll(futures...) — fan-in, bubble first err.
+	if isSelector(call.Fun, alias, "AwaitAll") {
+		// InnerExpr is unused by the Try-like-with-inner renderers
+		// (the inner text is built from OkArgs directly), but
+		// commonRenderInputs still calls exprTextSubst on it, so we
+		// must hand it a non-nil expression. Use call.Fun as a
+		// syntactically-valid placeholder; the returned text is
+		// discarded.
+		return qSubCall{Family: familyAwaitAll, InnerExpr: call.Fun, OkArgs: call.Args, OuterCall: expr, EntryEllipsis: call.Ellipsis}, true, nil
+	}
+	// Bare q.AwaitAllCtx(ctx, futures...) — same with ctx cancel.
+	if isSelector(call.Fun, alias, "AwaitAllCtx") {
+		if len(call.Args) < 1 {
+			return qSubCall{}, false, fmt.Errorf("q.AwaitAllCtx must take at least one argument (ctx); got %d", len(call.Args))
+		}
+		return qSubCall{Family: familyAwaitAllCtx, InnerExpr: call.Args[0], OkArgs: call.Args, OuterCall: expr, EntryEllipsis: call.Ellipsis}, true, nil
+	}
+	// Bare q.AwaitAny(futures...) — first success wins.
+	if isSelector(call.Fun, alias, "AwaitAny") {
+		return qSubCall{Family: familyAwaitAny, InnerExpr: call.Fun, OkArgs: call.Args, OuterCall: expr, EntryEllipsis: call.Ellipsis}, true, nil
+	}
+	// Bare q.AwaitAnyCtx(ctx, futures...) — same with ctx cancel.
+	if isSelector(call.Fun, alias, "AwaitAnyCtx") {
+		if len(call.Args) < 1 {
+			return qSubCall{}, false, fmt.Errorf("q.AwaitAnyCtx must take at least one argument (ctx); got %d", len(call.Args))
+		}
+		return qSubCall{Family: familyAwaitAnyCtx, InnerExpr: call.Args[0], OkArgs: call.Args, OuterCall: expr, EntryEllipsis: call.Ellipsis}, true, nil
+	}
+	// Bare q.RecvAny(chans...) — multi-channel first-value-wins select.
+	if isSelector(call.Fun, alias, "RecvAny") {
+		return qSubCall{Family: familyRecvAny, InnerExpr: call.Fun, OkArgs: call.Args, OuterCall: expr, EntryEllipsis: call.Ellipsis}, true, nil
+	}
+	// Bare q.RecvAnyCtx(ctx, chans...).
+	if isSelector(call.Fun, alias, "RecvAnyCtx") {
+		if len(call.Args) < 1 {
+			return qSubCall{}, false, fmt.Errorf("q.RecvAnyCtx must take at least one argument (ctx); got %d", len(call.Args))
+		}
+		return qSubCall{Family: familyRecvAnyCtx, InnerExpr: call.Args[0], OkArgs: call.Args, OuterCall: expr, EntryEllipsis: call.Ellipsis}, true, nil
+	}
+	// Bare q.DrainCtx(ctx, ch) — drain until close or cancel.
+	if isSelector(call.Fun, alias, "DrainCtx") {
+		if len(call.Args) != 2 {
+			return qSubCall{}, false, fmt.Errorf("q.DrainCtx must take exactly two arguments (ctx, ch); got %d", len(call.Args))
+		}
+		return qSubCall{Family: familyDrainCtx, InnerExpr: call.Args[0], OkArgs: call.Args, OuterCall: expr}, true, nil
+	}
+	// Bare q.DrainAllCtx(ctx, chans...).
+	if isSelector(call.Fun, alias, "DrainAllCtx") {
+		if len(call.Args) < 1 {
+			return qSubCall{}, false, fmt.Errorf("q.DrainAllCtx must take at least one argument (ctx); got %d", len(call.Args))
+		}
+		return qSubCall{Family: familyDrainAllCtx, InnerExpr: call.Args[0], OkArgs: call.Args, OuterCall: expr, EntryEllipsis: call.Ellipsis}, true, nil
+	}
+	// q.Timeout(ctx, dur) / q.Deadline(ctx, t) — define/assign shapes.
+	if isSelector(call.Fun, alias, "Timeout") {
+		if len(call.Args) != 2 {
+			return qSubCall{}, false, fmt.Errorf("q.Timeout must take exactly two arguments (ctx, dur); got %d", len(call.Args))
+		}
+		return qSubCall{Family: familyTimeout, InnerExpr: call.Args[0], OkArgs: call.Args, OuterCall: expr}, true, nil
+	}
+	if isSelector(call.Fun, alias, "Deadline") {
+		if len(call.Args) != 2 {
+			return qSubCall{}, false, fmt.Errorf("q.Deadline must take exactly two arguments (ctx, t); got %d", len(call.Args))
+		}
+		return qSubCall{Family: familyDeadline, InnerExpr: call.Args[0], OkArgs: call.Args, OuterCall: expr}, true, nil
+	}
 	// Statement-only helpers with no chain — panic/defer shapes.
 	if isSelector(call.Fun, alias, "Lock") {
 		if len(call.Args) != 1 {
@@ -797,6 +928,85 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 				return qSubCall{}, false, fmt.Errorf("q.RecvE must take exactly one argument (a channel); got %d", len(entry.Args))
 			}
 			return qSubCall{Family: familyRecvE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Args[0], OuterCall: expr}, true, nil
+		case isSelector(entry.Fun, alias, "BubbleE"):
+			if !chainMethods[sel.Sel.Name] {
+				return qSubCall{}, false, fmt.Errorf("q.BubbleE chain method %q not recognised; valid: Err, ErrF, Catch, Wrap, Wrapf", sel.Sel.Name)
+			}
+			if len(entry.Args) != 1 {
+				return qSubCall{}, false, fmt.Errorf("q.BubbleE must take exactly one argument (a context.Context); got %d", len(entry.Args))
+			}
+			return qSubCall{Family: familyBubbleE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Args[0], OuterCall: expr}, true, nil
+		case isSelector(entry.Fun, alias, "RecvCtxE"):
+			if !chainMethods[sel.Sel.Name] {
+				return qSubCall{}, false, fmt.Errorf("q.RecvCtxE chain method %q not recognised; valid: Err, ErrF, Catch, Wrap, Wrapf", sel.Sel.Name)
+			}
+			if len(entry.Args) != 2 {
+				return qSubCall{}, false, fmt.Errorf("q.RecvCtxE must take exactly two arguments (ctx, ch); got %d", len(entry.Args))
+			}
+			return qSubCall{Family: familyRecvCtxE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Args[0], OkArgs: entry.Args, OuterCall: expr}, true, nil
+		case isSelector(entry.Fun, alias, "AwaitCtxE"):
+			if !chainMethods[sel.Sel.Name] {
+				return qSubCall{}, false, fmt.Errorf("q.AwaitCtxE chain method %q not recognised; valid: Err, ErrF, Catch, Wrap, Wrapf", sel.Sel.Name)
+			}
+			if len(entry.Args) != 2 {
+				return qSubCall{}, false, fmt.Errorf("q.AwaitCtxE must take exactly two arguments (ctx, future); got %d", len(entry.Args))
+			}
+			return qSubCall{Family: familyAwaitCtxE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Args[0], OkArgs: entry.Args, OuterCall: expr}, true, nil
+		case isSelector(entry.Fun, alias, "AwaitAllE"):
+			if !chainMethods[sel.Sel.Name] {
+				return qSubCall{}, false, fmt.Errorf("q.AwaitAllE chain method %q not recognised; valid: Err, ErrF, Catch, Wrap, Wrapf", sel.Sel.Name)
+			}
+			return qSubCall{Family: familyAwaitAllE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Fun, OkArgs: entry.Args, OuterCall: expr, EntryEllipsis: entry.Ellipsis}, true, nil
+		case isSelector(entry.Fun, alias, "AwaitAllCtxE"):
+			if !chainMethods[sel.Sel.Name] {
+				return qSubCall{}, false, fmt.Errorf("q.AwaitAllCtxE chain method %q not recognised; valid: Err, ErrF, Catch, Wrap, Wrapf", sel.Sel.Name)
+			}
+			if len(entry.Args) < 1 {
+				return qSubCall{}, false, fmt.Errorf("q.AwaitAllCtxE must take at least one argument (ctx); got %d", len(entry.Args))
+			}
+			return qSubCall{Family: familyAwaitAllCtxE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Args[0], OkArgs: entry.Args, OuterCall: expr, EntryEllipsis: entry.Ellipsis}, true, nil
+		case isSelector(entry.Fun, alias, "AwaitAnyE"):
+			if !chainMethods[sel.Sel.Name] {
+				return qSubCall{}, false, fmt.Errorf("q.AwaitAnyE chain method %q not recognised; valid: Err, ErrF, Catch, Wrap, Wrapf", sel.Sel.Name)
+			}
+			return qSubCall{Family: familyAwaitAnyE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Fun, OkArgs: entry.Args, OuterCall: expr, EntryEllipsis: entry.Ellipsis}, true, nil
+		case isSelector(entry.Fun, alias, "AwaitAnyCtxE"):
+			if !chainMethods[sel.Sel.Name] {
+				return qSubCall{}, false, fmt.Errorf("q.AwaitAnyCtxE chain method %q not recognised; valid: Err, ErrF, Catch, Wrap, Wrapf", sel.Sel.Name)
+			}
+			if len(entry.Args) < 1 {
+				return qSubCall{}, false, fmt.Errorf("q.AwaitAnyCtxE must take at least one argument (ctx); got %d", len(entry.Args))
+			}
+			return qSubCall{Family: familyAwaitAnyCtxE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Args[0], OkArgs: entry.Args, OuterCall: expr, EntryEllipsis: entry.Ellipsis}, true, nil
+		case isSelector(entry.Fun, alias, "RecvAnyE"):
+			if !chainMethods[sel.Sel.Name] {
+				return qSubCall{}, false, fmt.Errorf("q.RecvAnyE chain method %q not recognised; valid: Err, ErrF, Catch, Wrap, Wrapf", sel.Sel.Name)
+			}
+			return qSubCall{Family: familyRecvAnyE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Fun, OkArgs: entry.Args, OuterCall: expr, EntryEllipsis: entry.Ellipsis}, true, nil
+		case isSelector(entry.Fun, alias, "RecvAnyCtxE"):
+			if !chainMethods[sel.Sel.Name] {
+				return qSubCall{}, false, fmt.Errorf("q.RecvAnyCtxE chain method %q not recognised; valid: Err, ErrF, Catch, Wrap, Wrapf", sel.Sel.Name)
+			}
+			if len(entry.Args) < 1 {
+				return qSubCall{}, false, fmt.Errorf("q.RecvAnyCtxE must take at least one argument (ctx); got %d", len(entry.Args))
+			}
+			return qSubCall{Family: familyRecvAnyCtxE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Args[0], OkArgs: entry.Args, OuterCall: expr, EntryEllipsis: entry.Ellipsis}, true, nil
+		case isSelector(entry.Fun, alias, "DrainCtxE"):
+			if !chainMethods[sel.Sel.Name] {
+				return qSubCall{}, false, fmt.Errorf("q.DrainCtxE chain method %q not recognised; valid: Err, ErrF, Catch, Wrap, Wrapf", sel.Sel.Name)
+			}
+			if len(entry.Args) != 2 {
+				return qSubCall{}, false, fmt.Errorf("q.DrainCtxE must take exactly two arguments (ctx, ch); got %d", len(entry.Args))
+			}
+			return qSubCall{Family: familyDrainCtxE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Args[0], OkArgs: entry.Args, OuterCall: expr}, true, nil
+		case isSelector(entry.Fun, alias, "DrainAllCtxE"):
+			if !chainMethods[sel.Sel.Name] {
+				return qSubCall{}, false, fmt.Errorf("q.DrainAllCtxE chain method %q not recognised; valid: Err, ErrF, Catch, Wrap, Wrapf", sel.Sel.Name)
+			}
+			if len(entry.Args) < 1 {
+				return qSubCall{}, false, fmt.Errorf("q.DrainAllCtxE must take at least one argument (ctx); got %d", len(entry.Args))
+			}
+			return qSubCall{Family: familyDrainAllCtxE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Args[0], OkArgs: entry.Args, OuterCall: expr, EntryEllipsis: entry.Ellipsis}, true, nil
 		}
 		// AsE needs a dedicated check because its entry.Fun is an
 		// IndexExpr carrying the type argument, not a plain selector

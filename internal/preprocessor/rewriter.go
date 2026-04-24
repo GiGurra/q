@@ -48,9 +48,9 @@ func rewriteFile(fset *token.FileSet, file *ast.File, src []byte, shapes []callS
 
 	edits := make([]edit, 0, len(shapes))
 	counter := 0
-	needsFmt, needsErrors := false, false
+	needsFmt, needsErrors, needsContext := false, false, false
 	for _, sh := range shapes {
-		text, fmtUsed, errorsUsed, err := renderShape(fset, src, sh, &counter, alias)
+		text, fmtUsed, errorsUsed, contextUsed, err := renderShape(fset, src, sh, &counter, alias)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -59,6 +59,9 @@ func rewriteFile(fset *token.FileSet, file *ast.File, src []byte, shapes []callS
 		}
 		if errorsUsed {
 			needsErrors = true
+		}
+		if contextUsed {
+			needsContext = true
 		}
 		start := fset.Position(sh.Stmt.Pos()).Offset
 		end := fset.Position(sh.Stmt.End()).Offset
@@ -127,6 +130,10 @@ func rewriteFile(fset *token.FileSet, file *ast.File, src []byte, shapes []callS
 		out = ensureImport(file, fset, out, "errors")
 		addedImports = append(addedImports, "errors")
 	}
+	if needsContext && !hasImport(file, "context") {
+		out = ensureImport(file, fset, out, "context")
+		addedImports = append(addedImports, "context")
+	}
 
 	if alias != "" {
 		sentinel := fmt.Sprintf("\n\nvar _ = %s.ErrNil\n", alias)
@@ -165,9 +172,9 @@ func rewriteFile(fset *token.FileSet, file *ast.File, src []byte, shapes []callS
 // (`_qErrN`, `_qTmpN`, `_qValN`, `_qRetN`) stays globally unique.
 // Returns flags indicating whether fmt / errors are used by the
 // replacement (the caller injects imports if so).
-func renderShape(fset *token.FileSet, src []byte, sh callShape, counter *int, alias string) (string, bool, bool, error) {
+func renderShape(fset *token.FileSet, src []byte, sh callShape, counter *int, alias string) (string, bool, bool, bool, error) {
 	if len(sh.Calls) == 0 {
-		return "", false, false, fmt.Errorf("renderShape: shape has no sub-calls")
+		return "", false, false, false, fmt.Errorf("renderShape: shape has no sub-calls")
 	}
 	indent := indentOf(src, fset.Position(sh.Stmt.Pos()).Offset)
 
@@ -202,23 +209,26 @@ func renderShape(fset *token.FileSet, src []byte, sh callShape, counter *int, al
 	}
 
 	var (
-		blocks              []string
-		fmtUsed, errorsUsed bool
+		blocks                           []string
+		fmtUsed, errorsUsed, contextUsed bool
 	)
 	allDebug := true
 	for _, idx := range order {
 		if sh.Calls[idx].Family != familyDebug {
 			allDebug = false
 		}
-		block, fu, eu, err := renderSubCall(fset, src, sh, idx, sh.Calls, counters, subTexts, alias)
+		block, fu, eu, cu, err := renderSubCall(fset, src, sh, idx, sh.Calls, counters, subTexts, alias)
 		if err != nil {
-			return "", false, false, err
+			return "", false, false, false, err
 		}
 		if fu {
 			fmtUsed = true
 		}
 		if eu {
 			errorsUsed = true
+		}
+		if cu {
+			contextUsed = true
 		}
 		if block != "" {
 			blocks = append(blocks, block)
@@ -237,7 +247,7 @@ func renderShape(fset *token.FileSet, src []byte, sh callShape, counter *int, al
 			text = substituteSpans(fset, src, start, end, sh.Calls, subTexts)
 		}
 	}
-	return text, fmtUsed, errorsUsed, nil
+	return text, fmtUsed, errorsUsed, contextUsed, nil
 }
 
 // renderAwait produces the replacement for bare q.Await. Identical
@@ -598,83 +608,159 @@ func exprTextSubst(fset *token.FileSet, src []byte, e ast.Expr, subs []qSubCall,
 // substitute nested q.* spans inside its own InnerExpr / MethodArgs
 // text; counters carries the per-sub N so each renderer can name
 // its own _qErrN / _qOkN / _qTmpN / etc.
-func renderSubCall(fset *token.FileSet, src []byte, sh callShape, subIdx int, subs []qSubCall, counters []int, subTexts []string, alias string) (string, bool, bool, error) {
+func renderSubCall(fset *token.FileSet, src []byte, sh callShape, subIdx int, subs []qSubCall, counters []int, subTexts []string, alias string) (string, bool, bool, bool, error) {
 	sub := subs[subIdx]
 	counter := counters[subIdx]
 	switch sub.Family {
 	case familyTry:
 		text, err := renderTry(fset, src, sh, sub, counter, subs, subTexts)
-		return text, false, false, err
+		return text, false, false, false, err
 	case familyTryE:
 		text, fmtUsed, err := renderTryE(fset, src, sh, sub, counter, subs, subTexts)
-		return text, fmtUsed, false, err
+		return text, fmtUsed, false, false, err
 	case familyNotNil:
 		text, err := renderNotNil(fset, src, sh, sub, counter, alias, subs, subTexts)
-		return text, false, false, err
+		return text, false, false, false, err
 	case familyNotNilE:
-		return renderNotNilE(fset, src, sh, sub, counter, subs, subTexts)
+		text, fmtUsed, errorsUsed, err := renderNotNilE(fset, src, sh, sub, counter, subs, subTexts)
+		return text, fmtUsed, errorsUsed, false, err
 	case familyCheck:
 		text, err := renderCheck(fset, src, sh, sub, counter, subs, subTexts)
-		return text, false, false, err
+		return text, false, false, false, err
 	case familyCheckE:
 		text, fmtUsed, err := renderCheckE(fset, src, sh, sub, counter, subs, subTexts)
-		return text, fmtUsed, false, err
+		return text, fmtUsed, false, false, err
 	case familyOpen, familyOpenE:
 		text, fmtUsed, err := renderOpen(fset, src, sh, sub, counter, subs, subTexts)
-		return text, fmtUsed, false, err
+		return text, fmtUsed, false, false, err
 	case familyOk:
 		text, err := renderOk(fset, src, sh, sub, counter, alias, subs, subTexts)
-		return text, false, false, err
+		return text, false, false, false, err
 	case familyOkE:
-		return renderOkE(fset, src, sh, sub, counter, subs, subTexts)
+		text, fmtUsed, errorsUsed, err := renderOkE(fset, src, sh, sub, counter, subs, subTexts)
+		return text, fmtUsed, errorsUsed, false, err
 	case familyTrace:
 		text, err := renderTrace(fset, src, sh, sub, counter, subs, subTexts)
-		return text, true, false, err
+		return text, true, false, false, err
 	case familyTraceE:
 		text, err := renderTraceE(fset, src, sh, sub, counter, subs, subTexts)
-		return text, true, false, err
+		return text, true, false, false, err
 	case familyLock:
 		text, err := renderLock(fset, src, sh, sub, counter, subs, subTexts)
-		return text, false, false, err
+		return text, false, false, false, err
 	case familyTODO:
 		text, err := renderPanicMarker(fset, src, sh, sub, "q.TODO", subs, subTexts)
-		return text, false, false, err
+		return text, false, false, false, err
 	case familyUnreachable:
 		text, err := renderPanicMarker(fset, src, sh, sub, "q.Unreachable", subs, subTexts)
-		return text, false, false, err
+		return text, false, false, false, err
 	case familyAssert:
 		text, err := renderAssert(fset, src, sh, sub, subs, subTexts)
-		return text, false, false, err
+		return text, false, false, false, err
 	case familyRecv:
 		text, err := renderRecv(fset, src, sh, sub, counter, alias, subs, subTexts)
-		return text, false, false, err
+		return text, false, false, false, err
 	case familyRecvE:
-		return renderRecvE(fset, src, sh, sub, counter, subs, subTexts)
+		text, fmtUsed, errorsUsed, err := renderRecvE(fset, src, sh, sub, counter, subs, subTexts)
+		return text, fmtUsed, errorsUsed, false, err
 	case familyAs:
 		text, err := renderAs(fset, src, sh, sub, counter, alias, subs, subTexts)
-		return text, false, false, err
+		return text, false, false, false, err
 	case familyAsE:
-		return renderAsE(fset, src, sh, sub, counter, subs, subTexts)
+		text, fmtUsed, errorsUsed, err := renderAsE(fset, src, sh, sub, counter, subs, subTexts)
+		return text, fmtUsed, errorsUsed, false, err
 	case familyDebug:
 		// Debug is an in-place expression transform — the replacement
 		// text lives in subTexts[subIdx] and is applied when
 		// substituteSpans rebuilds the final stmt. No bind/check
 		// block to emit here.
-		return "", false, false, nil
+		return "", false, false, false, nil
 	case familyAwait:
 		text, err := renderAwait(fset, src, sh, sub, counter, alias, subs, subTexts)
-		return text, false, false, err
+		return text, false, false, false, err
 	case familyAwaitE:
 		text, fmtUsed, err := renderAwaitE(fset, src, sh, sub, counter, alias, subs, subTexts)
-		return text, fmtUsed, false, err
+		return text, fmtUsed, false, false, err
 	case familyRecoverAuto:
 		text, err := renderRecoverAuto(fset, src, sh, sub, alias)
-		return text, false, false, err
+		return text, false, false, false, err
 	case familyRecoverEAuto:
 		text, err := renderRecoverEAuto(fset, src, sh, sub, alias, subs, subTexts)
-		return text, false, false, err
+		return text, false, false, false, err
+	case familyBubble:
+		text, err := renderBubble(fset, src, sh, sub, counter, subs, subTexts)
+		return text, false, false, false, err
+	case familyBubbleE:
+		text, fmtUsed, err := renderBubbleE(fset, src, sh, sub, counter, subs, subTexts)
+		return text, fmtUsed, false, false, err
+	case familyRecvCtx:
+		text, err := renderRecvCtx(fset, src, sh, sub, counter, alias, subs, subTexts)
+		return text, false, false, false, err
+	case familyRecvCtxE:
+		text, fmtUsed, err := renderRecvCtxE(fset, src, sh, sub, counter, alias, subs, subTexts)
+		return text, fmtUsed, false, false, err
+	case familyAwaitCtx:
+		text, err := renderAwaitCtx(fset, src, sh, sub, counter, alias, subs, subTexts)
+		return text, false, false, false, err
+	case familyAwaitCtxE:
+		text, fmtUsed, err := renderAwaitCtxE(fset, src, sh, sub, counter, alias, subs, subTexts)
+		return text, fmtUsed, false, false, err
+	case familyTimeout:
+		text, err := renderTimeoutDeadline(fset, src, sh, sub, counter, subs, subTexts, "WithTimeout")
+		return text, false, false, true, err
+	case familyDeadline:
+		text, err := renderTimeoutDeadline(fset, src, sh, sub, counter, subs, subTexts, "WithDeadline")
+		return text, false, false, true, err
+	case familyAwaitAll:
+		text, err := renderTryLikeWithInner(fset, src, sh, sub, counter, ctxHelperInnerText(fset, src, alias, "AwaitAllRaw", sub, subs, subTexts))
+		return text, false, false, false, err
+	case familyAwaitAllE:
+		text, fmtUsed, err := renderTryLikeEWithInner(fset, src, sh, sub, counter, ctxHelperInnerText(fset, src, alias, "AwaitAllRaw", sub, subs, subTexts), "q.AwaitAllE", subs, subTexts)
+		return text, fmtUsed, false, false, err
+	case familyAwaitAllCtx:
+		text, err := renderTryLikeWithInner(fset, src, sh, sub, counter, ctxHelperInnerText(fset, src, alias, "AwaitAllRawCtx", sub, subs, subTexts))
+		return text, false, false, false, err
+	case familyAwaitAllCtxE:
+		text, fmtUsed, err := renderTryLikeEWithInner(fset, src, sh, sub, counter, ctxHelperInnerText(fset, src, alias, "AwaitAllRawCtx", sub, subs, subTexts), "q.AwaitAllCtxE", subs, subTexts)
+		return text, fmtUsed, false, false, err
+	case familyAwaitAny:
+		text, err := renderTryLikeWithInner(fset, src, sh, sub, counter, ctxHelperInnerText(fset, src, alias, "AwaitAnyRaw", sub, subs, subTexts))
+		return text, false, false, false, err
+	case familyAwaitAnyE:
+		text, fmtUsed, err := renderTryLikeEWithInner(fset, src, sh, sub, counter, ctxHelperInnerText(fset, src, alias, "AwaitAnyRaw", sub, subs, subTexts), "q.AwaitAnyE", subs, subTexts)
+		return text, fmtUsed, false, false, err
+	case familyAwaitAnyCtx:
+		text, err := renderTryLikeWithInner(fset, src, sh, sub, counter, ctxHelperInnerText(fset, src, alias, "AwaitAnyRawCtx", sub, subs, subTexts))
+		return text, false, false, false, err
+	case familyAwaitAnyCtxE:
+		text, fmtUsed, err := renderTryLikeEWithInner(fset, src, sh, sub, counter, ctxHelperInnerText(fset, src, alias, "AwaitAnyRawCtx", sub, subs, subTexts), "q.AwaitAnyCtxE", subs, subTexts)
+		return text, fmtUsed, false, false, err
+	case familyRecvAny:
+		text, err := renderTryLikeWithInner(fset, src, sh, sub, counter, ctxHelperInnerText(fset, src, alias, "RecvAnyRaw", sub, subs, subTexts))
+		return text, false, false, false, err
+	case familyRecvAnyE:
+		text, fmtUsed, err := renderTryLikeEWithInner(fset, src, sh, sub, counter, ctxHelperInnerText(fset, src, alias, "RecvAnyRaw", sub, subs, subTexts), "q.RecvAnyE", subs, subTexts)
+		return text, fmtUsed, false, false, err
+	case familyRecvAnyCtx:
+		text, err := renderTryLikeWithInner(fset, src, sh, sub, counter, ctxHelperInnerText(fset, src, alias, "RecvAnyRawCtx", sub, subs, subTexts))
+		return text, false, false, false, err
+	case familyRecvAnyCtxE:
+		text, fmtUsed, err := renderTryLikeEWithInner(fset, src, sh, sub, counter, ctxHelperInnerText(fset, src, alias, "RecvAnyRawCtx", sub, subs, subTexts), "q.RecvAnyCtxE", subs, subTexts)
+		return text, fmtUsed, false, false, err
+	case familyDrainCtx:
+		text, err := renderTryLikeWithInner(fset, src, sh, sub, counter, ctxHelperInnerText(fset, src, alias, "DrainRawCtx", sub, subs, subTexts))
+		return text, false, false, false, err
+	case familyDrainCtxE:
+		text, fmtUsed, err := renderTryLikeEWithInner(fset, src, sh, sub, counter, ctxHelperInnerText(fset, src, alias, "DrainRawCtx", sub, subs, subTexts), "q.DrainCtxE", subs, subTexts)
+		return text, fmtUsed, false, false, err
+	case familyDrainAllCtx:
+		text, err := renderTryLikeWithInner(fset, src, sh, sub, counter, ctxHelperInnerText(fset, src, alias, "DrainAllRawCtx", sub, subs, subTexts))
+		return text, false, false, false, err
+	case familyDrainAllCtxE:
+		text, fmtUsed, err := renderTryLikeEWithInner(fset, src, sh, sub, counter, ctxHelperInnerText(fset, src, alias, "DrainAllRawCtx", sub, subs, subTexts), "q.DrainAllCtxE", subs, subTexts)
+		return text, fmtUsed, false, false, err
 	}
-	return "", false, false, fmt.Errorf("renderSubCall: unknown family %v", sub.Family)
+	return "", false, false, false, fmt.Errorf("renderSubCall: unknown family %v", sub.Family)
 }
 
 // renderCheck produces the replacement for bare q.Check. Bind line
@@ -1663,6 +1749,253 @@ func zeroExprs(fset *token.FileSet, src []byte, results *ast.FieldList) ([]strin
 		}
 	}
 	return out, nil
+}
+
+// renderBubble produces the replacement for bare q.Bubble. Always
+// statement-only: binds `_qErrN := (ctx).Err()` and bubbles when
+// non-nil. The bubbled error is ctx.Err() itself (already carries
+// context.Canceled / context.DeadlineExceeded identity).
+func renderBubble(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, counter int, subs []qSubCall, subTexts []string) (string, error) {
+	if sh.Form != formDiscard {
+		return "", fmt.Errorf("q.Bubble must be an expression statement (no LHS, no return position); the call returns no value")
+	}
+	zeros, indent, errVar, _, err := commonRenderInputs(fset, src, sh, sub, counter, subs, subTexts)
+	if err != nil {
+		return "", err
+	}
+	ctxText := exprTextSubst(fset, src, sub.InnerExpr, subs, subTexts)
+	bindLine := fmt.Sprintf("%s := (%s).Err()", errVar, ctxText)
+	zeros[len(zeros)-1] = errVar
+	return assembleErrBlock(bindLine, errVar, indent, zeros), nil
+}
+
+// renderBubbleE produces the replacement for q.BubbleE chains.
+// Mirrors renderCheckE's chain dispatch but with `(ctx).Err()` as
+// the bind-line source. The captured err (ctx.Err()) is available
+// as `_qErrN` in the bubble expression for each method.
+func renderBubbleE(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, counter int, subs []qSubCall, subTexts []string) (string, bool, error) {
+	if sh.Form != formDiscard {
+		return "", false, fmt.Errorf("q.BubbleE must be an expression statement (no LHS, no return position); the chain returns no value")
+	}
+	zeros, indent, errVar, _, err := commonRenderInputs(fset, src, sh, sub, counter, subs, subTexts)
+	if err != nil {
+		return "", false, err
+	}
+	ctxText := exprTextSubst(fset, src, sub.InnerExpr, subs, subTexts)
+	bindLine := fmt.Sprintf("%s := (%s).Err()", errVar, ctxText)
+
+	switch sub.Method {
+	case "Err":
+		if len(sub.MethodArgs) != 1 {
+			return "", false, fmt.Errorf("q.BubbleE(...).Err requires exactly one argument (the replacement error); got %d", len(sub.MethodArgs))
+		}
+		zeros[len(zeros)-1] = exprTextSubst(fset, src, sub.MethodArgs[0], subs, subTexts)
+		return assembleErrBlock(bindLine, errVar, indent, zeros), false, nil
+	case "ErrF":
+		if len(sub.MethodArgs) != 1 {
+			return "", false, fmt.Errorf("q.BubbleE(...).ErrF requires exactly one argument (an error-transform fn); got %d", len(sub.MethodArgs))
+		}
+		fn := exprTextSubst(fset, src, sub.MethodArgs[0], subs, subTexts)
+		zeros[len(zeros)-1] = fmt.Sprintf("(%s)(%s)", fn, errVar)
+		return assembleErrBlock(bindLine, errVar, indent, zeros), false, nil
+	case "Wrap":
+		if len(sub.MethodArgs) != 1 {
+			return "", false, fmt.Errorf("q.BubbleE(...).Wrap requires exactly one argument (the message string); got %d", len(sub.MethodArgs))
+		}
+		msg := exprTextSubst(fset, src, sub.MethodArgs[0], subs, subTexts)
+		zeros[len(zeros)-1] = fmt.Sprintf(`fmt.Errorf("%%s: %%w", %s, %s)`, msg, errVar)
+		return assembleErrBlock(bindLine, errVar, indent, zeros), true, nil
+	case "Wrapf":
+		if len(sub.MethodArgs) < 1 {
+			return "", false, fmt.Errorf("q.BubbleE(...).Wrapf requires at least one argument (the format string); got %d", len(sub.MethodArgs))
+		}
+		formatExpr, ok := sub.MethodArgs[0].(*ast.BasicLit)
+		if !ok || formatExpr.Kind != token.STRING {
+			return "", false, fmt.Errorf("q.BubbleE(...).Wrapf's first argument must be a string literal so the rewriter can splice in `: %%w`")
+		}
+		raw := formatExpr.Value
+		formatWithW := raw[:len(raw)-1] + `: %w` + `"`
+		argParts := []string{formatWithW}
+		for _, a := range sub.MethodArgs[1:] {
+			argParts = append(argParts, exprTextSubst(fset, src, a, subs, subTexts))
+		}
+		argParts = append(argParts, errVar)
+		zeros[len(zeros)-1] = fmt.Sprintf("fmt.Errorf(%s)", joinWith(argParts, ", "))
+		return assembleErrBlock(bindLine, errVar, indent, zeros), true, nil
+	case "Catch":
+		if len(sub.MethodArgs) != 1 {
+			return "", false, fmt.Errorf("q.BubbleE(...).Catch requires exactly one argument (a func(error) error); got %d", len(sub.MethodArgs))
+		}
+		// Shape matches CheckE.Catch: fn returns error alone.
+		// nil = suppress (fall through), non-nil = bubble.
+		fn := exprTextSubst(fset, src, sub.MethodArgs[0], subs, subTexts)
+		retErrVar := fmt.Sprintf("_qRet%d", counter)
+		zeros[len(zeros)-1] = retErrVar
+		var b bytes.Buffer
+		b.WriteString(bindLine)
+		b.WriteByte('\n')
+		fmt.Fprintf(&b, "%sif %s != nil {\n", indent, errVar)
+		fmt.Fprintf(&b, "%s\t%s := (%s)(%s)\n", indent, retErrVar, fn, errVar)
+		fmt.Fprintf(&b, "%s\tif %s != nil {\n", indent, retErrVar)
+		fmt.Fprintf(&b, "%s\t\treturn %s\n", indent, joinWith(zeros, ", "))
+		fmt.Fprintf(&b, "%s\t}\n", indent)
+		fmt.Fprintf(&b, "%s}", indent)
+		return b.String(), false, nil
+	}
+	return "", false, fmt.Errorf("renderBubbleE: unknown method %q", sub.Method)
+}
+
+// ctxHelperInnerText returns `<alias>.<helper>(<spread of OkArgs>)` with
+// nested q.* spans substituted. Used by RecvCtx / AwaitCtx / AwaitAll*
+// families to build the runtime helper call that the Try-family bind
+// line wraps. Supports:
+//
+//   - Empty OkArgs (produces `<alias>.<helper>()`) — for variadic
+//     helpers like AwaitAll() / AwaitAny() that accept zero futures.
+//   - Variadic spread (`q.AwaitAll(fs...)`) — EntryEllipsis.IsValid()
+//     triggers a trailing `...` on the last arg.
+func ctxHelperInnerText(fset *token.FileSet, src []byte, alias, helper string, sub qSubCall, subs []qSubCall, subTexts []string) string {
+	if len(sub.OkArgs) == 0 {
+		return fmt.Sprintf("%s.%s()", alias, helper)
+	}
+	argStart := fset.Position(sub.OkArgs[0].Pos()).Offset
+	argEnd := fset.Position(sub.OkArgs[len(sub.OkArgs)-1].End()).Offset
+	argText := substituteSpans(fset, src, argStart, argEnd, subs, subTexts)
+	if sub.EntryEllipsis.IsValid() {
+		argText += "..."
+	}
+	return fmt.Sprintf("%s.%s(%s)", alias, helper, argText)
+}
+
+// renderRecvCtx / renderAwaitCtx are the bare forms: Try-shape bubble
+// over the runtime helper's (T, error) tuple.
+func renderRecvCtx(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, counter int, alias string, subs []qSubCall, subTexts []string) (string, error) {
+	return renderTryLikeWithInner(fset, src, sh, sub, counter, ctxHelperInnerText(fset, src, alias, "RecvRawCtx", sub, subs, subTexts))
+}
+
+func renderAwaitCtx(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, counter int, alias string, subs []qSubCall, subTexts []string) (string, error) {
+	return renderTryLikeWithInner(fset, src, sh, sub, counter, ctxHelperInnerText(fset, src, alias, "AwaitRawCtx", sub, subs, subTexts))
+}
+
+// renderTryLikeWithInner is the shared bare-Try rendering path given
+// an explicit inner text (the RHS of the bind line). Used by the
+// Ctx-aware families whose inner text comes from a runtime helper
+// call, not the user's q.*-wrapped inner call directly.
+func renderTryLikeWithInner(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, counter int, innerText string) (string, error) {
+	zeros, indent, errVar, _, err := commonRenderInputs(fset, src, sh, sub, counter, nil, nil)
+	if err != nil {
+		return "", err
+	}
+	bindLine := tryBindLine(fset, src, sh, errVar, innerText, indent, counter)
+	zeros[len(zeros)-1] = errVar
+	return assembleErrBlock(bindLine, errVar, indent, zeros), nil
+}
+
+// renderRecvCtxE / renderAwaitCtxE are the chain variants — dispatch
+// on sub.Method mirroring renderTryE/renderAwaitE.
+func renderRecvCtxE(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, counter int, alias string, subs []qSubCall, subTexts []string) (string, bool, error) {
+	return renderTryLikeEWithInner(fset, src, sh, sub, counter, ctxHelperInnerText(fset, src, alias, "RecvRawCtx", sub, subs, subTexts), "q.RecvCtxE", subs, subTexts)
+}
+
+func renderAwaitCtxE(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, counter int, alias string, subs []qSubCall, subTexts []string) (string, bool, error) {
+	return renderTryLikeEWithInner(fset, src, sh, sub, counter, ctxHelperInnerText(fset, src, alias, "AwaitRawCtx", sub, subs, subTexts), "q.AwaitCtxE", subs, subTexts)
+}
+
+// renderTryLikeEWithInner is the shared chain-dispatcher for the
+// Try-shaped chain families that use a custom inner text (RecvCtxE,
+// AwaitCtxE). Mirrors renderTryE's per-method vocabulary exactly.
+// name is the family label for diagnostics.
+func renderTryLikeEWithInner(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, counter int, innerText, name string, subs []qSubCall, subTexts []string) (string, bool, error) {
+	zeros, indent, errVar, _, err := commonRenderInputs(fset, src, sh, sub, counter, subs, subTexts)
+	if err != nil {
+		return "", false, err
+	}
+	bindLine := tryBindLine(fset, src, sh, errVar, innerText, indent, counter)
+
+	switch sub.Method {
+	case "Err":
+		if len(sub.MethodArgs) != 1 {
+			return "", false, fmt.Errorf("%s(...).Err requires exactly one argument (the replacement error); got %d", name, len(sub.MethodArgs))
+		}
+		zeros[len(zeros)-1] = exprTextSubst(fset, src, sub.MethodArgs[0], subs, subTexts)
+		return assembleErrBlock(bindLine, errVar, indent, zeros), false, nil
+	case "ErrF":
+		if len(sub.MethodArgs) != 1 {
+			return "", false, fmt.Errorf("%s(...).ErrF requires exactly one argument (an error-transform fn); got %d", name, len(sub.MethodArgs))
+		}
+		fn := exprTextSubst(fset, src, sub.MethodArgs[0], subs, subTexts)
+		zeros[len(zeros)-1] = fmt.Sprintf("(%s)(%s)", fn, errVar)
+		return assembleErrBlock(bindLine, errVar, indent, zeros), false, nil
+	case "Wrap":
+		if len(sub.MethodArgs) != 1 {
+			return "", false, fmt.Errorf("%s(...).Wrap requires exactly one argument (the message string); got %d", name, len(sub.MethodArgs))
+		}
+		msg := exprTextSubst(fset, src, sub.MethodArgs[0], subs, subTexts)
+		zeros[len(zeros)-1] = fmt.Sprintf(`fmt.Errorf("%%s: %%w", %s, %s)`, msg, errVar)
+		return assembleErrBlock(bindLine, errVar, indent, zeros), true, nil
+	case "Wrapf":
+		if len(sub.MethodArgs) < 1 {
+			return "", false, fmt.Errorf("%s(...).Wrapf requires at least one argument (the format string); got %d", name, len(sub.MethodArgs))
+		}
+		formatExpr, ok := sub.MethodArgs[0].(*ast.BasicLit)
+		if !ok || formatExpr.Kind != token.STRING {
+			return "", false, fmt.Errorf("%s(...).Wrapf's first argument must be a string literal so the rewriter can splice in `: %%w`", name)
+		}
+		raw := formatExpr.Value
+		formatWithW := raw[:len(raw)-1] + `: %w` + `"`
+		argParts := []string{formatWithW}
+		for _, a := range sub.MethodArgs[1:] {
+			argParts = append(argParts, exprTextSubst(fset, src, a, subs, subTexts))
+		}
+		argParts = append(argParts, errVar)
+		zeros[len(zeros)-1] = fmt.Sprintf("fmt.Errorf(%s)", joinWith(argParts, ", "))
+		return assembleErrBlock(bindLine, errVar, indent, zeros), true, nil
+	case "Catch":
+		if len(sub.MethodArgs) != 1 {
+			return "", false, fmt.Errorf("%s(...).Catch requires exactly one argument (a (T, error)-returning fn); got %d", name, len(sub.MethodArgs))
+		}
+		fn := exprTextSubst(fset, src, sub.MethodArgs[0], subs, subTexts)
+		retErrVar := fmt.Sprintf("_qRet%d", counter)
+		zeros[len(zeros)-1] = retErrVar
+		recoveryLHS := lhsTextOrUnderscore(fset, src, sh, counter)
+		return assembleCatchErrBlock(bindLine, recoveryLHS, errVar, retErrVar, fn, indent, zeros), false, nil
+	}
+	return "", false, fmt.Errorf("renderTryLikeEWithInner: unknown method %q", sub.Method)
+}
+
+// renderTimeoutDeadline produces the replacement for q.Timeout /
+// q.Deadline: a (ctx, cancel) tuple bind to context.With{Timeout,Deadline}
+// plus a `defer cancel()`. helper is "WithTimeout" or "WithDeadline".
+// Only formDefine / formAssign are supported (single LHS holding the
+// new ctx); every other form is a user error.
+func renderTimeoutDeadline(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, counter int, subs []qSubCall, subTexts []string, helper string) (string, error) {
+	family := "q.Timeout"
+	if helper == "WithDeadline" {
+		family = "q.Deadline"
+	}
+	if sh.Form != formDefine && sh.Form != formAssign {
+		return "", fmt.Errorf("%s must be used in a `newCtx := %s(...)` or `ctx = %s(...)` statement; the call returns a context.Context", family, family, family)
+	}
+	if len(sub.OkArgs) != 2 {
+		return "", fmt.Errorf("%s expects two arguments (ctx, dur|t); got %d", family, len(sub.OkArgs))
+	}
+	indent := indentOf(src, fset.Position(sh.Stmt.Pos()).Offset)
+	ctxText := exprTextSubst(fset, src, sub.OkArgs[0], subs, subTexts)
+	argText := exprTextSubst(fset, src, sub.OkArgs[1], subs, subTexts)
+	cancelVar := fmt.Sprintf("_qCancel%d", counter)
+	lhsText := exprText(fset, src, sh.LHSExpr)
+
+	var b bytes.Buffer
+	switch sh.Form {
+	case formDefine:
+		fmt.Fprintf(&b, "%s, %s := context.%s(%s, %s)", lhsText, cancelVar, helper, ctxText, argText)
+	case formAssign:
+		fmt.Fprintf(&b, "var %s context.CancelFunc\n", cancelVar)
+		fmt.Fprintf(&b, "%s%s, %s = context.%s(%s, %s)", indent, lhsText, cancelVar, helper, ctxText, argText)
+	}
+	b.WriteByte('\n')
+	fmt.Fprintf(&b, "%sdefer %s()", indent, cancelVar)
+	return b.String(), nil
 }
 
 // exprText returns the source-text representation of an arbitrary

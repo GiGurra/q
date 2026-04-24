@@ -1,0 +1,9 @@
+all.ok: ok=[1,2,3]
+all.bubble: err=boom
+all.wrap: err=gather: broken
+all.spread: ok=[10,20]
+all.ctx: err=context deadline exceeded
+any.first: ok=7
+any.all.fail.joined: matched=true
+any.ctx: err=context deadline exceeded
+any.wrap.allfail: prefix=true

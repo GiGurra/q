@@ -1,0 +1,6 @@
+define.err: context deadline exceeded
+assign.err: context deadline exceeded
+assign.isDeadline: true
+deadline.err: context deadline exceeded
+early.err: context canceled
+early.isCanceled: true

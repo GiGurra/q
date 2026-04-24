@@ -52,8 +52,15 @@ nav:
     - Panic handling:
       - q.Recover: api/recover.md
     - Concurrency:
-      - q.Lock:  api/lock.md
-      - q.Async: api/async.md
+      - q.Lock:                 api/lock.md
+      - q.Async:                api/async.md
+      - q.AwaitCtx:             api/await_ctx.md
+      - q.AwaitAll / AwaitAny:  api/await_multi.md
+      - q.RecvCtx:              api/recv_ctx.md
+      - q.RecvAny / Drain:      api/channel_multi.md
+    - Context:
+      - q.Bubble:            api/bubble.md
+      - q.Timeout/Deadline:  api/timeout.md
     - Dev tools:
       - q.Debug:  api/debug.md
       - q.TODO:   api/todo.md
