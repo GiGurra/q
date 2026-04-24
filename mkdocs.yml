@@ -39,10 +39,29 @@ nav:
   - Home: index.md
   - Getting Started: getting-started.md
   - API:
-    - q.Try:    api/try.md
-    - q.NotNil: api/notnil.md
-    - q.Check:  api/check.md
-    - q.Open:   api/open.md
+    - Error bubbling:
+      - q.Try:    api/try.md
+      - q.NotNil: api/notnil.md
+      - q.Check:  api/check.md
+      - q.Open:   api/open.md
+      - q.Trace:  api/trace.md
+    - Comma-ok:
+      - q.Ok:   api/ok.md
+      - q.Recv: api/recv.md
+      - q.As:   api/as.md
+    - Fallback:
+      - q.Default: api/default.md
+    - Panic handling:
+      - q.Recover:  api/recover.md
+      - q.TryCatch: api/trycatch.md
+    - Concurrency:
+      - q.Go:    api/go.md
+      - q.Lock:  api/lock.md
+      - q.Async: api/async.md
+    - Dev tools:
+      - q.Debug:  api/debug.md
+      - q.TODO:   api/todo.md
+      - q.Assert: api/assert.md
   - Examples:
     - Basic bubbling: examples/basic.md
     - Error shaping:  examples/error-shaping.md

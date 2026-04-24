@@ -50,6 +50,30 @@ GOFLAGS="-toolexec=q" go test  ./...
 
 See [Setup](#setup--ide-and-cache-configuration) below for the dedicated GOCACHE setup that keeps toolexec and non-toolexec builds from contaminating each other.
 
+## The whole surface at a glance
+
+| Family                              | What it does                                                  |
+|-------------------------------------|---------------------------------------------------------------|
+| [`q.Try` / `q.TryE`](docs/api/try.md)             | Bubble on `(T, error)`. The 90% case.                         |
+| [`q.NotNil` / `q.NotNilE`](docs/api/notnil.md)    | Bubble on a nil pointer.                                      |
+| [`q.Check` / `q.CheckE`](docs/api/check.md)       | Bubble on `error` alone (for `db.Ping`, `file.Close`, …).    |
+| [`q.Open` / `q.OpenE`](docs/api/open.md)          | `(T, error)` + auto `defer cleanup(v)` on success.            |
+| [`q.Trace` / `q.TraceE`](docs/api/trace.md)       | Try-shape, bubble prefixed with compile-time `file:line`.     |
+| [`q.Ok` / `q.OkE`](docs/api/ok.md)                | Bubble on `(T, bool)` — general comma-ok.                     |
+| [`q.Recv` / `q.RecvE`](docs/api/recv.md)          | Comma-ok specialised to channel receive; bubbles on close.    |
+| [`q.As` / `q.AsE`](docs/api/as.md)                | Comma-ok specialised to type assertion.                       |
+| [`q.Default` / `q.DefaultE`](docs/api/default.md) | Swallow err, substitute fallback. No bubble.                  |
+| [`q.Recover` / `q.RecoverE`](docs/api/recover.md) | `defer q.Recover(&err)` — function-wide panic→error.          |
+| [`q.TryCatch`](docs/api/trycatch.md)              | Block-scoped Java-style try/catch via defer+recover.          |
+| [`q.Go`](docs/api/go.md)                          | Goroutine wrapped in defer-recover-log.                       |
+| [`q.Lock`](docs/api/lock.md)                      | `Lock()` + `defer Unlock()` for any `sync.Locker`.            |
+| [`q.Async` / `q.Await` / `q.AwaitE`](docs/api/async.md) | JS-flavour promises on top of goroutines + channels.    |
+| [`q.Debug`](docs/api/debug.md)                    | Go's missing `dbg!` — prints `file:line src = value`.         |
+| [`q.TODO` / `q.Unreachable`](docs/api/todo.md)    | Rust-style panic markers with file:line.                      |
+| [`q.Assert`](docs/api/assert.md)                  | Runtime assertion — panic on false.                           |
+
+Full per-entry reference on the [docs site](https://gigurra.github.io/q/).
+
 <details>
 <summary><strong>The full surface</strong> — bare and chain helpers, every method</summary>
 
@@ -123,6 +147,78 @@ conn := q.OpenE(dial(addr)).Catch(func(e error) (*Conn, error) {
 ```
 
 `Catch` is the most powerful method: returning `(value, nil)` recovers and uses that value in place of the bubble; returning `(zero, err)` bubbles the new error. The other methods are conveniences for the common shapes. For `q.OpenE`, a recovered `value` is what the deferred cleanup fires on — not the failed resource.
+
+### Trace — compile-time file:line prefix on every bubble
+
+```go
+row := q.Trace(db.Query(id))
+// → fmt.Errorf("users.go:42: %w", err) on the bubble path
+
+row := q.TraceE(db.Query(id)).Wrapf("loading user %d", id)
+// → fmt.Errorf("users.go:42: loading user 7: %w", err)
+```
+
+### Swallow-with-fallback — `q.Default` / `q.DefaultE`
+
+```go
+n := q.Default(strconv.Atoi(s), -1)           // always fall back on err
+
+n := q.DefaultE(load(), 0).When(func(e error) bool {
+    return errors.Is(e, io.EOF)               // EOF → 0; other errors bubble
+})
+```
+
+### Comma-ok variants — `q.Recv`, `q.As`
+
+```go
+msg := q.Recv(inbox)                          // bubble q.ErrChanClosed on close
+msg := q.RecvE(inbox).Wrap("reading inbox")
+
+n := q.As[int](x)                             // bubble q.ErrBadAssert on type mismatch
+admin := q.AsE[Admin](user).Wrapf("%T is not an admin", user)
+```
+
+### Panic handling — `q.Recover`, `q.TryCatch`
+
+```go
+func doWork() (err error) {
+    defer q.Recover(&err)                     // any panic → *q.PanicError
+    process()
+    return nil
+}
+
+defer q.RecoverE(&err).Map(func(r any) error {
+    return &APIError{Detail: fmt.Sprint(r)}   // custom panic-to-error translation
+})
+
+q.TryCatch(func() { risky() }).Catch(func(r any) {
+    log.Println("recovered:", r)              // block-scoped try/catch
+})
+```
+
+### Concurrency — `q.Go`, `q.Lock`, `q.Async` / `q.Await`
+
+```go
+q.Go(func() { process(task) })                // goroutine with defer-recover-log
+
+func (s *Store) Set(k, v string) {
+    q.Lock(&s.mu)                             // Lock + defer Unlock
+    s.data[k] = v
+}
+
+f := q.Async(func() (int, error) { return fetchSize(url) })
+size := q.Await(f)                            // blocks, bubbles on err
+size := q.AwaitE(f).Wrapf("fetching %s", url)
+```
+
+### Dev tools — `q.Debug`, `q.TODO`, `q.Unreachable`, `q.Assert`
+
+```go
+u := loadUser(q.Debug(id))                    // prints "main.go:17 id = 7" to DebugWriter
+q.TODO("schema v2 parser")                    // panic("q.TODO parser.go:42: schema v2 parser")
+q.Unreachable()                               // panic("q.Unreachable parser.go:42")
+q.Assert(len(buf) >= 16, "header too short")  // panic on false with file:line prefix
+```
 
 ### Statement positions
 
