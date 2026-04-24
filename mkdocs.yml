@@ -49,8 +49,6 @@ nav:
       - q.Ok:   api/ok.md
       - q.Recv: api/recv.md
       - q.As:   api/as.md
-    - Fallback:
-      - q.Default: api/default.md
     - Panic handling:
       - q.Recover:  api/recover.md
       - q.TryCatch: api/trycatch.md

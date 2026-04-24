@@ -82,6 +82,33 @@ func rewriteFile(fset *token.FileSet, file *ast.File, src []byte, shapes []callS
 		edits = append(edits, edit{start: start, end: end, text: text})
 	}
 
+	// Signature rewrites for auto-Recover: one per unique enclosing
+	// function. Keyed by *ast.FuncType pointer — every shape the
+	// scanner produced for the same function shares the same
+	// FuncType pointer.
+	sigSeen := map[*ast.FuncType]bool{}
+	for _, sh := range shapes {
+		if !shapeNeedsSigCheck(sh) {
+			continue
+		}
+		if sigSeen[sh.EnclosingFuncType] {
+			continue
+		}
+		sigSeen[sh.EnclosingFuncType] = true
+		_, newResultsText, needsRewrite, err := analyzeErrorReturn(fset, src, sh.EnclosingFuncType)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !needsRewrite {
+			continue
+		}
+		sigStart, sigEnd, ok := resultsSpan(fset, sh.EnclosingFuncType.Results)
+		if !ok {
+			continue
+		}
+		edits = append(edits, edit{start: sigStart, end: sigEnd, text: newResultsText})
+	}
+
 	// Apply statement-span edits bottom-up so earlier offsets do not
 	// shift while later ones rewrite the file.
 	sort.Slice(edits, func(i, j int) bool { return edits[i].start > edits[j].start })
@@ -291,6 +318,145 @@ func renderAwaitE(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, c
 	return "", false, fmt.Errorf("renderAwaitE: unknown method %q", sub.Method)
 }
 
+// shapeNeedsSigCheck reports whether any sub-call in sh is an auto-
+// Recover form that might require the enclosing function's result
+// list to be renamed. Used to seed the per-function signature
+// rewrite pass.
+func shapeNeedsSigCheck(sh callShape) bool {
+	for _, sub := range sh.Calls {
+		if sub.Family == familyRecoverAuto || sub.Family == familyRecoverEAuto {
+			return true
+		}
+	}
+	return false
+}
+
+// resultsSpan returns the byte offsets of the source span that the
+// signature rewrite should replace. Two shapes:
+//
+//   - Parenthesised: `func f() (a, b int, error)` — start at `(`,
+//     end just past `)`.
+//   - Unparenthesised (single unnamed result): `func f() error` —
+//     start at the type's Pos, end at its End.
+//
+// ok=false when there is no result list to rewrite (shouldn't
+// happen: analyzeErrorReturn would have errored earlier).
+func resultsSpan(fset *token.FileSet, results *ast.FieldList) (start, end int, ok bool) {
+	if results == nil || len(results.List) == 0 {
+		return 0, 0, false
+	}
+	if results.Opening.IsValid() && results.Closing.IsValid() {
+		return fset.Position(results.Opening).Offset, fset.Position(results.Closing).Offset + 1, true
+	}
+	// No parens — single unnamed field.
+	field := results.List[0]
+	return fset.Position(field.Type.Pos()).Offset, fset.Position(field.Type.End()).Offset, true
+}
+
+// renderRecoverAuto produces the replacement for `defer q.Recover()`.
+// Looks up the enclosing function's error-slot name (user-supplied
+// or generated), emits `defer <alias>.Recover(&<name>)`. The sub
+// arg carries no useful data for this family — all information is
+// pulled from the enclosing FuncType — so it's underscored.
+func renderRecoverAuto(fset *token.FileSet, src []byte, sh callShape, _ qSubCall, alias string) (string, error) {
+	errName, _, _, err := analyzeErrorReturn(fset, src, sh.EnclosingFuncType)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("defer %s.Recover(&%s)", alias, errName), nil
+}
+
+// renderRecoverEAuto produces the replacement for
+// `defer q.RecoverE().Method(args)`. Rebuilds the chain with
+// `&<errName>` as the RecoverE argument; method args are spliced
+// verbatim (with nested q.* substitutions applied).
+func renderRecoverEAuto(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, alias string, subs []qSubCall, subTexts []string) (string, error) {
+	errName, _, _, err := analyzeErrorReturn(fset, src, sh.EnclosingFuncType)
+	if err != nil {
+		return "", err
+	}
+	var argParts []string
+	for _, a := range sub.MethodArgs {
+		argParts = append(argParts, exprTextSubst(fset, src, a, subs, subTexts))
+	}
+	return fmt.Sprintf("defer %s.RecoverE(&%s).%s(%s)", alias, errName, sub.Method, joinWith(argParts, ", ")), nil
+}
+
+// analyzeErrorReturn inspects the enclosing function's Results list
+// and returns (errName, newResultsText, needsSigRewrite, err):
+//
+//   - errName: the name the deferred call should pass via &errName.
+//     Reuses the user's name if they already wrote one; otherwise
+//     "_qErr".
+//   - newResultsText: the full "(…)" replacement to splice into the
+//     signature when needsSigRewrite is true. Empty when no rewrite
+//     is needed (all slots already named).
+//   - needsSigRewrite: true when at least one result is unnamed —
+//     Go requires all-or-nothing on named results, so we must name
+//     every slot if the error slot wasn't named by the user.
+//
+// Returns a diagnostic error when the enclosing function has no
+// return list, or when the last return isn't exactly the builtin
+// `error` interface (passing `&err` of any other type to
+// q.Recover's `*error` parameter would be a type mismatch).
+func analyzeErrorReturn(fset *token.FileSet, src []byte, fnType *ast.FuncType) (errName, newResultsText string, needsSigRewrite bool, err error) {
+	results := fnType.Results
+	if results == nil || results.NumFields() == 0 {
+		return "", "", false, fmt.Errorf("q.Recover()/RecoverE() used in a function with no return values; place it in a function returning `error` (or `(T, error)`)")
+	}
+	lastField := results.List[len(results.List)-1]
+	if !isBuiltinErrorType(lastField.Type) {
+		return "", "", false, fmt.Errorf("q.Recover()/RecoverE() requires the last return parameter to be the built-in `error`; got %s", exprText(fset, src, lastField.Type))
+	}
+	// Already has a name? Reuse. The last field is the error slot;
+	// if it has Names, use the last entry (covers the unusual
+	// `(a, b error)` shape too).
+	if n := len(lastField.Names); n > 0 {
+		return lastField.Names[n-1].Name, "", false, nil
+	}
+	// No name on the error slot → Go requires every slot to be
+	// named or none to be named, so rewrite the entire Results.
+	// Generate `_qRetN` for unnamed non-error slots and `_qErr` for
+	// the error slot. Preserve existing names verbatim where
+	// already supplied (this field path is only reachable when the
+	// error slot is unnamed, which in valid Go means all slots are
+	// unnamed — but we preserve any existing names defensively).
+	var parts []string
+	slotIdx := 0
+	for fieldIdx, f := range results.List {
+		isLast := fieldIdx == len(results.List)-1
+		typeText := exprText(fset, src, f.Type)
+		if len(f.Names) == 0 {
+			var name string
+			if isLast {
+				name = "_qErr"
+			} else {
+				name = fmt.Sprintf("_qRet%d", slotIdx)
+			}
+			parts = append(parts, name+" "+typeText)
+			slotIdx++
+		} else {
+			names := make([]string, len(f.Names))
+			for i, n := range f.Names {
+				names[i] = n.Name
+			}
+			parts = append(parts, joinWith(names, ", ")+" "+typeText)
+			slotIdx += len(f.Names)
+		}
+	}
+	return "_qErr", "(" + joinWith(parts, ", ") + ")", true, nil
+}
+
+// isBuiltinErrorType reports whether t is the plain identifier
+// `error` (the universe-scope interface). Concrete error types
+// (`MyErr`, `*MyErr`, etc.) are rejected — `&err` of any non-error
+// type would be a type mismatch against q.Recover's `*error`
+// parameter, and the typed-nil-interface pitfall would also apply.
+func isBuiltinErrorType(t ast.Expr) bool {
+	id, ok := t.(*ast.Ident)
+	return ok && id.Name == "error"
+}
+
 // renderTryCatch produces the replacement for q.TryCatch(try).Catch(handle).
 // Emits an IIFE that defers a recover+dispatch around the try
 // function. Statement-only.
@@ -492,12 +658,6 @@ func renderSubCall(fset *token.FileSet, src []byte, sh callShape, subIdx int, su
 	case familyTraceE:
 		text, err := renderTraceE(fset, src, sh, sub, counter, subs, subTexts)
 		return text, true, false, err
-	case familyDefault:
-		text, err := renderDefault(fset, src, sh, sub, counter, subs, subTexts)
-		return text, false, false, err
-	case familyDefaultE:
-		text, err := renderDefaultE(fset, src, sh, sub, counter, subs, subTexts)
-		return text, false, false, err
 	case familyLock:
 		text, err := renderLock(fset, src, sh, sub, counter, subs, subTexts)
 		return text, false, false, err
@@ -537,6 +697,12 @@ func renderSubCall(fset *token.FileSet, src []byte, sh callShape, subIdx int, su
 		return text, fmtUsed, false, err
 	case familyTryCatch:
 		text, err := renderTryCatch(fset, src, sh, sub, subs, subTexts)
+		return text, false, false, err
+	case familyRecoverAuto:
+		text, err := renderRecoverAuto(fset, src, sh, sub, alias)
+		return text, false, false, err
+	case familyRecoverEAuto:
+		text, err := renderRecoverEAuto(fset, src, sh, sub, alias, subs, subTexts)
 		return text, false, false, err
 	}
 	return "", false, false, fmt.Errorf("renderSubCall: unknown family %v", sub.Family)
@@ -986,116 +1152,6 @@ func renderAssert(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, s
 	fmt.Fprintf(&b, "%s\tpanic(%s)\n", indent, msgExpr)
 	fmt.Fprintf(&b, "%s}", indent)
 	return b.String(), nil
-}
-
-// defaultInnerText is the source text of the Default/DefaultE entry's
-// (T, error) slot — either a single CallExpr or a `v, err` pair —
-// with nested q.* spans substituted.
-func defaultInnerText(fset *token.FileSet, src []byte, sub qSubCall, subs []qSubCall, subTexts []string) string {
-	if len(sub.DefaultInner) == 0 {
-		return ""
-	}
-	start := fset.Position(sub.DefaultInner[0].Pos()).Offset
-	end := fset.Position(sub.DefaultInner[len(sub.DefaultInner)-1].End()).Offset
-	return substituteSpans(fset, src, start, end, subs, subTexts)
-}
-
-// renderDefault produces the replacement for bare q.Default. Unlike
-// every other family, Default never returns early — on error it
-// overwrites the value slot with the fallback and continues.
-//
-//	formDefine:  v, _qErr := <inner>
-//	             if _qErr != nil { v = <fallback> }
-//	formAssign:  var _qErr error
-//	             v, _qErr = <inner>
-//	             if _qErr != nil { v = <fallback> }
-//	formDiscard: _, _qErr := <inner>
-//	             if _qErr != nil { /* fallback unused */ }
-//	formReturn/ _qTmpN, _qErr := <inner>
-//	formHoist:  if _qErr != nil { _qTmpN = <fallback> }
-//	            <orig-stmt with _qTmpN spliced>
-func renderDefault(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, counter int, subs []qSubCall, subTexts []string) (string, error) {
-	indent := indentOf(src, fset.Position(sh.Stmt.Pos()).Offset)
-	errVar := fmt.Sprintf("_qErr%d", counter)
-	innerText := defaultInnerText(fset, src, sub, subs, subTexts)
-	fbText := exprTextSubst(fset, src, sub.DefaultFallback, subs, subTexts)
-	valueSlot, bindLine := defaultBindLine(fset, src, sh, errVar, innerText, indent, counter)
-
-	var b bytes.Buffer
-	b.WriteString(bindLine)
-	b.WriteByte('\n')
-	if valueSlot == "_" {
-		// Discard form — value slot is `_`, no reassign possible.
-		fmt.Fprintf(&b, "%sif %s != nil {\n", indent, errVar)
-		fmt.Fprintf(&b, "%s\t_ = %s\n", indent, fbText) // evaluate fallback for side effects only
-		fmt.Fprintf(&b, "%s}", indent)
-	} else {
-		fmt.Fprintf(&b, "%sif %s != nil {\n", indent, errVar)
-		fmt.Fprintf(&b, "%s\t%s = %s\n", indent, valueSlot, fbText)
-		fmt.Fprintf(&b, "%s}", indent)
-	}
-	return b.String(), nil
-}
-
-// renderDefaultE produces the replacement for q.DefaultE(...).When(pred).
-// Adds a predicate gate: only fall back when pred(err) returns true;
-// otherwise bubble the captured error unchanged.
-func renderDefaultE(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, counter int, subs []qSubCall, subTexts []string) (string, error) {
-	results := sh.EnclosingFuncType.Results
-	if results == nil || results.NumFields() == 0 {
-		return "", fmt.Errorf("q.DefaultE used in a function with no return values; the conditional bubble has nowhere to go — use q.Default for unconditional fallback instead")
-	}
-	zeros, err := zeroExprs(fset, src, results)
-	if err != nil {
-		return "", err
-	}
-	indent := indentOf(src, fset.Position(sh.Stmt.Pos()).Offset)
-	errVar := fmt.Sprintf("_qErr%d", counter)
-	innerText := defaultInnerText(fset, src, sub, subs, subTexts)
-	fbText := exprTextSubst(fset, src, sub.DefaultFallback, subs, subTexts)
-	valueSlot, bindLine := defaultBindLine(fset, src, sh, errVar, innerText, indent, counter)
-	if len(sub.MethodArgs) != 1 {
-		return "", fmt.Errorf("q.DefaultE(...).When requires exactly one argument (a func(error) bool predicate); got %d", len(sub.MethodArgs))
-	}
-	predText := exprTextSubst(fset, src, sub.MethodArgs[0], subs, subTexts)
-	zeros[len(zeros)-1] = errVar
-
-	var b bytes.Buffer
-	b.WriteString(bindLine)
-	b.WriteByte('\n')
-	fmt.Fprintf(&b, "%sif %s != nil {\n", indent, errVar)
-	fmt.Fprintf(&b, "%s\tif (%s)(%s) {\n", indent, predText, errVar)
-	if valueSlot == "_" {
-		fmt.Fprintf(&b, "%s\t\t_ = %s\n", indent, fbText)
-	} else {
-		fmt.Fprintf(&b, "%s\t\t%s = %s\n", indent, valueSlot, fbText)
-	}
-	fmt.Fprintf(&b, "%s\t} else {\n", indent)
-	fmt.Fprintf(&b, "%s\t\treturn %s\n", indent, joinWith(zeros, ", "))
-	fmt.Fprintf(&b, "%s\t}\n", indent)
-	fmt.Fprintf(&b, "%s}", indent)
-	return b.String(), nil
-}
-
-// defaultBindLine builds the bind line for the Default family and
-// returns the "value slot" — the name the conditional branch writes
-// the fallback into. For discard form the value slot is `_` and the
-// caller special-cases the fallback evaluation.
-func defaultBindLine(fset *token.FileSet, src []byte, sh callShape, errVar, innerText, indent string, counter int) (valueSlot, bindLine string) {
-	switch sh.Form {
-	case formDefine:
-		lhs := exprText(fset, src, sh.LHSExpr)
-		return lhs, fmt.Sprintf("%s, %s := %s", lhs, errVar, innerText)
-	case formAssign:
-		lhs := exprText(fset, src, sh.LHSExpr)
-		return lhs, fmt.Sprintf("var %s error\n%s%s, %s = %s", errVar, indent, lhs, errVar, innerText)
-	case formDiscard:
-		return "_", fmt.Sprintf("_, %s := %s", errVar, innerText)
-	case formReturn, formHoist:
-		tmp := fmt.Sprintf("_qTmp%d", counter)
-		return tmp, fmt.Sprintf("%s, %s := %s", tmp, errVar, innerText)
-	}
-	return "_", "/* unsupported form */"
 }
 
 // tracePrefix returns a "<basename>:<line>" string for the supplied

@@ -49,8 +49,6 @@ const (
 	familyOkE     // q.OkE(v, ok).<method> — comma-ok chain
 	familyTrace   // q.Trace(v, err) — bubble prefixed with call-site file:line
 	familyTraceE  // q.TraceE(v, err).<method> — trace-prefixed chain
-	familyDefault     // q.Default(v, err, fb) — swallow err, replace with fb; no bubble
-	familyDefaultE    // q.DefaultE(v, err, fb).When(pred) — conditional swallow
 	familyLock        // q.Lock(l) — Lock + defer Unlock
 	familyGo          // q.Go(fn) — goroutine with recover+log
 	familyTODO        // q.TODO([msg]) — panic with file:line prefix
@@ -64,6 +62,8 @@ const (
 	familyAwait       // q.Await(f) — Try-like bubble using q.AwaitRaw as the source
 	familyAwaitE      // q.AwaitE(f).<method> — TryE-like chain over q.AwaitRaw
 	familyTryCatch    // q.TryCatch(try).Catch(handle) — IIFE with defer-recover
+	familyRecoverAuto  // defer q.Recover()       — inject &err from enclosing sig
+	familyRecoverEAuto // defer q.RecoverE().M(x) — same, for the chain variant
 )
 
 // form is the syntactic position of a recognised q.* call:
@@ -134,14 +134,6 @@ type qSubCall struct {
 	// first arg's Pos to the last arg's End to produce an inner-text
 	// that drops straight into a tuple bind (`v, _qOkN := <span>`).
 	OkArgs []ast.Expr
-
-	// DefaultInner is the (T, error)-producing expression span for
-	// a q.Default / q.DefaultE call — either a single CallExpr (two-
-	// arg form `q.Default(call(), fb)`) or the pair `v, err` (three-
-	// arg form `q.Default(v, err, fb)`). DefaultFallback is the
-	// fallback expression. Both nil for non-Default families.
-	DefaultInner    []ast.Expr
-	DefaultFallback ast.Expr
 
 	// AsType is the explicit type argument in a q.As[T] / q.AsE[T]
 	// call; nil for every other family. The rewriter splices its
@@ -486,6 +478,21 @@ func matchStatement(stmt ast.Stmt, alias string, fnType *ast.FuncType) (callShap
 		}
 		return matchHoist(stmt, fnType, alias, []ast.Expr{s.X})
 
+	case *ast.DeferStmt:
+		sub, ok, err := classifyDeferredRecover(s.Call, alias)
+		if err != nil {
+			return callShape{}, false, err
+		}
+		if ok {
+			return callShape{
+				Stmt:              stmt,
+				Form:              formDiscard,
+				Calls:             []qSubCall{sub},
+				EnclosingFuncType: fnType,
+			}, true, nil
+		}
+		return callShape{}, false, nil
+
 	case *ast.ReturnStmt:
 		// Find every q.* call anywhere inside the return's result
 		// expressions — not just top-level. This makes shapes like
@@ -703,14 +710,6 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 		}
 		return qSubCall{Family: familyAssert, InnerExpr: call.Args[0], MethodArgs: call.Args[1:], OuterCall: expr}, true, nil
 	}
-	// Bare q.Default — swallow err, use fallback. No bubble.
-	if isSelector(call.Fun, alias, "Default") {
-		inner, fb, err := splitDefaultArgs("q.Default", call.Args)
-		if err != nil {
-			return qSubCall{}, false, err
-		}
-		return qSubCall{Family: familyDefault, InnerExpr: inner[0], DefaultInner: inner, DefaultFallback: fb, OuterCall: expr}, true, nil
-	}
 	// Bare q.Trace — Try-shape with file:line-prefixed bubble.
 	if isSelector(call.Fun, alias, "Trace") {
 		if len(call.Args) != 1 {
@@ -779,18 +778,6 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 				return qSubCall{}, false, fmt.Errorf("q.CheckE must take exactly one argument (an error expression); got %d", len(entry.Args))
 			}
 			return qSubCall{Family: familyCheckE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Args[0], OuterCall: expr}, true, nil
-		case isSelector(entry.Fun, alias, "DefaultE"):
-			if sel.Sel.Name != "When" {
-				return qSubCall{}, false, fmt.Errorf("q.DefaultE chain method %q not recognised; valid: When", sel.Sel.Name)
-			}
-			if len(call.Args) != 1 {
-				return qSubCall{}, false, fmt.Errorf("q.DefaultE(...).When requires exactly one argument (a func(error) bool predicate); got %d", len(call.Args))
-			}
-			inner, fb, err := splitDefaultArgs("q.DefaultE", entry.Args)
-			if err != nil {
-				return qSubCall{}, false, err
-			}
-			return qSubCall{Family: familyDefaultE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: inner[0], DefaultInner: inner, DefaultFallback: fb, OuterCall: expr}, true, nil
 		case isSelector(entry.Fun, alias, "TraceE"):
 			if !chainMethods[sel.Sel.Name] {
 				return qSubCall{}, false, fmt.Errorf("q.TraceE chain method %q not recognised; valid: Err, ErrF, Catch, Wrap, Wrapf", sel.Sel.Name)
@@ -950,26 +937,6 @@ func validateOkArgs(name string, args []ast.Expr) error {
 	}
 }
 
-// splitDefaultArgs validates q.Default / q.DefaultE argument shape
-// and returns the (T, error) span and the fallback expression.
-// Two valid shapes:
-//
-//	q.Default(call(), fb)      — 2 args, first is a (T, error) CallExpr
-//	q.Default(v, err, fb)      — 3 args, pre-destructured
-func splitDefaultArgs(name string, args []ast.Expr) (inner []ast.Expr, fallback ast.Expr, err error) {
-	switch len(args) {
-	case 2:
-		if _, ok := args[0].(*ast.CallExpr); !ok {
-			return nil, nil, fmt.Errorf("%s's first argument in the 2-arg form must be a call expression returning (T, error); use the 3-arg form to pass (v, err, fb) separately", name)
-		}
-		return args[:1], args[1], nil
-	case 3:
-		return args[:2], args[2], nil
-	default:
-		return nil, nil, fmt.Errorf("%s must take (callExpr, fallback) or (v, err, fallback); got %d args", name, len(args))
-	}
-}
-
 // matchOpenEntry reports whether c is a direct q.Open / q.OpenE call
 // under the local alias, and which family it belongs to.
 func matchOpenEntry(c *ast.CallExpr, alias string) (family, *ast.CallExpr, bool) {
@@ -980,6 +947,54 @@ func matchOpenEntry(c *ast.CallExpr, alias string) (family, *ast.CallExpr, bool)
 		return familyOpenE, c, true
 	}
 	return 0, nil, false
+}
+
+// recoverEChainMethods enumerates the chain methods the rewriter
+// knows how to splice &err into for `defer q.RecoverE().X(args)`.
+// Superset of chainMethods — RecoverE has .Map which the bubble
+// families do not.
+var recoverEChainMethods = map[string]bool{
+	"Map":   true,
+	"Err":   true,
+	"ErrF":  true,
+	"Wrap":  true,
+	"Wrapf": true,
+}
+
+// classifyDeferredRecover recognises the two auto-Recover shapes:
+//
+//	q.Recover()                     — no args  → familyRecoverAuto
+//	q.RecoverE().<Method>(args...)  — no args on RecoverE, valid chain method → familyRecoverEAuto
+//
+// Returns (_, false, nil) when the call doesn't match either shape;
+// the caller treats that as "not our form" and falls back to the
+// existing runtime-helper path (qRuntimeHelpers skip).
+func classifyDeferredRecover(call *ast.CallExpr, alias string) (qSubCall, bool, error) {
+	// Bare form: defer q.Recover()
+	if isSelector(call.Fun, alias, "Recover") && len(call.Args) == 0 {
+		return qSubCall{Family: familyRecoverAuto, OuterCall: call}, true, nil
+	}
+	// Chain form: defer q.RecoverE().Method(args)
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return qSubCall{}, false, nil
+	}
+	entry, ok := sel.X.(*ast.CallExpr)
+	if !ok {
+		return qSubCall{}, false, nil
+	}
+	if !isSelector(entry.Fun, alias, "RecoverE") || len(entry.Args) != 0 {
+		return qSubCall{}, false, nil
+	}
+	if !recoverEChainMethods[sel.Sel.Name] {
+		return qSubCall{}, false, fmt.Errorf("q.RecoverE chain method %q not recognised; valid: Map, Err, ErrF, Wrap, Wrapf", sel.Sel.Name)
+	}
+	return qSubCall{
+		Family:     familyRecoverEAuto,
+		Method:     sel.Sel.Name,
+		MethodArgs: call.Args,
+		OuterCall:  call,
+	}, true, nil
 }
 
 // isIndexedSelector reports whether expr has the shape

@@ -1,0 +1,11 @@
+named.ok: ok
+single.ok: ok
+pair.ok: n=42 err=<nil>
+named.panic: panic=named-err
+single.panic: panic=unnamed-single
+pair.panic: n=0 panic=unnamed-pair
+eMap.panic: err=mapped: em-boom
+eWrap.panic: err=during work: q: recovered panic: ew-boom
+eErr.panic: err=fixed-replacement
+multi.panic: err=inner-wrap: q: recovered panic: multi-boom
+explicit.panic: panic=explicit-boom

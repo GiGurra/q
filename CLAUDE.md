@@ -36,8 +36,6 @@
   - `OpenResultE[T]` shape methods: `.Err(error)`, `.ErrF(func(error) error)`, `.Catch(func(error) (T, error))`, `.Wrap(string)`, `.Wrapf(string, ...any)` — each returns `OpenResultE[T]` so `.Release(cleanup func(T)) T` can follow as terminal.
   - `Trace[T any](v T, err error) T` — Try-shape with call-site `file:line` prefix injected into the bubble at compile time.
   - `TraceE[T any](v T, err error) TraceResult[T]` — chain variant; every method composes over the location prefix.
-  - `Default[T any](v T, err error, fallback T) T` — swallows err, returns fallback on bubble (no early return). Supports 2-arg (`q.Default(call(), fb)`) and 3-arg (`q.Default(v, err, fb)`) call shapes.
-  - `DefaultE[T any](v T, err error, fallback T) DefaultResult[T]` — single method `.When(pred func(error) bool)`: matching errors fall back, others bubble.
   - `Recv[T any](ch <-chan T) T` — channel receive that bubbles `q.ErrChanClosed` on closed channel.
   - `RecvE[T any](ch <-chan T) OkResult[T]` — chain variant (reuses OkResult).
   - `As[T any](x any) T` — type assertion that bubbles `q.ErrBadAssert` on failure. Explicit type arg required (`q.As[User](x)`).
@@ -81,7 +79,6 @@
 - `internal/preprocessor/testdata/cases/notnil_family_run_ok/` — Phase 2 fixture for the full NotNil family: bare `q.NotNil` plus every `q.NotNilE` chain method, each invoked on both the pointer-present and pointer-absent paths.
 - `internal/preprocessor/testdata/cases/ok_family_run_ok/` — fixture for the full Ok family: bare `q.Ok` in both call-argument shapes (two-arg `q.Ok(v, ok)` and single-call `q.Ok(fn())`), every `q.OkE` chain method on both ok and not-ok paths, the assign + chain-discard forms (ordered so the discard fires before the later assign's bare bubble), the hoist form (q.Ok nested inside a regular call arg), and a sentinel-identity check `errors.Is(err, q.ErrNotOk)`.
 - `internal/preprocessor/testdata/cases/trace_family_run_ok/` — fixture for `q.Trace` / `q.TraceE`. Asserts the bubbled error starts with `main.go:<line>:` (line number normalised to `N` for stability) across every chain method plus errors.As / errors.Is chain integrity.
-- `internal/preprocessor/testdata/cases/default_family_run_ok/` — fixture for `q.Default` / `q.DefaultE`. Covers 2-arg and 3-arg call shapes, define/assign/return/hoist forms, `.When(pred)` matching and non-matching paths.
 - `internal/preprocessor/testdata/cases/panic_defer_family_run_ok/` — fixture for Phase 2 (q.Lock on Mutex + RWMutex.RLocker, q.Go happy path, q.TODO/Unreachable/Assert with and without messages). Includes `stripLineNumber` helper to normalise panic messages.
 - `internal/preprocessor/testdata/cases/recv_as_family_run_ok/` — fixture for `q.Recv` / `q.RecvE` and `q.As[T]` / `q.AsE[T]`. Both bare sentinels, Wrap/Wrapf/Err/Catch on both paths, errors.Is identity for both sentinels.
 - `internal/preprocessor/testdata/cases/debug_run_ok/` — fixture for `q.Debug`. Captures DebugWriter into a bytes.Buffer, line-number-normalises output, asserts pass-through semantics for int/string/arithmetic + direct DebugAt call.

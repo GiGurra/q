@@ -62,7 +62,6 @@ See [Setup](#setup--ide-and-cache-configuration) below for the dedicated GOCACHE
 | [`q.Ok` / `q.OkE`](docs/api/ok.md)                | Bubble on `(T, bool)` — general comma-ok.                     |
 | [`q.Recv` / `q.RecvE`](docs/api/recv.md)          | Comma-ok specialised to channel receive; bubbles on close.    |
 | [`q.As` / `q.AsE`](docs/api/as.md)                | Comma-ok specialised to type assertion.                       |
-| [`q.Default` / `q.DefaultE`](docs/api/default.md) | Swallow err, substitute fallback. No bubble.                  |
 | [`q.Recover` / `q.RecoverE`](docs/api/recover.md) | `defer q.Recover(&err)` — function-wide panic→error.          |
 | [`q.TryCatch`](docs/api/trycatch.md)              | Block-scoped Java-style try/catch via defer+recover.          |
 | [`q.Go`](docs/api/go.md)                          | Goroutine wrapped in defer-recover-log.                       |
@@ -158,16 +157,6 @@ row := q.TraceE(db.Query(id)).Wrapf("loading user %d", id)
 // → fmt.Errorf("users.go:42: loading user 7: %w", err)
 ```
 
-### Swallow-with-fallback — `q.Default` / `q.DefaultE`
-
-```go
-n := q.Default(strconv.Atoi(s), -1)           // always fall back on err
-
-n := q.DefaultE(load(), 0).When(func(e error) bool {
-    return errors.Is(e, io.EOF)               // EOF → 0; other errors bubble
-})
-```
-
 ### Comma-ok variants — `q.Recv`, `q.As`
 
 ```go
@@ -181,14 +170,14 @@ admin := q.AsE[Admin](user).Wrapf("%T is not an admin", user)
 ### Panic handling — `q.Recover`, `q.TryCatch`
 
 ```go
-func doWork() (err error) {
-    defer q.Recover(&err)                     // any panic → *q.PanicError
+func doWork() error {                         // error-slot auto-named by the preprocessor
+    defer q.Recover()                         // &err wired in; any panic → *q.PanicError
     process()
     return nil
 }
 
-defer q.RecoverE(&err).Map(func(r any) error {
-    return &APIError{Detail: fmt.Sprint(r)}   // custom panic-to-error translation
+defer q.RecoverE().Map(func(r any) error {    // same auto-wire for the chain variant
+    return &APIError{Detail: fmt.Sprint(r)}
 })
 
 q.TryCatch(func() { risky() }).Catch(func(r any) {

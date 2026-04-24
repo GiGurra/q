@@ -425,14 +425,23 @@ func (e *PanicError) Error() string {
 // Recover is the runtime helper paired with `defer q.Recover(&err)`.
 // When a panic is in flight at defer-time, the recovered value and
 // a debug.Stack() snapshot are wrapped in *PanicError and stored
-// via errPtr. Plain runtime function (NOT rewritten) — Go's
-// recover() sees the panic because Recover IS the deferred
-// function. Calling Recover without defer is a no-op.
+// via errPtr. Plain runtime function — Go's recover() sees the
+// panic because Recover IS the deferred function. Calling Recover
+// without defer is a no-op.
 //
-// Example:
+// Two call shapes are accepted:
 //
-//	func doWork() (err error) {
-//	    defer q.Recover(&err)
+//   - `defer q.Recover(&err)` — explicit form, pure runtime.
+//   - `defer q.Recover()`     — zero-arg auto form. The preprocessor
+//     rewrites the call to pass `&err` from the enclosing function's
+//     error-slot automatically, and — when that slot is unnamed —
+//     injects a named return on the signature. The enclosing
+//     function must have the built-in `error` as its last return.
+//
+// Example (auto form):
+//
+//	func doWork() error {      // becomes `(_qErr error)` post-rewrite
+//	    defer q.Recover()
 //	    riskyPanics()
 //	    return nil
 //	}
@@ -444,15 +453,23 @@ func Recover(errPtr *error) {
 
 // RecoverE begins a RecoverE chain. The chain method decides how
 // the recovered panic (if any) maps to the error stored via
-// errPtr. Runtime function (not rewritten) — like Recover, the
-// chain's terminal method IS the deferred function, so
-// recover() catches the panic correctly.
+// errPtr. Like Recover, the chain's terminal method IS the
+// deferred function, so recover() catches the panic correctly.
 //
-// Example:
+// Two call shapes mirror Recover:
 //
-//	defer q.RecoverE(&err).Map(func(r any) error {
-//	    return &MyErr{Cause: r}
-//	})
+//   - `defer q.RecoverE(&err).<Method>(args)` — explicit, pure runtime.
+//   - `defer q.RecoverE().<Method>(args)`     — zero-arg auto form.
+//     The preprocessor rewrites the call to inject `&err` and names
+//     the signature's error return when necessary.
+//
+// Example (auto form):
+//
+//	func doWork() error {
+//	    defer q.RecoverE().Map(func(r any) error { return &MyErr{Cause: r} })
+//	    riskyPanics()
+//	    return nil
+//	}
 func RecoverE(errPtr *error) RecoverResult {
 	return RecoverResult{errPtr: errPtr}
 }
@@ -687,47 +704,6 @@ func Unreachable(msg ...string) {
 // correctly-written callers.
 func Assert(cond bool, msg ...string) {
 	panicUnrewritten("q.Assert")
-}
-
-// Default returns v when err is nil and fallback otherwise; the
-// preprocessor rewrites the call site so the error is never
-// bubbled — it's replaced by fallback. Opt-in by the call site;
-// does not alter behavior for any other error in the function.
-// Reach for q.DefaultE to fall back only when a predicate matches
-// and bubble otherwise.
-//
-// Accepts either two or three arguments via Go's f(g()) rule:
-//
-//	q.Default(call(), fallback)        // call() returns (T, error)
-//	q.Default(v, err, fallback)        // pre-destructured
-func Default[T any](v T, err error, fallback T) T {
-	panicUnrewritten("q.Default")
-	return v
-}
-
-// DefaultE begins a DefaultE chain. The only chain method is
-// `.When(pred)` which gates the fallback: when pred(err) is true
-// the fallback is used; when false the captured error bubbles
-// unchanged. Mirrors Default's call-argument shape.
-func DefaultE[T any](v T, err error, fallback T) DefaultResult[T] {
-	panicUnrewritten("q.DefaultE")
-	return DefaultResult[T]{}
-}
-
-// DefaultResult carries a captured (value, err, fallback) for the
-// q.DefaultE chain. The only method is .When.
-type DefaultResult[T any] struct {
-	v   T
-	err error //nolint:unused // documented as part of the chain contract
-	fb  T     //nolint:unused // documented as part of the chain contract
-}
-
-// When gates the fallback. pred receives the captured error; when
-// pred returns true the fallback is used in place of the failed
-// value, when false the captured error bubbles unchanged.
-func (r DefaultResult[T]) When(pred func(error) bool) T {
-	panicUnrewritten("q.DefaultE(...).When")
-	return r.v
 }
 
 // Trace forwards v when err is nil; otherwise the preprocessor

@@ -18,18 +18,35 @@ The whole family is plain runtime code — Go's `recover()` sees the panic becau
 
 ## What `q.Recover` does
 
+Two equivalent forms — the zero-arg auto form is rewritten by the preprocessor into the explicit form:
+
 ```go
+// Auto (preprocessor rewrites): err-return auto-named to `_qErr`
+// and the defer call auto-wired to `&_qErr`.
+func doWork(input Input) error {
+    defer q.Recover()
+    process(input)
+    return nil
+}
+
+// Explicit (pure runtime — works without the preprocessor too).
 func doWork(input Input) (err error) {
     defer q.Recover(&err)
-    process(input)        // may panic
+    process(input)
     return nil
 }
 ```
 
-At runtime:
+At runtime (either form):
 
 1. If `process` returns normally → `err == nil`, function returns `nil`.
 2. If `process` panics with value `r` → `q.Recover` catches it, assigns `&q.PanicError{Value: r, Stack: debug.Stack()}` to `err`, function returns that error.
+
+**Auto-form rules**:
+
+- The enclosing function must have the built-in `error` as its last return. Concrete error types (`MyErr`, `*MyErr`, …) are rejected — a `&err` of any type other than `*error` would be a type mismatch against `q.Recover`'s signature.
+- If the error return is already named, the preprocessor reuses the name (`err` in the example above).
+- If unnamed, the preprocessor injects a name (`_qErr`). Go requires all-or-nothing naming of results, so sibling unnamed slots are also named — as `_qRet0`, `_qRet1`, etc. The rewritten signature is internal; callers see the same types as before.
 
 Callers can unwrap the panic:
 
@@ -60,6 +77,15 @@ defer q.RecoverE(&err).Map(func(r any) error {
     }
     return &APIError{Code: 500, Detail: fmt.Sprint(r)}
 })
+```
+
+The zero-arg auto form also works for `q.RecoverE`:
+
+```go
+func doWork() error {
+    defer q.RecoverE().Map(func(r any) error { return &APIError{Detail: fmt.Sprint(r)} })
+    ...
+}
 ```
 
 ## Not `q.TryCatch`
