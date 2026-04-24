@@ -572,34 +572,6 @@ func AwaitE[T any](f Future[T]) ErrResult[T] {
 	return ErrResult[T]{}
 }
 
-// TryCatch begins a try/catch block. The terminal `.Catch(handler)`
-// call defines both scopes:
-//
-//	q.TryCatch(func() {
-//	    risky()
-//	}).Catch(func(r any) {
-//	    log.Println("recovered:", r)
-//	})
-//
-// Rewritten by the preprocessor into an IIFE wrapping try with a
-// deferred recover that dispatches to handler on panic. Primarily
-// a demo of what the preprocessor makes expressible — Go's
-// explicit error returns are still the idiomatic choice.
-func TryCatch(try func()) TryCatchResult {
-	panicUnrewritten("q.TryCatch")
-	return TryCatchResult{}
-}
-
-// TryCatchResult is the chain carrier for q.TryCatch. Only method
-// is .Catch, which terminates the chain.
-type TryCatchResult struct{}
-
-// Catch attaches the handler to the try block. Always an expression
-// statement — the whole chain returns void.
-func (TryCatchResult) Catch(handler func(any)) {
-	panicUnrewritten("q.TryCatch(...).Catch")
-}
-
 // Debug prints v to stderr prefixed with the call-site file:line
 // and the source text of the argument expression, then returns v
 // unchanged so the call can sit mid-expression. Go's missing `dbg!`
@@ -674,14 +646,6 @@ func AsE[T any](x any) OkResult[T] {
 //	}
 func Lock(l sync.Locker) {
 	panicUnrewritten("q.Lock")
-}
-
-// Go spawns fn in a goroutine wrapped in a defer-recover that logs
-// the panic value and captured file:line to stderr. Lets a panic in
-// a detached goroutine fail loudly without crashing the whole
-// process.
-func Go(fn func()) {
-	panicUnrewritten("q.Go")
 }
 
 // TODO panics with "q.TODO <file>:<line>[: <msg>]" to mark an

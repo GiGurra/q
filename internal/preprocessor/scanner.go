@@ -50,7 +50,6 @@ const (
 	familyTrace   // q.Trace(v, err) — bubble prefixed with call-site file:line
 	familyTraceE  // q.TraceE(v, err).<method> — trace-prefixed chain
 	familyLock        // q.Lock(l) — Lock + defer Unlock
-	familyGo          // q.Go(fn) — goroutine with recover+log
 	familyTODO        // q.TODO([msg]) — panic with file:line prefix
 	familyUnreachable // q.Unreachable([msg]) — panic with file:line prefix
 	familyAssert      // q.Assert(cond, [msg]) — panic when cond is false
@@ -61,7 +60,6 @@ const (
 	familyDebug       // q.Debug(v) — in-place rewrite to q.DebugAt("label", v)
 	familyAwait       // q.Await(f) — Try-like bubble using q.AwaitRaw as the source
 	familyAwaitE      // q.AwaitE(f).<method> — TryE-like chain over q.AwaitRaw
-	familyTryCatch    // q.TryCatch(try).Catch(handle) — IIFE with defer-recover
 	familyRecoverAuto  // defer q.Recover()       — inject &err from enclosing sig
 	familyRecoverEAuto // defer q.RecoverE().M(x) — same, for the chain variant
 )
@@ -686,12 +684,6 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 		}
 		return qSubCall{Family: familyLock, InnerExpr: call.Args[0], OuterCall: expr}, true, nil
 	}
-	if isSelector(call.Fun, alias, "Go") {
-		if len(call.Args) != 1 {
-			return qSubCall{}, false, fmt.Errorf("q.Go must take exactly one argument (a func()); got %d", len(call.Args))
-		}
-		return qSubCall{Family: familyGo, InnerExpr: call.Args[0], OuterCall: expr}, true, nil
-	}
 	if isSelector(call.Fun, alias, "TODO") {
 		if len(call.Args) > 1 {
 			return qSubCall{}, false, fmt.Errorf("q.TODO takes at most one argument (an optional message string); got %d", len(call.Args))
@@ -797,17 +789,6 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 				return qSubCall{}, false, fmt.Errorf("q.AwaitE must take exactly one argument (a Future); got %d", len(entry.Args))
 			}
 			return qSubCall{Family: familyAwaitE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Args[0], OuterCall: expr}, true, nil
-		case isSelector(entry.Fun, alias, "TryCatch"):
-			if sel.Sel.Name != "Catch" {
-				return qSubCall{}, false, fmt.Errorf("q.TryCatch chain method %q not recognised; valid: Catch", sel.Sel.Name)
-			}
-			if len(call.Args) != 1 {
-				return qSubCall{}, false, fmt.Errorf("q.TryCatch(...).Catch requires exactly one argument (a func(any) handler); got %d", len(call.Args))
-			}
-			if len(entry.Args) != 1 {
-				return qSubCall{}, false, fmt.Errorf("q.TryCatch must take exactly one argument (a func() try body); got %d", len(entry.Args))
-			}
-			return qSubCall{Family: familyTryCatch, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Args[0], OuterCall: expr}, true, nil
 		case isSelector(entry.Fun, alias, "RecvE"):
 			if !chainMethods[sel.Sel.Name] {
 				return qSubCall{}, false, fmt.Errorf("q.RecvE chain method %q not recognised; valid: Err, ErrF, Catch, Wrap, Wrapf", sel.Sel.Name)

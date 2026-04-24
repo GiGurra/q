@@ -88,15 +88,12 @@ func doWork() error {
 }
 ```
 
-## Not `q.TryCatch`
-
-[`q.TryCatch`](trycatch.md) recovers *inside* a block. `q.Recover` recovers at the *function* boundary, which is what you usually want — it composes with Go's error returns cleanly, and the caller decides what to do with the wrapped panic.
-
 ## Runtime-only, deliberately
 
 The "chain method IS the deferred function" property is why this works without preprocessor rewriting. Don't refactor it into helper calls — `recover()` only sees panics when called directly from a deferred function, not transitively.
 
+For goroutine-local recovery, write the `defer func() { if r := recover(); r != nil { … } }()` block yourself — q deliberately doesn't ship an opinion about what to do with goroutine panics (log? report to Sentry? crash the process?). Your call.
+
 ## See also
 
-- [q.TryCatch](trycatch.md) — block-scoped counterpart.
-- [q.Go](go.md) — goroutine-local recovery with println logging.
+- [q.Try](try.md) — the explicit error-forwarding counterpart.

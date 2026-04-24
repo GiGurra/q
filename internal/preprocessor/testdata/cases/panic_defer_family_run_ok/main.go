@@ -1,7 +1,6 @@
-// Fixture: statement-only panic/defer helpers — q.Lock, q.Go,
-// q.TODO, q.Unreachable, q.Assert. All return nothing; the
-// preprocessor rewrites them into their conventional
-// defer/panic/goroutine shapes.
+// Fixture: statement-only panic/defer helpers — q.Lock, q.TODO,
+// q.Unreachable, q.Assert. All return nothing; the preprocessor
+// rewrites them into their conventional defer/panic shapes.
 package main
 
 import (
@@ -108,13 +107,6 @@ func unreachableNoMsg() {
 	}
 }
 
-// goNormal exercises the success path.
-func goNormal(done chan<- int) {
-	q.Go(func() {
-		done <- 7
-	})
-}
-
 func main() {
 	s := newStore()
 	s.Set("a", 1)
@@ -131,11 +123,4 @@ func main() {
 	catchPanic("todoWithMsg", todoWithMsg)
 
 	unreachableNoMsg()
-
-	// q.Go happy path. The panic path is covered by a dedicated
-	// fixture (q.Go's recover prints to stderr from a goroutine,
-	// which races with stdout under combined-output capture).
-	done := make(chan int, 1)
-	goNormal(done)
-	fmt.Printf("goNormal: %d\n", <-done)
 }

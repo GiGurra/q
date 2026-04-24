@@ -64,4 +64,3 @@ for _, f := range futures {
 ## See also
 
 - [q.Try](try.md) — the underlying bubble shape.
-- [q.Go](go.md) — for fire-and-forget goroutines.

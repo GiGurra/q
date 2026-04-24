@@ -50,10 +50,8 @@ nav:
       - q.Recv: api/recv.md
       - q.As:   api/as.md
     - Panic handling:
-      - q.Recover:  api/recover.md
-      - q.TryCatch: api/trycatch.md
+      - q.Recover: api/recover.md
     - Concurrency:
-      - q.Go:    api/go.md
       - q.Lock:  api/lock.md
       - q.Async: api/async.md
     - Dev tools:

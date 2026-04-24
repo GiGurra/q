@@ -457,31 +457,6 @@ func isBuiltinErrorType(t ast.Expr) bool {
 	return ok && id.Name == "error"
 }
 
-// renderTryCatch produces the replacement for q.TryCatch(try).Catch(handle).
-// Emits an IIFE that defers a recover+dispatch around the try
-// function. Statement-only.
-func renderTryCatch(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, subs []qSubCall, subTexts []string) (string, error) {
-	if sh.Form != formDiscard {
-		return "", fmt.Errorf("q.TryCatch(...).Catch must be an expression statement (the chain returns nothing)")
-	}
-	if len(sub.MethodArgs) != 1 {
-		return "", fmt.Errorf("q.TryCatch(...).Catch requires exactly one argument")
-	}
-	indent := indentOf(src, fset.Position(sh.Stmt.Pos()).Offset)
-	tryText := exprTextSubst(fset, src, sub.InnerExpr, subs, subTexts)
-	handleText := exprTextSubst(fset, src, sub.MethodArgs[0], subs, subTexts)
-	var b bytes.Buffer
-	fmt.Fprintf(&b, "func() {\n")
-	fmt.Fprintf(&b, "%s\tdefer func() {\n", indent)
-	fmt.Fprintf(&b, "%s\t\tif _qR := recover(); _qR != nil {\n", indent)
-	fmt.Fprintf(&b, "%s\t\t\t(%s)(_qR)\n", indent, handleText)
-	fmt.Fprintf(&b, "%s\t\t}\n", indent)
-	fmt.Fprintf(&b, "%s\t}()\n", indent)
-	fmt.Fprintf(&b, "%s\t(%s)()\n", indent, tryText)
-	fmt.Fprintf(&b, "%s}()", indent)
-	return b.String(), nil
-}
-
 // buildDebugReplacement is the per-sub replacement text for a
 // familyDebug call: `q.DebugAt("<file>:<line> <src>", <innerText>)`.
 // innerText is computed by substituteSpans so any non-Debug q.*
@@ -661,9 +636,6 @@ func renderSubCall(fset *token.FileSet, src []byte, sh callShape, subIdx int, su
 	case familyLock:
 		text, err := renderLock(fset, src, sh, sub, counter, subs, subTexts)
 		return text, false, false, err
-	case familyGo:
-		text, err := renderGo(fset, src, sh, sub, subs, subTexts)
-		return text, false, false, err
 	case familyTODO:
 		text, err := renderPanicMarker(fset, src, sh, sub, "q.TODO", subs, subTexts)
 		return text, false, false, err
@@ -695,9 +667,6 @@ func renderSubCall(fset *token.FileSet, src []byte, sh callShape, subIdx int, su
 	case familyAwaitE:
 		text, fmtUsed, err := renderAwaitE(fset, src, sh, sub, counter, alias, subs, subTexts)
 		return text, fmtUsed, false, err
-	case familyTryCatch:
-		text, err := renderTryCatch(fset, src, sh, sub, subs, subTexts)
-		return text, false, false, err
 	case familyRecoverAuto:
 		text, err := renderRecoverAuto(fset, src, sh, sub, alias)
 		return text, false, false, err
@@ -1081,31 +1050,6 @@ func renderLock(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, cou
 	fmt.Fprintf(&b, "%s := %s\n", tmp, lockerText)
 	fmt.Fprintf(&b, "%s%s.Lock()\n", indent, tmp)
 	fmt.Fprintf(&b, "%sdefer %s.Unlock()", indent, tmp)
-	return b.String(), nil
-}
-
-// renderGo produces the replacement for q.Go. Spawns the fn in a
-// goroutine wrapped in a defer-recover that prints the panic value
-// and captured file:line to stderr via the `println` builtin (no
-// new imports needed).
-func renderGo(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, subs []qSubCall, subTexts []string) (string, error) {
-	if sh.Form != formDiscard {
-		return "", fmt.Errorf("q.Go must be an expression statement (no LHS, no return position); the call returns no value")
-	}
-	indent := indentOf(src, fset.Position(sh.Stmt.Pos()).Offset)
-	fnText := exprTextSubst(fset, src, sub.InnerExpr, subs, subTexts)
-	prefix := tracePrefix(fset, sub.OuterCall.Pos())
-	// println is a builtin — always available, writes to stderr.
-	// Accepts any values separated by spaces, newline-terminated.
-	var b bytes.Buffer
-	fmt.Fprintf(&b, "go func() {\n")
-	fmt.Fprintf(&b, "%s\tdefer func() {\n", indent)
-	fmt.Fprintf(&b, "%s\t\tif _qR := recover(); _qR != nil {\n", indent)
-	fmt.Fprintf(&b, "%s\t\t\tprintln(%s, _qR)\n", indent, strconv.Quote("q.Go panic at "+prefix+":"))
-	fmt.Fprintf(&b, "%s\t\t}\n", indent)
-	fmt.Fprintf(&b, "%s\t}()\n", indent)
-	fmt.Fprintf(&b, "%s\t(%s)()\n", indent, fnText)
-	fmt.Fprintf(&b, "%s}()", indent)
 	return b.String(), nil
 }
 

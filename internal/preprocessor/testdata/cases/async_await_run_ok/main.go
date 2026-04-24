@@ -1,8 +1,6 @@
-// Fixture: satire-lane features — q.Async + q.Await (+ AwaitE),
-// plus q.TryCatch. Async is a plain runtime function; Await and
-// AwaitE are rewritten like Try / TryE with q.AwaitRaw as the
-// source. TryCatch is an IIFE with defer-recover (Java-style
-// try/catch demo).
+// Fixture: q.Async + q.Await + q.AwaitE. Async is a plain runtime
+// function; Await and AwaitE are rewritten like Try / TryE with
+// q.AwaitRaw as the source.
 package main
 
 import (
@@ -43,19 +41,6 @@ func awaitCatch(f q.Future[int]) (int, error) {
 	}), nil
 }
 
-// tryCatchSample exercises q.TryCatch — run risky body, recover
-// panic via handler.
-func tryCatchSample(msg string) {
-	q.TryCatch(func() {
-		if msg == "panic" {
-			panic("boom")
-		}
-		fmt.Printf("try.ran: %s\n", msg)
-	}).Catch(func(r any) {
-		fmt.Printf("catch.caught: %v\n", r)
-	})
-}
-
 func report(name string, n int, err error) {
 	if err != nil {
 		fmt.Printf("%s: err=%s\n", name, err)
@@ -89,10 +74,4 @@ func main() {
 	hardFuture := q.Async(fetch(0, errors.New("hard")))
 	n, err = awaitCatch(hardFuture)
 	report("awaitCatch.hard", n, err)
-
-	// q.TryCatch happy path.
-	tryCatchSample("no-panic")
-
-	// q.TryCatch panic path.
-	tryCatchSample("panic")
 }

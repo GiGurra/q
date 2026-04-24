@@ -63,8 +63,6 @@ See [Setup](#setup--ide-and-cache-configuration) below for the dedicated GOCACHE
 | [`q.Recv` / `q.RecvE`](docs/api/recv.md)          | Comma-ok specialised to channel receive; bubbles on close.    |
 | [`q.As` / `q.AsE`](docs/api/as.md)                | Comma-ok specialised to type assertion.                       |
 | [`q.Recover` / `q.RecoverE`](docs/api/recover.md) | `defer q.Recover(&err)` — function-wide panic→error.          |
-| [`q.TryCatch`](docs/api/trycatch.md)              | Block-scoped Java-style try/catch via defer+recover.          |
-| [`q.Go`](docs/api/go.md)                          | Goroutine wrapped in defer-recover-log.                       |
 | [`q.Lock`](docs/api/lock.md)                      | `Lock()` + `defer Unlock()` for any `sync.Locker`.            |
 | [`q.Async` / `q.Await` / `q.AwaitE`](docs/api/async.md) | JS-flavour promises on top of goroutines + channels.    |
 | [`q.Debug`](docs/api/debug.md)                    | Go's missing `dbg!` — prints `file:line src = value`.         |
@@ -167,7 +165,7 @@ n := q.As[int](x)                             // bubble q.ErrBadAssert on type m
 admin := q.AsE[Admin](user).Wrapf("%T is not an admin", user)
 ```
 
-### Panic handling — `q.Recover`, `q.TryCatch`
+### Panic handling — `q.Recover`
 
 ```go
 func doWork() error {                         // error-slot auto-named by the preprocessor
@@ -179,17 +177,11 @@ func doWork() error {                         // error-slot auto-named by the pr
 defer q.RecoverE().Map(func(r any) error {    // same auto-wire for the chain variant
     return &APIError{Detail: fmt.Sprint(r)}
 })
-
-q.TryCatch(func() { risky() }).Catch(func(r any) {
-    log.Println("recovered:", r)              // block-scoped try/catch
-})
 ```
 
-### Concurrency — `q.Go`, `q.Lock`, `q.Async` / `q.Await`
+### Concurrency — `q.Lock`, `q.Async` / `q.Await`
 
 ```go
-q.Go(func() { process(task) })                // goroutine with defer-recover-log
-
 func (s *Store) Set(k, v string) {
     q.Lock(&s.mu)                             // Lock + defer Unlock
     s.data[k] = v

@@ -41,7 +41,6 @@
   - `As[T any](x any) T` — type assertion that bubbles `q.ErrBadAssert` on failure. Explicit type arg required (`q.As[User](x)`).
   - `AsE[T any](x any) OkResult[T]` — chain variant.
   - `Lock(l sync.Locker)` — statement-only; emits `_qLockN := l; _qLockN.Lock(); defer _qLockN.Unlock()`.
-  - `Go(fn func())` — statement-only; spawns `fn` in a goroutine wrapped in `defer recover+println` with compile-time file:line.
   - `TODO(msg ...string)` / `Unreachable(msg ...string)` — statement-only panics with file:line-prefixed messages.
   - `Assert(cond bool, msg ...string)` — statement-only; panics on false with file:line-prefixed message.
   - `Debug[T any](v T) T` — panic stub; the preprocessor rewrites each call site to `q.DebugAt("<file>:<line> <src-text>", v)`. Usable mid-expression.
@@ -51,7 +50,6 @@
   - `AwaitRaw[T any](f Future[T]) (T, error)` — runtime helper; blocks on the Future and returns the tuple.
   - `Await[T any](f Future[T]) T` — Try-like bubble over `q.AwaitRaw(f)`.
   - `AwaitE[T any](f Future[T]) ErrResult[T]` — chain variant; reuses `ErrResult` so the vocabulary matches TryE.
-  - `TryCatch(try func()) TryCatchResult` + `.Catch(handler func(any))` — statement-only IIFE with defer-recover (Java-style try/catch demo).
   - `Recover(errPtr *error)` — runtime helper; `defer q.Recover(&err)` converts any panic into `*q.PanicError` assigned via errPtr.
   - `RecoverE(errPtr *error) RecoverResult` — chain variant; methods `.Map(func(any) error)`, `.Err(error)`, `.ErrF(func(*PanicError) error)`, `.Wrap(string)`, `.Wrapf(string, ...any)`. All terminal (each is the deferred function; recover() sees the panic).
   - `PanicError{Value any; Stack []byte}` — `error` type produced by Recover / RecoverE (except when Err/Map overrides). `errors.As` extracts it.
@@ -79,10 +77,10 @@
 - `internal/preprocessor/testdata/cases/notnil_family_run_ok/` — Phase 2 fixture for the full NotNil family: bare `q.NotNil` plus every `q.NotNilE` chain method, each invoked on both the pointer-present and pointer-absent paths.
 - `internal/preprocessor/testdata/cases/ok_family_run_ok/` — fixture for the full Ok family: bare `q.Ok` in both call-argument shapes (two-arg `q.Ok(v, ok)` and single-call `q.Ok(fn())`), every `q.OkE` chain method on both ok and not-ok paths, the assign + chain-discard forms (ordered so the discard fires before the later assign's bare bubble), the hoist form (q.Ok nested inside a regular call arg), and a sentinel-identity check `errors.Is(err, q.ErrNotOk)`.
 - `internal/preprocessor/testdata/cases/trace_family_run_ok/` — fixture for `q.Trace` / `q.TraceE`. Asserts the bubbled error starts with `main.go:<line>:` (line number normalised to `N` for stability) across every chain method plus errors.As / errors.Is chain integrity.
-- `internal/preprocessor/testdata/cases/panic_defer_family_run_ok/` — fixture for Phase 2 (q.Lock on Mutex + RWMutex.RLocker, q.Go happy path, q.TODO/Unreachable/Assert with and without messages). Includes `stripLineNumber` helper to normalise panic messages.
+- `internal/preprocessor/testdata/cases/panic_defer_family_run_ok/` — fixture for the statement-only helpers (q.Lock on Mutex + RWMutex.RLocker, q.TODO/Unreachable/Assert with and without messages). Includes `stripLineNumber` helper to normalise panic messages.
 - `internal/preprocessor/testdata/cases/recv_as_family_run_ok/` — fixture for `q.Recv` / `q.RecvE` and `q.As[T]` / `q.AsE[T]`. Both bare sentinels, Wrap/Wrapf/Err/Catch on both paths, errors.Is identity for both sentinels.
 - `internal/preprocessor/testdata/cases/debug_run_ok/` — fixture for `q.Debug`. Captures DebugWriter into a bytes.Buffer, line-number-normalises output, asserts pass-through semantics for int/string/arithmetic + direct DebugAt call.
-- `internal/preprocessor/testdata/cases/satire_lane_run_ok/` — fixture for q.Async + q.Await/AwaitE + q.TryCatch. Ok/err/wrap paths for Await, AwaitE.Catch recover+bubble, TryCatch happy/panic paths.
+- `internal/preprocessor/testdata/cases/async_await_run_ok/` — fixture for q.Async + q.Await + q.AwaitE. Ok/err/wrap paths for Await, AwaitE.Catch recover+bubble.
 - `internal/preprocessor/testdata/cases/recover_family_run_ok/` — fixture for `q.Recover` + every `q.RecoverE` method (Map/Err/Wrap/Wrapf/ErrF). errors.As extracts *PanicError, stack trace non-empty, user-supplied Map translates panic shapes to typed errors, Err replaces the bubble.
 - `internal/preprocessor/testdata/cases/forms_assign_discard_run_ok/` — Phase 2 fixture for the assign and discard forms: `v = q.Try(...)`, `q.Try(...)` discard, `v = q.TryE(...).Wrapf(...)` chain assign, `q.TryE(...).Err(...)` chain discard, plus the NotNil counterparts. 14 expected_run.txt lines locking in every form × family combination.
 - `internal/preprocessor/testdata/cases/return_position_run_ok/` — Phase 3 fixture for the return form: `return q.Try(...) * 2, nil` (nested inside an arithmetic expression), `return q.TryE(...).Wrap("..."), nil`, `return "tag", q.NotNil(p), nil` (q.* as the middle of three results), and `return q.NotNilE(p).Err(...), nil`. Eight expected_run.txt lines covering ok+bad for each shape.

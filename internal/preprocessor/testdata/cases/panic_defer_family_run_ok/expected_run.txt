@@ -7,4 +7,3 @@ assertNoMsg: q.Assert failed main.go:N
 todoNoMsg: q.TODO main.go:N
 todoWithMsg: q.TODO main.go:N: implement parser
 reached 3
-goNormal: 7
