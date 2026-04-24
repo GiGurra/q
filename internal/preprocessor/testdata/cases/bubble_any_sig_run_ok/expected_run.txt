@@ -1,0 +1,18 @@
+try.err: strconv.Atoi: parsing "bad": invalid syntax
+try.pair: strconv.Atoi: parsing "bad": invalid syntax
+notnil.err: q: nil value
+notnil.pair: q: nil value
+ok.err: q: not ok
+ok.pair: q: not ok
+recv.err: q: channel closed
+recv.pair: q: channel closed
+as.err: q: type assertion failed
+as.pair: q: type assertion failed
+check.err: c-err
+check.pair: c-err
+open.err: dial-failed
+open.pair: dial-failed
+trace.err: main.go:N: strconv.Atoi: parsing "bad": invalid syntax
+trace.pair: main.go:N: strconv.Atoi: parsing "bad": invalid syntax
+await.err: await-bad
+await.pair: await-bad
