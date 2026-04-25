@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/GiGurra/q/pkg/q"
 )
@@ -199,6 +200,90 @@ func main() {
 
 	fmt.Println("Drop 2:", q.Drop([]int{1, 2, 3, 4, 5}, 2))
 	fmt.Println("Drop 99:", q.Drop([]int{1, 2}, 99))
+
+	// MapValues — pairs with GroupBy for "group then aggregate."
+	{
+		type item struct {
+			cat string
+			v   int
+		}
+		items := []item{{"a", 1}, {"b", 2}, {"a", 3}, {"b", 4}, {"a", 5}}
+		counts := q.MapValues(q.GroupBy(items, func(it item) string { return it.cat }), func(g []item) int { return len(g) })
+		keys := make([]string, 0, len(counts))
+		for k := range counts {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Printf("MapValues counts[%s]=%d\n", k, counts[k])
+		}
+	}
+
+	// MapValuesErr happy path + fail path.
+	{
+		m := map[string]string{"a": "1", "b": "2"}
+		ok, _ := q.MapValuesErr(m, strconv.Atoi)
+		ks := make([]string, 0, len(ok))
+		for k := range ok {
+			ks = append(ks, k)
+		}
+		sort.Strings(ks)
+		for _, k := range ks {
+			fmt.Printf("MapValuesErr ok[%s]=%d\n", k, ok[k])
+		}
+		_, err := q.MapValuesErr(map[string]string{"a": "1", "b": "x"}, strconv.Atoi)
+		fmt.Println("MapValuesErr fail:", err != nil)
+	}
+
+	// MapEntries — transform keys and values together.
+	{
+		m := map[string]int{"a": 1, "b": 2, "c": 3}
+		out := q.MapEntries(m, func(k string, v int) (string, int) {
+			return strings.ToUpper(k), v * 10
+		})
+		ks := make([]string, 0, len(out))
+		for k := range out {
+			ks = append(ks, k)
+		}
+		sort.Strings(ks)
+		for _, k := range ks {
+			fmt.Printf("MapEntries[%s]=%d\n", k, out[k])
+		}
+	}
+
+	// MapEntriesErr fail bubble.
+	{
+		_, err := q.MapEntriesErr(map[string]string{"a": "1", "b": "x"}, func(k, v string) (string, int, error) {
+			n, err := strconv.Atoi(v)
+			return k, n, err
+		})
+		fmt.Println("MapEntriesErr fail:", err != nil)
+	}
+
+	// Keys / Values — sorted for stable output.
+	{
+		m := map[string]int{"a": 1, "b": 2, "c": 3}
+		ks := q.Keys(m)
+		sort.Strings(ks)
+		fmt.Println("Keys:", ks)
+		vs := q.Values(m)
+		sort.Ints(vs)
+		fmt.Println("Values:", vs)
+	}
+
+	// MapKeys — rename keys.
+	{
+		m := map[string]int{"a": 1, "b": 2, "c": 3}
+		upper := q.MapKeys(m, strings.ToUpper)
+		ks := make([]string, 0, len(upper))
+		for k := range upper {
+			ks = append(ks, k)
+		}
+		sort.Strings(ks)
+		for _, k := range ks {
+			fmt.Printf("MapKeys upper[%s]=%d\n", k, upper[k])
+		}
+	}
 
 	// Pipeline composition: chain bare ops
 	pipeline := q.Fold(

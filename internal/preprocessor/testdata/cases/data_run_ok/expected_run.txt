@@ -44,4 +44,18 @@ Take 99: [1 2]
 Take 0: []
 Drop 2: [3 4 5]
 Drop 99: []
+MapValues counts[a]=3
+MapValues counts[b]=2
+MapValuesErr ok[a]=1
+MapValuesErr ok[b]=2
+MapValuesErr fail: true
+MapEntries[A]=10
+MapEntries[B]=20
+MapEntries[C]=30
+MapEntriesErr fail: true
+Keys: [a b c]
+Values: [1 2 3]
+MapKeys upper[A]=1
+MapKeys upper[B]=2
+MapKeys upper[C]=3
 Pipeline: 50

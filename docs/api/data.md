@@ -33,6 +33,16 @@ func FilterErr[T any](slice []T, pred func(T) (bool, error)) ([]T, error)
 
 func GroupBy[T any, K comparable](slice []T, fn func(T) K) map[K][]T
 
+// Map ops (operate on map[K]V → map[K]V2)
+func MapValues[K comparable, V1, V2 any](m map[K]V1, fn func(V1) V2) map[K]V2
+func MapValuesErr[K comparable, V1, V2 any](m map[K]V1, fn func(V1) (V2, error)) (map[K]V2, error)
+func MapKeys[K1, K2 comparable, V any](m map[K1]V, fn func(K1) K2) map[K2]V
+func MapKeysErr[K1, K2 comparable, V any](m map[K1]V, fn func(K1) (K2, error)) (map[K2]V, error)
+func MapEntries[K1, K2 comparable, V1, V2 any](m map[K1]V1, fn func(K1, V1) (K2, V2)) map[K2]V2
+func MapEntriesErr[K1, K2 comparable, V1, V2 any](m map[K1]V1, fn func(K1, V1) (K2, V2, error)) (map[K2]V2, error)
+func Keys[K comparable, V any](m map[K]V) []K     // slices.Collect(maps.Keys(m))
+func Values[K comparable, V any](m map[K]V) []V   // slices.Collect(maps.Values(m))
+
 // Predicate searches (short-circuiting)
 func Exists[T any](slice []T, pred func(T) bool) bool          // any
 func ExistsErr[T any](slice []T, pred func(T) (bool, error)) (bool, error)
@@ -110,6 +120,45 @@ if len(scores) == 0 {
 }
 mx := q.Reduce(scores, max)
 ```
+
+## Map ops: `MapValues` and `MapKeys`
+
+These operate on `map[K]V`, not `[]T` — they're the natural complement to slice transforms when you're already working with maps (often the output of `q.GroupBy`).
+
+```go
+// Group then aggregate — the most common shape
+counts := q.MapValues(q.GroupBy(items, byCat),
+    func(g []Item) int { return len(g) })
+
+sums := q.MapValues(q.GroupBy(orders, byCustomer),
+    func(g []Order) int { return q.Fold(g, 0, addAmount) })
+
+// Rename keys
+upper := q.MapKeys(byCat, strings.ToUpper)
+```
+
+Caveats:
+
+- **Iteration order is map-random.** `MapValuesErr` / `MapKeysErr` short-circuit on the first error, but "first" is whichever the runtime visited first — not input-defined.
+- **`MapKeys` collisions are last-write-wins.** If two source keys map to the same target key, only one value survives, and which one is undefined.
+
+### `q.MapEntries` for the combined transform
+
+When both keys and values change in a way that depends on each other, `q.MapEntries(m, func(K1, V1) (K2, V2)) map[K2]V2` does it in a single pass. Otherwise you'd chain `MapValues` then `MapKeys` (two passes) or write the loop by hand:
+
+```go
+canonical := q.MapEntries(byID, func(id int, a alias) (string, int) {
+    return strings.ToLower(a.name), a.v
+})
+```
+
+### `q.Keys` / `q.Values`
+
+Thin wrappers over `slices.Collect(maps.Keys(m))` / `slices.Collect(maps.Values(m))` — the stdlib already provides this since Go 1.23, q just saves the import + the two-step incantation. Order is unspecified.
+
+### Why no `q.ToMap` / `q.Associate`?
+
+Building a map from a slice via a `func(T) (K, V)` projection is a one-liner — `for _, x := range xs { k, v := fn(x); m[k] = v }` — and silently drops collisions either to first or last value, depending on which side of the loop wins. `q.GroupBy` + `q.MapValues` makes the keep-first / keep-last / aggregate decision explicit.
 
 ## Pipelining
 

@@ -1,6 +1,9 @@
 package q
 
-import "slices"
+import (
+	"maps"
+	"slices"
+)
 
 // data.go — Scala / samber/lo-style functional data ops over slices.
 //
@@ -135,6 +138,120 @@ func FilterErr[T any](slice []T, pred func(T) (bool, error)) ([]T, error) {
 		if ok {
 			out = append(out, v)
 		}
+	}
+	return out, nil
+}
+
+// MapValues transforms each value of m via fn, preserving keys.
+// Pairs naturally with q.GroupBy for "group then aggregate"
+// pipelines:
+//
+//	counts := q.MapValues(q.GroupBy(items, byCat),
+//	    func(group []Item) int { return len(group) })
+//
+//	sums := q.MapValues(q.GroupBy(items, byCat),
+//	    func(g []Item) int { return q.Fold(g, 0, addAmount) })
+//
+// Allocates a fresh map; the input is not mutated.
+func MapValues[K comparable, V1, V2 any](m map[K]V1, fn func(V1) V2) map[K]V2 {
+	out := make(map[K]V2, len(m))
+	for k, v := range m {
+		out[k] = fn(v)
+	}
+	return out
+}
+
+// MapValuesErr is MapValues with a fallible fn. First error
+// short-circuits and is returned; the partial map is discarded.
+// Iteration order over m is map-random — there is no notion of
+// "first error in input order" because Go's range over a map
+// doesn't define one.
+func MapValuesErr[K comparable, V1, V2 any](m map[K]V1, fn func(V1) (V2, error)) (map[K]V2, error) {
+	out := make(map[K]V2, len(m))
+	for k, v := range m {
+		v2, err := fn(v)
+		if err != nil {
+			return nil, err
+		}
+		out[k] = v2
+	}
+	return out, nil
+}
+
+// MapKeys transforms each key of m via fn, preserving values. If
+// fn produces collisions (two K1 keys mapping to the same K2 key),
+// last-write-wins by Go's map-iteration semantics — the iteration
+// order over m is undefined, so the surviving value is also
+// undefined. Avoid collisions if it matters.
+//
+// Allocates a fresh map; the input is not mutated.
+func MapKeys[K1, K2 comparable, V any](m map[K1]V, fn func(K1) K2) map[K2]V {
+	out := make(map[K2]V, len(m))
+	for k, v := range m {
+		out[fn(k)] = v
+	}
+	return out
+}
+
+// MapKeysErr is MapKeys with a fallible fn. First error
+// short-circuits.
+func MapKeysErr[K1, K2 comparable, V any](m map[K1]V, fn func(K1) (K2, error)) (map[K2]V, error) {
+	out := make(map[K2]V, len(m))
+	for k, v := range m {
+		k2, err := fn(k)
+		if err != nil {
+			return nil, err
+		}
+		out[k2] = v
+	}
+	return out, nil
+}
+
+// Keys returns a slice of m's keys in unspecified order. Thin
+// wrapper over `slices.Collect(maps.Keys(m))` — saves the import +
+// the two-step incantation at the call site.
+func Keys[K comparable, V any](m map[K]V) []K {
+	return slices.Collect(maps.Keys(m))
+}
+
+// Values returns a slice of m's values in unspecified order. Thin
+// wrapper over `slices.Collect(maps.Values(m))`.
+func Values[K comparable, V any](m map[K]V) []V {
+	return slices.Collect(maps.Values(m))
+}
+
+// MapEntries transforms each (key, value) pair of m via fn,
+// producing a new map with possibly different K2 / V2 types. The
+// one-pass form of MapKeys + MapValues when both transformations
+// depend on each other or on the original entry.
+//
+//	type alias struct{ name string; v int }
+//	canonical := q.MapEntries(byID, func(id int, a alias) (string, int) {
+//	    return strings.ToLower(a.name), a.v
+//	})
+//
+// Same collision caveat as MapKeys: if two source pairs produce the
+// same K2, last-write-wins (and "last" is undefined per Go's
+// map-iteration semantics).
+func MapEntries[K1, K2 comparable, V1, V2 any](m map[K1]V1, fn func(K1, V1) (K2, V2)) map[K2]V2 {
+	out := make(map[K2]V2, len(m))
+	for k, v := range m {
+		k2, v2 := fn(k, v)
+		out[k2] = v2
+	}
+	return out
+}
+
+// MapEntriesErr is MapEntries with a fallible fn (returns
+// `(K2, V2, error)`). First error short-circuits.
+func MapEntriesErr[K1, K2 comparable, V1, V2 any](m map[K1]V1, fn func(K1, V1) (K2, V2, error)) (map[K2]V2, error) {
+	out := make(map[K2]V2, len(m))
+	for k, v := range m {
+		k2, v2, err := fn(k, v)
+		if err != nil {
+			return nil, err
+		}
+		out[k2] = v2
 	}
 	return out, nil
 }
