@@ -57,7 +57,9 @@ c := q.OpenE(openCall).Catch(func(e error) (T, error) { ... }).Release(cleanup) 
 
 **Why a chain instead of `q.NoErrf(call(), format, args…)`-style overloads?** Go's spread-multi-return-into-arguments rule fires only when the multi-return call is the *sole* argument. So `q.NoErrf(strconv.Atoi(s), "fmt", x)` is a compile error: once you add format args, you can no longer spread `(T, error)` into the leading two parameters. The chain side-steps this by making the multi-return call the only argument to `q.TryE`, then chaining a method whose receiver has already absorbed the spread. The same constraint is why `q.Open`'s cleanup arrives via a terminal `.Release(cleanup)` method rather than as a second argument to `q.Open(call(), cleanup)`.
 
-**Why four entry families (`Try` / `NotNil` / `Check` / `Open`)?** Each matches a *distinct source signature*:
+**Why one bubble entry per source signature?** Go's type system can't overload — a single `q.Try` can't accept both `(T, error)` and plain `error`. Splitting by source signature is what the language allows, and it makes the call site self-documenting: `q.Check` reads as "the thing I'm calling returns error", `q.Open` reads as "I'm acquiring a resource that needs cleanup". The `E` suffix per family carries the chain variant.
+
+The original four bubble entries cover the dominant Go signatures:
 
 | Source                            | Entry            |
 |-----------------------------------|------------------|
@@ -66,7 +68,7 @@ c := q.OpenE(openCall).Catch(func(e error) (T, error) { ... }).Release(cleanup) 
 | `error` alone                     | `Check` / `CheckE` (void — stmt only) |
 | `(T, error)` + cleanup on success | `Open` / `OpenE` |
 
-Go's type system can't overload — a single `q.Try` can't accept both `(T, error)` and plain `error`. Splitting by source signature is what the language allows, and it makes the call site self-documenting: `q.Check` reads as "the thing I'm calling returns error", `q.Open` reads as "I'm acquiring a resource that needs cleanup". The `E` suffix per family carries the chain variant.
+Subsequent additions follow the same shape: each new helper picks a distinct source signature and exposes a bare + chain pair. `q.Ok` / `q.OkE` for `(T, bool)`, `q.Recv` / `q.RecvE` and `q.As` / `q.AsE` as comma-ok specialisations, `q.Await*` / `q.Recv*Ctx` / `q.Bubble*` for context cancellation and futures, and so on. The bubble shape is the constant; what varies is the *trigger* (error, nil, not-ok, ctx, channel close) that fires it.
 
 **Why terminal `.Release` for Open (not `.WithDefer` earlier in the chain)?** `.Release(cleanup)` has to *own* both the error-bubble path and the success-defer path. Making it a modifier in the middle of the chain would mean another method comes after it — but that method can't undo the defer registration, so Release's placement relative to other chain methods would matter. As the terminal, Release's position is unambiguous: error shaping happens first, defer registration on success is the last step.
 

@@ -39,35 +39,29 @@ nav:
   - Home: index.md
   - Getting Started: getting-started.md
   - API:
-    - Error bubbling:
-      - q.Try:    api/try.md
-      - q.NotNil: api/notnil.md
-      - q.Check:  api/check.md
-      - q.Open:   api/open.md
-      - q.Trace:  api/trace.md
-    - Comma-ok:
-      - q.Ok:   api/ok.md
-      - q.Recv: api/recv.md
-      - q.As:   api/as.md
-    - Panic handling:
-      - q.Recover: api/recover.md
-    - Concurrency:
-      - q.Lock:                 api/lock.md
-      - q.Async:                api/async.md
-      - q.AwaitCtx:             api/await_ctx.md
-      - q.AwaitAll / AwaitAny:  api/await_multi.md
-      - q.RecvCtx:              api/recv_ctx.md
-      - q.RecvAny / Drain:      api/channel_multi.md
-    - Context:
-      - q.Bubble:            api/bubble.md
-      - q.Timeout/Deadline:  api/timeout.md
-    - Dev tools:
-      - q.Debug:  api/debug.md
-      - q.TODO:   api/todo.md
-      - q.Assert: api/assert.md
+    - q.As:                    api/as.md
+    - q.Assert:                api/assert.md
+    - q.Async:                 api/async.md
+    - q.AwaitAll / AwaitAny:   api/await_multi.md
+    - q.AwaitCtx:              api/await_ctx.md
+    - q.Bubble:                api/bubble.md
+    - q.Check:                 api/check.md
+    - q.Debug:                 api/debug.md
+    - q.Lock:                  api/lock.md
+    - q.NotNil:                api/notnil.md
+    - q.Ok:                    api/ok.md
+    - q.Open:                  api/open.md
+    - q.Recover:               api/recover.md
+    - q.Recv:                  api/recv.md
+    - q.RecvAny / Drain:       api/channel_multi.md
+    - q.RecvCtx:               api/recv_ctx.md
+    - q.Timeout / Deadline:    api/timeout.md
+    - q.TODO / Unreachable:    api/todo.md
+    - q.Trace:                 api/trace.md
+    - q.Try:                   api/try.md
   - Examples:
-    - Basic bubbling: examples/basic.md
-    - Error shaping:  examples/error-shaping.md
-    - Resources:      examples/resources.md
+    - Basic bubbling:  examples/basic.md
+    - Error shaping:   examples/error-shaping.md
+    - Resources:       examples/resources.md
   - Typed-nil guard: typed-nil-guard.md
   - Design: design.md

@@ -13,7 +13,7 @@
 ## Authoritative docs
 
 - [`README.md`](README.md) — user-facing API tour, install, smallest end-to-end example.
-- [`docs/design.md`](docs/design.md) — authoritative design: link-gate mechanism, the four entry helpers, the chain method semantics, and the rewriter's contract.
+- [`docs/design.md`](docs/design.md) — authoritative design: link-gate mechanism, the bubble-family entries (Try / NotNil / Check / Open and the later additions), the chain method semantics, and the rewriter's contract.
 - [`docs/planning/TODO.md`](docs/planning/TODO.md) — **persistent backlog. The resume-point for any new session.** Mirrors the in-session task list; updated in the same commit as task creation / completion. If picking up a fresh chat, scan this first.
 
 ## Current implementation state
@@ -129,7 +129,7 @@
 - `internal/preprocessor/testdata/cases/err_slot_concrete_tryE_rejected/` — same guard, applied to the TryE chain: `q.TryE(Foo()).Wrap("ctx")` where Foo returns `*MyErr`.
 - `internal/preprocessor/testdata/cases/toerr_fixes_guard_run_ok/` — positive proof that `q.Try(q.ToErr(Foo()))` unblocks the guard. Exercises both paths (typed-nil `*MyErr` → no bubble; non-nil `*MyErr` → bubbles the concrete error).
 - `pkg/q/toerr_test.go` — standalone Go unit tests for `q.ToErr` (typed-nil collapses to nil interface, non-nil propagates with `errors.As` identity, value preserved on error). Gated behind `//go:build qtoolexec` so a plain `go test ./...` ignores it — pkg/q's link gate would otherwise fail the build when go attempts to link a test binary without `-toolexec=q`. Runs in the harness via `TestPackageQUnit` in `internal/preprocessor/pkgq_test.go` which invokes `go test -toolexec=<qBin> -tags=qtoolexec ./pkg/q/`.
-- `example/basic/basic.go` — small library showing all four entry helpers in idiomatic positions.
+- `example/basic/basic.go` — small library showing the Try / NotNil bubble entries and their TryE / NotNilE chain forms in idiomatic positions.
 
 **Status: the full public surface is rewritten end-to-end across five statement forms.** Define (`v := ...`), assign (`v = ...`), discard (`q.Try(...)` as expression statement), return (`return q.Try(...), nil`), and hoist (`v := f(q.Try(...))` — q.* nested inside any non-return statement expression) all work for bare `q.Try` / `q.NotNil` and for every `q.TryE` / `q.NotNilE` chain method. Multi-q in one statement is supported (including nested: `x := q.Try(Foo(q.Try(Bar())))`). The rewriter orders nested q.*s innermost-first, substitutes each parent's InnerExpr/MethodArgs with its children's `_qTmpN`, and rebuilds the final stmt with outermost spans substituted. Pending:
 
