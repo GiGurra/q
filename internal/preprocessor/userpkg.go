@@ -51,35 +51,18 @@ func planUserPackage(pkgPath string, toolArgs []string) (*Plan, error) {
 	var allFiles []*ast.File
 
 	fset := token.NewFileSet()
-	type rawParsed struct {
-		src  string
-		file *ast.File
-	}
-	var rawFiles []rawParsed
 	for _, src := range sources {
 		file, err := parser.ParseFile(fset, src, nil, parser.ParseComments)
 		if err != nil {
 			return nil, fmt.Errorf("parse %s: %w", src, err)
 		}
-		rawFiles = append(rawFiles, rawParsed{src: src, file: file})
-		allFiles = append(allFiles, file)
-	}
-
-	// Cross-file pre-pass: collect q.Comptime bindings so each per-file
-	// scanner knows which call sites (`fib(args)`) should be treated as
-	// comptime invocations. Without this, comptime calls in a file
-	// other than the one declaring the binding would slip through as
-	// regular Go calls.
-	comptimeBindings = collectComptimeBindings(allFiles)
-	defer func() { comptimeBindings = nil }()
-
-	for _, rp := range rawFiles {
-		shapes, srcDiags, err := scanFile(fset, rp.src, rp.file)
+		shapes, srcDiags, err := scanFile(fset, src, file)
 		if err != nil {
 			return nil, err
 		}
 		diags = append(diags, srcDiags...)
-		parsedFiles = append(parsedFiles, parsed{src: rp.src, file: rp.file, shapes: shapes})
+		parsedFiles = append(parsedFiles, parsed{src: src, file: file, shapes: shapes})
+		allFiles = append(allFiles, file)
 		allShapes = append(allShapes, shapes...)
 	}
 

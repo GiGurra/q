@@ -1,14 +1,6 @@
-# Compile-time evaluation: `q.AtCompileTime`, `q.AtCompileTimeCode`, `q.Comptime`
+# Compile-time evaluation: `q.AtCompileTime`, `q.AtCompileTimeCode`
 
-q ships three compile-time evaluation helpers, each with a different shape:
-
-| Helper | Surface | Closure shape | Result | Use when |
-|---|---|---|---|---|
-| `q.AtCompileTime[R](fn func() R)` | one-shot value | zero params, returns `R` | `R` value spliced at call site | computing a single comptime value (a hash, a table, a parsed config) |
-| `q.AtCompileTimeCode[R](fn func() string)` | macro / codegen | zero params, returns Go source | parsed Go expression spliced at call site | generating function values, switch statements, struct literals from build-time data |
-| `q.Comptime[F any](impl F)` | reusable fn value | a function with **N args** that recursively calls itself | a Go fn value; every call to it folds at preprocess time | calling the same comptime computation from many sites with different args (recursive math, codegen-per-input) |
-
-Together they're the universal escape hatch every other compile-time helper (`q.F`, `q.Snake`, `q.SQL`, `q.Match` resolution, …) is a special case of: if you can write the computation as a pure Go function, q can run it before your program ever does.
+`q.AtCompileTime` evaluates a Go closure at preprocessor time and splices the result as a value at the call site. `q.AtCompileTimeCode` is the macro flavour — the closure returns Go SOURCE CODE that the rewriter parses + splices in place. Together they're the universal escape hatch every other compile-time helper (`q.F`, `q.Snake`, `q.SQL`, `q.Match` resolution, …) is a special case of: if you can write the computation as a pure Go function, q can run it before your program ever does.
 
 ## Signatures
 
@@ -18,9 +10,6 @@ func AtCompileTime[R any](fn func() R, codec ...Codec[R]) R
 
 // Macro: closure returns Go source that the rewriter parses + splices.
 func AtCompileTimeCode[R any](fn func() string) R
-
-// Comptime function value — calls to the returned fn fold at preprocess time.
-func Comptime[F any](impl F) F
 
 // Codec interface — controls how non-primitive values cross the
 // preprocessor → runtime boundary.
@@ -35,9 +24,7 @@ func GobCodec[T any]() Codec[T]    // encoding/gob; handles unexported fields
 func BinaryCodec[T any]() Codec[T] // encoding/binary; fixed-size types only
 ```
 
-`q.AtCompileTime` / `q.AtCompileTimeCode` closures must be a function literal (not a named function reference), take zero parameters and return exactly one value matching `R`.
-
-`q.Comptime` accepts any function-typed argument (`F` resolves to that function type via type inference), and the impl may take any number of args. The function value it returns IS the impl at runtime, but every LEXICAL call site of the returned fn (with literal / package-const / cross-comptime args) is rewritten to a value spliced at compile time.
+The closure MUST be a function literal (not a named function reference). It must take zero parameters and return exactly one value. The returned value's type must match `R`.
 
 ## Where you can use it
 
@@ -134,116 +121,7 @@ var (
 )
 ```
 
-## Comptime function values — `q.Comptime`
-
-`q.Comptime` lets you declare a recursive Go function whose every call site is folded to a literal at preprocess time. The shape is borrowed from Zig's `comptime` keyword: write the function as ordinary Go, mark it once with `q.Comptime`, then call it freely from anywhere in the module — each call resolves before runtime.
-
-### The clean version of recursive comptime
-
-The classic motivating example is recursive Fibonacci:
-
-```go
-package fib
-
-import "github.com/GiGurra/q/pkg/q"
-
-var Fib = q.Comptime(func(n int) int {
-    if n < 2 { return n }
-    return Fib(n-1) + Fib(n-2)
-})
-```
-
-Then anywhere in the module:
-
-```go
-import "yourmod/fib"
-
-func main() {
-    fmt.Println(fib.Fib(10))  // → 55  (folded to the literal 55 at build time)
-    fmt.Println(fib.Fib(15))  // → 610 (folded to the literal 610)
-}
-```
-
-At runtime the binary holds two `fmt.Println` calls with int literals 55 and 610 — `fib.Fib` is never called at runtime; the recursion happened during the build.
-
-### How it differs from `q.AtCompileTime`
-
-`q.AtCompileTime` evaluates ONE closure ONCE per call site. To compute fib(5) recursively with `q.AtCompileTime` alone, you'd have to manually unroll every level (see [Recursive comptime via manual unrolling](#recursive-comptime--fibonacci-as-a-build-time-recursion) below).
-
-`q.Comptime` takes args. Every distinct call site (`fib.Fib(10)`, `fib.Fib(15)`) is treated as its own preprocess-time invocation, but they all share the same impl source — written ONCE, at the declaration site.
-
-The synthesis pass handles recursion by spawning ONE subprocess per call site that runs the impl as ordinary recursive Go code. So `fib.Fib(40)` becomes one `go run -toolexec=q` subprocess executing 2^40 Go recursive calls in-process. Build cost is ~3 seconds for fib(40) — dominated by Go recursion, not preprocess overhead.
-
-> See [`q.NestedComptime`](#nestedcomptime--compiler-per-recursive-level-phase-52) below for the variant that spawns one subprocess PER recursive level (with caching, so it stays linear).
-
-### Cross-comptime composition
-
-A `q.Comptime` impl can call another `q.Comptime` decl:
-
-```go
-var Fact = q.Comptime(func(n int) int {
-    if n < 2 { return 1 }
-    return n * Fact(n-1)
-})
-
-var Power = q.Comptime(func(base, exp int) int {
-    if exp == 0 { return 1 }
-    return base * Power(base, exp-1)
-})
-
-var Combinatoric = q.Comptime(func(n, k int) int {
-    return Fact(n) / (Fact(k) * Fact(n-k))   // calls another Comptime
-})
-```
-
-The synthesis pass topo-sorts impls so each is in scope when a dependent impl runs.
-
-### Composes with `q.AtCompileTime`
-
-A `q.Comptime` call inside a `q.AtCompileTime` closure body is treated like any other captured comptime value:
-
-```go
-doubled := q.AtCompileTime[int](func() int {
-    return Fact(5) + Fact(5)   // both Fact calls fold at preprocess time
-})
-// doubled folds to the literal 240
-```
-
-The synthesis pass evaluates `Fact(5)` first, substitutes the literal into the closure body, then evaluates the closure. One subprocess per `q.AtCompileTime` site.
-
-### Restrictions
-
-- The impl MUST be a function literal — `var Fib = q.Comptime(SomeNamedFn)` is rejected.
-- The impl can recurse (call itself directly) and call other `q.Comptime` decls. It CANNOT capture other free variables from the enclosing scope.
-- All args at every call site must be resolvable at preprocess time: literals, package-level constants, other `q.Comptime` / `q.AtCompileTime` values, or arithmetic combinations of those. A call with a runtime-only arg (`fib.Fib(userInput)`) cannot be folded — and so is rejected with a clear diagnostic.
-- The impl runs in a stdlib + user-module subprocess like `q.AtCompileTime`. Same purity rules apply: no `time.Now()`, `os.Getenv`, or other non-deterministic I/O if you want the build to be reproducible.
-
-### How it works
-
-The preprocessor:
-
-1. **Pre-pass** scans every source file in the package for `var X = q.Comptime(funcLit)` decls. Records each into a package-wide map keyed by name.
-2. Per-file scan: any call expression whose `Fun` is an ident matching a comptime binding becomes a `familyComptimeCall` shape.
-3. Synthesis pass emits the impl declaration once per unique binding (with self-references rewritten to a synthesised name to avoid Go's init-cycle detector — see below) and per-call lines that invoke the impl with the (resolved) args.
-4. Per call site, the result is JSON-encoded by the subprocess and either folded to a literal (primitives) or extracted via a `_qCtFn<N>()` companion file (non-primitives).
-
-**Init-cycle workaround.** A naïve rewrite of `var Fib = q.Comptime(<impl>)` into `var Fib = <impl>` would trip Go's compiler ("initialization cycle: Fib refers to itself"), because the impl body contains `Fib(n-1)` which the parser sees as a forward reference to the same package var. q dodges this with an IIFE that defers the self-binding through a local var:
-
-```go
-// Generated form:
-var Fib = func() func(int) int {
-    var _qfn func(int) int
-    _qfn = func(n int) int {
-        if n < 2 { return n }
-        return _qfn(n-1) + _qfn(n-2)   // refers to the local, not the package var
-    }
-    return _qfn
-}()
-```
-
-The same shape is also what runs inside the synthesis subprocess when a comptime impl recurses — but because the subprocess never imports the user package, there's no init cycle there either way; the IIFE wrap is purely for the user-package compile.
-
-
+## Macros — `q.AtCompileTimeCode` examples
 
 `q.AtCompileTimeCode` runs the closure at preprocess time and takes the returned string as Go SOURCE that the rewriter parses + splices.
 
@@ -352,8 +230,6 @@ fmt.Println(a, b, c) // 21 42 63
 In the synthesized program, `a` becomes `_qCt0`, then `b`'s body sees `_qCt0 * 2` (rewritten), and `c` sees `_qCt0 + _qCt1`. The synthesis runs in topo order so each captured value is in scope when the dependent closure executes.
 
 ## Recursive comptime — Fibonacci as a build-time recursion
-
-> **Modern path:** for recursive impls, reach for [`q.Comptime`](#comptime-function-values--qcomptime) instead — it gives you ordinary `var Fib = q.Comptime(func(n int) int { ... Fib(n-1) ... })` syntax, with the recursion running inside a single synthesis subprocess. The subsection below shows how to express the same thing with raw `q.AtCompileTime` for educational purposes (and as proof that the architecture composes recursively).
 
 Because the synthesis subprocess inherits `-toolexec=q`, a `q.AtCompileTime` call INSIDE a closure body gets processed by a recursive q invocation. Each level of nesting becomes one deeper compiler-process:
 
@@ -477,19 +353,6 @@ s := q.AtCompileTime[secret](func() secret {
 
 For fixed-size types (no slices, maps, or strings), `BinaryCodec[T]` produces the smallest output. You can also implement `Codec[T]` yourself for custom encodings.
 
-<a id="nestedcomptime--compiler-per-recursive-level-phase-52"></a>
-## Forward-look — `q.NestedComptime`, partial evaluator, multipass
-
-Three follow-on capabilities are designed and tracked in [`docs/planning/comptime-inception.md`](../planning/comptime-inception.md):
-
-**`q.NestedComptime[F any](impl F) F` — compiler-per-recursive-level + cache.** Same surface as `q.Comptime`, but each recursive call inside the impl spawns its OWN `go run -toolexec=q` subprocess (gated by an on-disk hash-keyed cache living at `$GOCACHE/q-comptime/`). For `Fib(40)` that means 40 unique subprocess invocations instead of 2^40, kept tractable by the cache. The motivation is "true inception comptime" — the compiler literally calls itself per recursive level, each level seeing only its own subproblem. Useful when impls do real work (heavy parsing, code synthesis), so the cache savings pay for the subprocess startup cost.
-
-**Compile-time partial evaluator (Path B).** A complementary mode where `q.Comptime` calls with literal args get **unfolded inline at preprocess time**: substitute the literal, constant-fold conditionals, recurse on surviving call sites, emit the constant. No subprocess at all — all the work happens in the rewriter. Bounded to a Go subset (parameter substitution, if/else, arithmetic, comparisons, recursive calls); rich impls fall back to the subprocess path. The win is build speed for tight numeric impls.
-
-**Multipass code generation (Path D).** `q.AtCompileTimeCode` already returns source that the rewriter parses. The next step is letting that returned source itself contain more `q.*` comptime calls — the rewriter detects them, runs another scan+rewrite pass on the spliced fragment, and repeats until a fixed point. Macros that emit macros that emit values; useful for code-gen pipelines where one stage produces sources for the next.
-
-For now (Phase 5.1) you have `q.Comptime` for clean recursive impls in one subprocess, plus the underlying `q.AtCompileTime` / `q.AtCompileTimeCode` primitives for one-shot value / code-gen splicing.
-
 ## Restrictions
 
 Enforced at compile time:
@@ -501,12 +364,6 @@ Enforced at compile time:
 - **Non-bubbling q.* only inside closure bodies.** `q.Try` / `q.Check` / `q.Recv` / `q.Open` need an error return slot, but the closure has signature `func() R` (no error). Use `q.Match`, `q.Upper`/`Snake`/`Camel`, `q.F`, `q.SQL`, `q.EnumValues`/`Names`, `q.Fields`/`AllFields`/`TypeName`/`Tag`, etc. — anything that doesn't bubble.
 - **Closures inside `package main` cannot reference same-package types/decls.** `package main` isn't importable, so the synthesis program can't qualify references to it. Move the types into a non-main subpackage.
 - **Pure closures only.** `time.Now()`, `os.Getenv`, random number generators, anything that produces a different result on each run — the cache key in a future caching layer assumes determinism. Document the closure as pure and don't reach for mutable I/O.
-
-For `q.Comptime` impls specifically:
-
-- **Args at every call site must be preprocess-time-resolvable.** Literals, package-level constants, other `q.AtCompileTime` / `q.Comptime` outputs, or arithmetic combinations of those. A call with a runtime-only arg (e.g. `Fib(userInput)`) is rejected — the rewriter can't fold what isn't known at build time.
-- **Impl is a function literal, not a named function reference.** `var Fib = q.Comptime(SomeNamedFn)` is rejected — the synthesis pass needs the AST of the body.
-- **Same-package call sites only need the impl name in scope.** Cross-package call sites (`other.Fib(10)`) work the same way as local ones — they resolve through the importing package's view of the comptime binding.
 
 ## Common patterns
 
@@ -574,8 +431,7 @@ greet := (func(name string) string { return "Hello, " + name })
 
 ## Related
 
-- [Phase plan + design (1-4)](../planning/atcompiletime.md) — original implementation architecture for `q.AtCompileTime` / `q.AtCompileTimeCode`.
-- [Comptime inception design (5+)](../planning/comptime-inception.md) — `q.Comptime`, `q.NestedComptime`, partial evaluator, multipass macros.
+- [Phase plan + design](../planning/atcompiletime.md) — full implementation architecture.
 - [Codec interface](../planning/atcompiletime.md#codec-based-encoding-decoding-phase-2) — when to pick JSON vs gob vs binary vs a custom codec.
 - [`q.GenStringer` / `q.GenEnumJSON`](gen.md) — package-level directives that synthesize methods. q.AtCompileTime is the more general escape hatch; the Gen* directives are specialised cases.
 - [`q.F`](format.md), [`q.Snake`](string_case.md), [`q.SQL`](sql.md), [`q.EnumName`](enums.md), [`q.Match`](match.md) — every other compile-time helper. Each one is, in spirit, a fixed special case of what `q.AtCompileTime` lets you write yourself.
