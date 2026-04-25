@@ -205,6 +205,27 @@ slog.Info("loaded", q.DebugSlogAttr(userID))
 
 The `Debug*` family carries `file:line` *inside the key text* — easy to spot in scrolling stderr, but noisy in shipping logs. Pull these out before merging; reach for `q.SlogAttr` / `q.SlogFile` / `q.SlogLine` for permanent logging.
 
+### Compile-time enum helpers
+
+```go
+type Color int
+const (Red Color = iota; Green; Blue)
+
+q.EnumValues[Color]()           // []Color{Red, Green, Blue}
+q.EnumNames[Color]()            // []string{"Red", "Green", "Blue"}
+q.EnumName[Color](Green)        // "Green"
+q.EnumParse[Color]("Blue")      // (Blue, nil)
+q.EnumOrdinal[Color](Blue)      // 2
+
+func (c Color) String() string { return q.EnumName[Color](c) }
+```
+
+Each call site folds to a literal slice or an inline switch — no runtime
+reflection, no companion code-generator, no `go generate` step. Works for
+both `int`-backed and `string`-backed enums (any const-able comparable
+type). Constants are discovered by walking the package's
+`*types.Const` set at compile time.
+
 ### Get the goroutine ID Go won't give you
 
 ```go
