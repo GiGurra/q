@@ -73,9 +73,28 @@ func planUserPackage(pkgPath string, toolArgs []string) (*Plan, error) {
 	// nil as a non-nil `error`, making the rewritten bubble check
 	// fire for a notionally-nil error. See typecheck.go.
 	importcfgPath := compileImportcfg(toolArgs)
-	slotDiags := checkErrorSlots(fset, pkgPath, importcfgPath, allFiles, allShapes)
+	info, slotDiags := checkErrorSlotsWithInfo(fset, pkgPath, importcfgPath, allFiles, allShapes)
 	diags = append(diags, slotDiags...)
 
+	if len(diags) > 0 {
+		return &Plan{Diags: diags}, nil
+	}
+
+	// q.AtCompileTime synthesis pass: collect all comptime calls,
+	// topo-sort, run a single subprocess to evaluate them all, and
+	// populate AtCTResolved on each qSubCall before the rewriter runs.
+	pkgName := ""
+	for _, pf := range parsedFiles {
+		if pf.file.Name != nil {
+			pkgName = pf.file.Name.Name
+			break
+		}
+	}
+	atOutcome, atDiags, atErr := resolveAtCompileTimeCalls(fset, pkgPath, pkgName, allFiles, allShapes, info)
+	if atErr != nil {
+		return nil, atErr
+	}
+	diags = append(diags, atDiags...)
 	if len(diags) > 0 {
 		return &Plan{Diags: diags}, nil
 	}
@@ -104,7 +123,14 @@ func planUserPackage(pkgPath string, toolArgs []string) (*Plan, error) {
 		if absErr != nil {
 			absSrc = pf.src
 		}
-		rewrittenBytes, addedImports, err := rewriteFile(fset, pf.file, original, pf.shapes, alias, absSrc)
+		var fileKeepAlives []string
+		if atOutcome.KeepAlivesByFile != nil {
+			fileKeepAlives = atOutcome.KeepAlivesByFile[absSrc]
+			if fileKeepAlives == nil {
+				fileKeepAlives = atOutcome.KeepAlivesByFile[pf.src]
+			}
+		}
+		rewrittenBytes, addedImports, err := rewriteFile(fset, pf.file, original, pf.shapes, alias, absSrc, fileKeepAlives)
 		if err != nil {
 			cleanupAll()
 			return nil, err
@@ -130,13 +156,6 @@ func planUserPackage(pkgPath string, toolArgs []string) (*Plan, error) {
 	genDirs := collectGenDirectives(fset, allShapes)
 	var genCleanup func()
 	if len(genDirs) > 0 {
-		pkgName := ""
-		for _, pf := range parsedFiles {
-			if pf.file.Name != nil {
-				pkgName = pf.file.Name.Name
-				break
-			}
-		}
 		genSrc := synthesizeGenFile(pkgName, genDirs)
 		if genSrc != "" {
 			path, cleanup, err := writeTempGoFile("q-gen-*.go", []byte(genSrc))
@@ -157,6 +176,21 @@ func planUserPackage(pkgPath string, toolArgs []string) (*Plan, error) {
 					importsToInject["encoding/json"] = true
 				}
 			}
+		}
+	}
+
+	// Append the q.AtCompileTime companion file (if any) so the
+	// var+init() decode hooks land in the user's package.
+	if atOutcome.CompanionFile != "" {
+		path, cleanup, err := writeTempGoFile("q-atct-*.go", []byte(atOutcome.CompanionFile))
+		if err != nil {
+			cleanupAll()
+			return nil, err
+		}
+		cleanups = append(cleanups, cleanup)
+		rewrittenFiles = append(rewrittenFiles, rewritten{origPath: "", newPath: path})
+		for _, p := range atOutcome.ExtraImports {
+			importsToInject[p] = true
 		}
 	}
 

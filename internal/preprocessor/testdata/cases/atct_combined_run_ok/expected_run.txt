@@ -1,0 +1,5 @@
+a: 49
+b: squared:49
+c: [squared:49 squared:49 squared:49]
+svc.Name: svc
+svc.Port: 50

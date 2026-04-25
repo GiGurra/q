@@ -123,6 +123,8 @@ const (
 	familyTypeName  // q.TypeName[T]() — defined type name as string
 	familyTag       // q.Tag[T](field, key) — struct tag value
 	familyMatch     // q.Match(v, q.Case(...), q.Default(...)) — value-returning switch
+	familyAtCompileTime     // q.AtCompileTime(func() R { ... }, codec...) — comptime evaluation
+	familyAtCompileTimeCode // q.AtCompileTimeCode[R](func() string { ... }) — comptime code generation
 )
 
 // form is the syntactic position of a recognised q.* call:
@@ -286,6 +288,37 @@ type qSubCall struct {
 	// Each arm carries the value expression (nil for default arms),
 	// the result expression, and an IsDefault marker.
 	MatchCases []matchCase
+
+	// AtCTClosure is the *ast.FuncLit handed to q.AtCompileTime.
+	// Captured at scan time; the synthesis pass reads its Body and
+	// signature. nil for every other family.
+	AtCTClosure *ast.FuncLit
+
+	// AtCTCodecExpr is the codec argument to q.AtCompileTime, when
+	// supplied. nil for the default-codec form (synthesis pass
+	// substitutes JSONCodec[R]). When set, it carries the user's
+	// codec expression — its source text is spliced into the
+	// synthesized program's Encode call AND, for non-primitive R,
+	// into the companion file's init() Decode call.
+	AtCTCodecExpr ast.Expr
+
+	// AtCTResultText is the spelling of R as written in the type
+	// argument of q.AtCompileTime[R]. Captured at scan time from
+	// IndexExpr.Index. Used by the synthesis pass for the
+	// `func() R { ... }()` invocation in the synthesized main.go.
+	AtCTResultText string
+
+	// AtCTResolved is the rewritten replacement text for this call
+	// site, populated by the synthesis pass after the subprocess
+	// has run. Either a Go literal (primitive R + JSONCodec) or an
+	// identifier reference like `_qCt0_value` (non-primitive).
+	AtCTResolved string
+
+	// AtCTIndex is the topo-sorted index of this call within the
+	// package's AtCompileTime call set. Populated by the synthesis
+	// pass; used by the rewriter when emitting `_qCt<N>_value`
+	// references for the non-inline path.
+	AtCTIndex int
 }
 
 // matchCase is one arm of a q.Match expression — either a
@@ -339,10 +372,12 @@ type recoverStep struct {
 // time so the rewriter can emit the inlined replacement without
 // re-walking the AST.
 type callShape struct {
-	// Stmt is the enclosing statement in the function body. Its source
-	// span is the unit the rewriter replaces; everything else inside
-	// the function stays intact.
-	Stmt ast.Stmt
+	// Stmt is the enclosing statement (or top-level declaration) for
+	// this q.* call. Its source span is the unit the rewriter
+	// replaces; everything else inside the function stays intact.
+	// Type is ast.Node rather than ast.Stmt so package-level shapes
+	// (`var X = q.AtCompileTime(...)`) can use *ast.GenDecl.
+	Stmt ast.Node
 
 	// Form is the syntactic position — define, assign, discard, return.
 	Form form
@@ -489,6 +524,34 @@ func scanFile(fset *token.FileSet, path string, file *ast.File) ([]callShape, []
 	var shapes []callShape
 	var diags []Diagnostic
 
+	// Pre-collect q.AtCompileTime closure FuncLit nodes — the
+	// synthesis pass owns their bodies, so the scanner should not
+	// descend into them (otherwise q.* calls inside the closure
+	// would be picked up as separate shapes that the rewriter
+	// double-rewrites alongside the outer q.AtCompileTime span).
+	atCTSkipFuncLits = map[*ast.FuncLit]bool{}
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		fn := call.Fun
+		if ix, ok := fn.(*ast.IndexExpr); ok {
+			fn = ix.X
+		}
+		if sel, ok := fn.(*ast.SelectorExpr); ok {
+			if x, ok := sel.X.(*ast.Ident); ok && x.Name == alias &&
+				(sel.Sel.Name == "AtCompileTime" || sel.Sel.Name == "AtCompileTimeCode") {
+				if len(call.Args) >= 1 {
+					if lit, ok := call.Args[0].(*ast.FuncLit); ok {
+						atCTSkipFuncLits[lit] = true
+					}
+				}
+			}
+		}
+		return true
+	})
+
 	for _, decl := range file.Decls {
 		switch d := decl.(type) {
 		case *ast.FuncDecl:
@@ -504,8 +567,16 @@ func scanFile(fset *token.FileSet, path string, file *ast.File) ([]callShape, []
 		}
 	}
 
+	atCTSkipFuncLits = nil
 	return shapes, diags, nil
 }
+
+// atCTSkipFuncLits collects FuncLit AST nodes whose body the scanner
+// should NOT recurse into — currently only the closures handed to
+// q.AtCompileTime, since the synthesis pass owns those bodies. The
+// set is populated at the start of scanFile and consulted by
+// walkFuncLits + collectQCalls to short-circuit descent.
+var atCTSkipFuncLits map[*ast.FuncLit]bool
 
 // scanTopLevelVarSpec recognises the package-level directive shape
 //
@@ -528,34 +599,47 @@ func scanTopLevelVarSpec(fset *token.FileSet, path string, gd *ast.GenDecl, alia
 		if !ok {
 			continue
 		}
-		// Only blank-name ("var _ = …") forms are accepted as
-		// directives. A named binding would imply the user wants
-		// the value at runtime, which doesn't fit the directive
-		// model.
-		if len(vs.Names) != 1 || vs.Names[0].Name != "_" {
-			continue
+		// Try Gen* directives first — `var _ = q.GenX[T]()` shape.
+		if len(vs.Names) == 1 && vs.Names[0].Name == "_" && len(vs.Values) == 1 {
+			if call, ok := vs.Values[0].(*ast.CallExpr); ok {
+				if fam, typeArg, ok := classifyGenDirective(call, alias); ok {
+					if len(call.Args) != 0 {
+						*diags = append(*diags, diagAt(fset, path, call.Pos(),
+							fmt.Sprintf("q.%s takes no arguments; got %d", genDirectiveName(fam), len(call.Args))))
+						continue
+					}
+					*shapes = append(*shapes, callShape{
+						Stmt:  &ast.ExprStmt{X: call},
+						Form:  formDiscard,
+						Calls: []qSubCall{{Family: fam, AsType: typeArg, OuterCall: call}},
+					})
+					continue
+				}
+			}
 		}
-		if len(vs.Values) != 1 {
-			continue
+		// q.AtCompileTime / q.AtCompileTimeCode at package level:
+		//   var X = q.AtCompileTime[T](...)
+		//   var X = q.AtCompileTimeCode[T](...)
+		// Each ValueSpec can declare multiple names, but for this
+		// shape we require single-name, single-value pairs.
+		if len(vs.Names) == 1 && len(vs.Values) == 1 {
+			if call, ok := vs.Values[0].(*ast.CallExpr); ok {
+				sub, matched, classifyErr := classifyQCall(call, alias)
+				if classifyErr != nil {
+					*diags = append(*diags, diagAt(fset, path, call.Pos(), classifyErr.Error()))
+					continue
+				}
+				if matched && (sub.Family == familyAtCompileTime || sub.Family == familyAtCompileTimeCode) {
+					*shapes = append(*shapes, callShape{
+						Stmt:    gd,
+						Form:    formDefine,
+						LHSExpr: vs.Names[0],
+						Calls:   []qSubCall{sub},
+					})
+					continue
+				}
+			}
 		}
-		call, ok := vs.Values[0].(*ast.CallExpr)
-		if !ok {
-			continue
-		}
-		fam, typeArg, ok := classifyGenDirective(call, alias)
-		if !ok {
-			continue
-		}
-		if len(call.Args) != 0 {
-			*diags = append(*diags, diagAt(fset, path, call.Pos(),
-				fmt.Sprintf("q.%s takes no arguments; got %d", genDirectiveName(fam), len(call.Args))))
-			continue
-		}
-		*shapes = append(*shapes, callShape{
-			Stmt:  &ast.ExprStmt{X: call},
-			Form:  formDiscard,
-			Calls: []qSubCall{{Family: fam, AsType: typeArg, OuterCall: call}},
-		})
 	}
 }
 
@@ -664,6 +748,10 @@ func walkFuncLits(fset *token.FileSet, path string, stmt ast.Stmt, alias string,
 		lit, ok := n.(*ast.FuncLit)
 		if !ok {
 			return true
+		}
+		if atCTSkipFuncLits[lit] {
+			// q.AtCompileTime closure — synthesis pass owns it.
+			return false
 		}
 		walkBlock(fset, path, lit.Body, alias, lit.Type, shapes, diags)
 		return false
@@ -1231,6 +1319,71 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 			return qSubCall{}, false, fmt.Errorf("q.TypeName[T] takes no arguments; got %d", len(call.Args))
 		}
 		return qSubCall{Family: familyTypeName, AsType: typeArg, OuterCall: expr}, true, nil
+	}
+	// q.AtCompileTimeCode[R](func() string { ... }) — code generation.
+	// Closure returns Go source code (a string); the rewriter parses
+	// the result and splices the parsed expression at the call site.
+	if typeArg, ok := isIndexedSelector(call.Fun, alias, "AtCompileTimeCode"); ok {
+		if len(call.Args) != 1 {
+			return qSubCall{}, false, fmt.Errorf("q.AtCompileTimeCode takes exactly one argument (func() string); got %d", len(call.Args))
+		}
+		fnLit, ok := call.Args[0].(*ast.FuncLit)
+		if !ok {
+			return qSubCall{}, false, fmt.Errorf("q.AtCompileTimeCode: argument must be a function literal (anonymous function), not a function reference or variable")
+		}
+		if fnLit.Type == nil || fnLit.Type.Params == nil {
+			return qSubCall{}, false, fmt.Errorf("q.AtCompileTimeCode: closure must have signature func() string (no parameters)")
+		}
+		if fnLit.Type.Params.NumFields() != 0 {
+			return qSubCall{}, false, fmt.Errorf("q.AtCompileTimeCode: closure must take zero parameters")
+		}
+		if fnLit.Type.Results == nil || fnLit.Type.Results.NumFields() != 1 {
+			return qSubCall{}, false, fmt.Errorf("q.AtCompileTimeCode: closure must return exactly one string value")
+		}
+		return qSubCall{
+			Family:      familyAtCompileTimeCode,
+			AsType:      typeArg,
+			InnerExpr:   fnLit,
+			AtCTClosure: fnLit,
+			OuterCall:   expr,
+		}, true, nil
+	}
+	// q.AtCompileTime(func() R { ... }, codec...) — comptime evaluation.
+	// First arg MUST be a *ast.FuncLit; the synthesis pass runs it in
+	// a subprocess and splices the result here. Optional second arg is
+	// the codec (default JSONCodec[R]). The type argument R is
+	// captured for the synthesized program's typed bind.
+	if typeArg, ok := isIndexedSelector(call.Fun, alias, "AtCompileTime"); ok {
+		if len(call.Args) < 1 || len(call.Args) > 2 {
+			return qSubCall{}, false, fmt.Errorf("q.AtCompileTime takes one or two arguments (func() R, optional codec); got %d", len(call.Args))
+		}
+		fnLit, ok := call.Args[0].(*ast.FuncLit)
+		if !ok {
+			return qSubCall{}, false, fmt.Errorf("q.AtCompileTime: argument must be a function literal (anonymous function), not a function reference or variable")
+		}
+		if fnLit.Type == nil || fnLit.Type.Params == nil {
+			return qSubCall{}, false, fmt.Errorf("q.AtCompileTime: closure must have signature func() R (no parameters)")
+		}
+		if fnLit.Type.Params.NumFields() != 0 {
+			return qSubCall{}, false, fmt.Errorf("q.AtCompileTime: closure must take zero parameters (got %d)", fnLit.Type.Params.NumFields())
+		}
+		if fnLit.Type.Results == nil || fnLit.Type.Results.NumFields() != 1 {
+			return qSubCall{}, false, fmt.Errorf("q.AtCompileTime: closure must return exactly one value")
+		}
+		// Non-FuncLit second arg also rejected (a func variable would
+		// hide the codec from the synthesis pass).
+		var codecExpr ast.Expr
+		if len(call.Args) == 2 {
+			codecExpr = call.Args[1]
+		}
+		return qSubCall{
+			Family:        familyAtCompileTime,
+			AsType:        typeArg,
+			InnerExpr:     fnLit, // for source-text extraction by the rewriter
+			AtCTClosure:   fnLit,
+			AtCTCodecExpr: codecExpr,
+			OuterCall:     expr,
+		}, true, nil
 	}
 	// q.Match(value, q.Case(...), q.Default(...)) — value-returning
 	// switch. The first arg is the match value; remaining args are

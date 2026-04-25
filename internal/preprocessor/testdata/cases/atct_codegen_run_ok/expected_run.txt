@@ -1,0 +1,7 @@
+Hello, alice
+Hello, bob
+tag: prod-edge-v2
+classify(-5): negative
+classify(0): zero
+classify(5): small
+classify(100): large

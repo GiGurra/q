@@ -1,0 +1,6 @@
+name: service-A
+port: 8080
+enabled: true
+tags: [prod edge]
+ep: GET /api/v1/users
+ep: POST /api/v1/users

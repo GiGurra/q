@@ -70,25 +70,25 @@ import (
 // reach the rewriter with cleanupUnknown and produce an explicit
 // runtime panic via panicUnrewritten on the q.Open stub if the
 // rewriter can't emit a defer.
-func checkErrorSlots(fset *token.FileSet, pkgPath, importcfgPath string, files []*ast.File, shapes []callShape) []Diagnostic {
+func checkErrorSlotsWithInfo(fset *token.FileSet, pkgPath, importcfgPath string, files []*ast.File, shapes []callShape) (*types.Info, []Diagnostic) {
+	info := &types.Info{
+		Types: map[ast.Expr]types.TypeAndValue{},
+		Uses:  map[*ast.Ident]types.Object{},
+		Defs:  map[*ast.Ident]types.Object{},
+	}
 	if len(shapes) == 0 || pkgPath == "" || importcfgPath == "" {
-		return nil
+		return info, nil
 	}
 
 	imp, err := newImportcfgImporter(importcfgPath)
 	if err != nil {
-		return nil
+		return info, nil
 	}
 
 	cfg := &types.Config{
 		Importer: imp,
 		// Swallow type errors — the real compile reports those.
 		Error: func(error) {},
-	}
-	info := &types.Info{
-		Types: map[ast.Expr]types.TypeAndValue{},
-		Uses:  map[*ast.Ident]types.Object{},
-		Defs:  map[*ast.Ident]types.Object{},
 	}
 	// Best-effort: ignore the returned error. Info.Types is
 	// populated for expressions that did type-check, which is all
@@ -123,6 +123,11 @@ func checkErrorSlots(fset *token.FileSet, pkgPath, importcfgPath string, files [
 					diags = append(diags, d)
 				}
 			}
+			if sc.Family == familyAtCompileTime || sc.Family == familyAtCompileTimeCode {
+				if d, ok := validateAtCompileTime(fset, sc, info, pkgPath); ok {
+					diags = append(diags, d)
+				}
+			}
 		}
 	}
 
@@ -147,7 +152,7 @@ func checkErrorSlots(fset *token.FileSet, pkgPath, importcfgPath string, files [
 			}
 		}
 	}
-	return diags
+	return info, diags
 }
 
 // collectLaxTypes returns the set of (unqualified, same-package) type
@@ -716,6 +721,55 @@ func resolveReflection(fset *token.FileSet, sc *qSubCall, info *types.Info) (Dia
 		}
 		sc.ResolvedString = reflectStructTag(tag).Get(key)
 	}
+	return Diagnostic{}, false
+}
+
+// validateAtCompileTime walks the q.AtCompileTime closure body for
+// captures that aren't allowed (anything outside the closure scope
+// that isn't a package-level decl or another q.AtCompileTime LHS
+// binding) and for q.* calls (rejected in this version — Phase 3
+// will lift this). Also captures the result-type text from the type
+// info so the synthesis pass has a concrete spelling for the
+// `func() R { ... }()` invocation.
+func validateAtCompileTime(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPath string) (Diagnostic, bool) {
+	if sc.AtCTClosure == nil {
+		return Diagnostic{}, false
+	}
+	// 1. Resolve R's type text via the type-arg AsType.
+	if sc.AsType != nil {
+		if tv, ok := info.Types[sc.AsType]; ok && tv.Type != nil {
+			sc.AtCTResultText = types.TypeString(tv.Type, func(p *types.Package) string {
+				if p == nil || p.Path() == pkgPath {
+					return ""
+				}
+				return p.Name()
+			})
+		}
+	}
+	// Fallback: read R from the closure's result list.
+	if sc.AtCTResultText == "" && sc.AtCTClosure.Type != nil &&
+		sc.AtCTClosure.Type.Results != nil &&
+		sc.AtCTClosure.Type.Results.NumFields() == 1 {
+		f := sc.AtCTClosure.Type.Results.List[0]
+		if tv, ok := info.Types[f.Type]; ok && tv.Type != nil {
+			sc.AtCTResultText = types.TypeString(tv.Type, func(p *types.Package) string {
+				if p == nil || p.Path() == pkgPath {
+					return ""
+				}
+				return p.Name()
+			})
+		}
+	}
+
+	// Phase 4: q.* calls inside the closure body (including
+	// q.AtCompileTime itself) are allowed. The synthesis pass
+	// invokes the subprocess with -toolexec=<qBin> so nested q.*
+	// calls get rewritten before the subprocess compiles. Recursive
+	// q.AtCompileTime is processed by a recursive q invocation that
+	// synthesizes its own .q-comptime-<hash>/ directory. Cycle
+	// detection within a single package is handled by the synthesis
+	// pass's topo-sort; cross-package recursion has no cycle (each
+	// package compile is independent).
 	return Diagnostic{}, false
 }
 

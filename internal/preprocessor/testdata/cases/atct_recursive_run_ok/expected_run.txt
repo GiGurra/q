@@ -1,0 +1,2 @@
+doubled: 42
+hashed: comptime/comptime

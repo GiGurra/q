@@ -1,0 +1,3 @@
+hash: 6073241895e7dc207ffb924c228e3a09
+repeated: ababababab
+upper: HELLO WORLD

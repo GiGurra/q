@@ -41,7 +41,7 @@ import (
 // package; the returned addedImports lists the packages the rewriter
 // actually injected (so the caller can extend the compile's
 // -importcfg accordingly).
-func rewriteFile(fset *token.FileSet, file *ast.File, src []byte, shapes []callShape, alias, origPath string) ([]byte, []string, error) {
+func rewriteFile(fset *token.FileSet, file *ast.File, src []byte, shapes []callShape, alias, origPath string, atCTKeepAlives []string) ([]byte, []string, error) {
 	type edit struct {
 		start, end int
 		text       string
@@ -170,6 +170,24 @@ func rewriteFile(fset *token.FileSet, file *ast.File, src []byte, shapes []callS
 	if alias != "" {
 		sentinel := fmt.Sprintf("\n\nvar _ = %s.ErrNil\n", alias)
 		out = append(out, []byte(sentinel)...)
+	}
+
+	// Keep-alive references for imports used only inside
+	// q.AtCompileTime closures (the closure literal vanishes after
+	// rewrite, so without these the imports become "imported and not
+	// used"). The synthesis pass tags each snippet with `T:` (type
+	// form, emit `var _ <ref>`) or `V:` (value form, emit
+	// `var _ = <ref>`) so we don't try to assign a type to `_`.
+	for _, ka := range atCTKeepAlives {
+		switch {
+		case strings.HasPrefix(ka, "T:"):
+			out = append(out, []byte("\nvar _ "+strings.TrimPrefix(ka, "T:")+"\n")...)
+		case strings.HasPrefix(ka, "V:"):
+			out = append(out, []byte("\nvar _ = "+strings.TrimPrefix(ka, "V:")+"\n")...)
+		default:
+			// Legacy / untagged — assume value form.
+			out = append(out, []byte("\nvar _ = "+ka+"\n")...)
+		}
 	}
 
 	// Prepend a file-level //line directive so the compiler records
@@ -314,6 +332,8 @@ func renderShape(fset *token.FileSet, src []byte, sh callShape, counter *int, al
 			subTexts[i] = strconv.Quote(sh.Calls[i].ResolvedString)
 		case familyMatch:
 			subTexts[i] = buildMatchReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts)
+		case familyAtCompileTime, familyAtCompileTimeCode:
+			subTexts[i] = buildAtCompileTimeReplacement(sh.Calls[i])
 		}
 	}
 
@@ -672,6 +692,20 @@ func buildFileLineReplacement(fset *token.FileSet, sub qSubCall) string {
 	return strconv.Quote(fmt.Sprintf("%s:%d", filepath.Base(pos.Filename), pos.Line))
 }
 
+// buildAtCompileTimeReplacement is the per-sub replacement for
+// q.AtCompileTime — either an inline Go literal (primitive R + default
+// JSONCodec) or an identifier reference like `_qCtValue3` for the
+// companion-file route. The synthesis pass populates AtCTResolved
+// before the rewriter runs; here we just return that text.
+func buildAtCompileTimeReplacement(sub qSubCall) string {
+	if sub.AtCTResolved == "" {
+		// Synthesis pass didn't resolve — fall back to a panic so the
+		// problem is loud rather than silent.
+		return `func() interface{} { panic("q.AtCompileTime: synthesis pass did not resolve this call") }()`
+	}
+	return sub.AtCTResolved
+}
+
 // buildExprReplacement is the per-sub replacement for q.Expr: a
 // Go-quoted string literal of the argument's literal source text.
 // The argument's runtime value is discarded.
@@ -700,7 +734,8 @@ func isInPlaceFamily(f family) bool {
 		familyCamel, familyPascal, familyTitle,
 		familyGenStringer, familyGenEnumJSONStrict, familyGenEnumJSONLax,
 		familyFields, familyAllFields, familyTypeName, familyTag,
-		familyMatch:
+		familyMatch,
+		familyAtCompileTime, familyAtCompileTimeCode:
 		return true
 	}
 	return false
@@ -894,7 +929,8 @@ func renderSubCall(fset *token.FileSet, src []byte, sh callShape, subIdx int, su
 		familySlogAttr, familySlogFile, familySlogLine, familySlogFileLine,
 		familyFile, familyLine, familyFileLine, familyExpr,
 		familyEnumValues, familyEnumNames, familyEnumName,
-		familyEnumValid, familyEnumOrdinal:
+		familyEnumValid, familyEnumOrdinal,
+		familyAtCompileTime, familyAtCompileTimeCode:
 		// In-place expression transforms — the replacement text
 		// lives in subTexts[subIdx] and is applied when
 		// substituteSpans rebuilds the final stmt. No bind/check

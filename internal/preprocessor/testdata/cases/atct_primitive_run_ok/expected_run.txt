@@ -1,0 +1,4 @@
+sum 1..100: 5050
+greeting: hello, comptime
+flag: true
+pi: 3.14159

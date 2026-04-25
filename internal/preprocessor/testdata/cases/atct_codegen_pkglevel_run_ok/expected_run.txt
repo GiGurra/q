@@ -1,0 +1,8 @@
+classify(-5): negative
+classify(0): zero
+classify(7): small
+classify(100): large
+tag: prod-edge-v2
+greet(0): hi alice
+greet(1): hi bob
+greet(99): unknown

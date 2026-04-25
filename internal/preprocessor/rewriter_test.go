@@ -224,7 +224,7 @@ func TestRewriteFixtureSource_NoExceptions(t *testing.T) {
 					t.Skip("no shapes to rewrite")
 				}
 				alias := qImportAlias(file)
-				out, _, err := rewriteFile(fset, file, data, shapes, alias, "")
+				out, _, err := rewriteFile(fset, file, data, shapes, alias, "", nil)
 				if err != nil {
 					t.Fatalf("rewrite: %v", err)
 				}
@@ -878,7 +878,7 @@ func atoi(s string) (int, error) { return 0, nil }
 	}
 	alias := qImportAlias(file)
 
-	out, _, err := rewriteFile(fset, file, []byte(src), shapes, alias, "/home/user/proj/p.go")
+	out, _, err := rewriteFile(fset, file, []byte(src), shapes, alias, "/home/user/proj/p.go", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -940,7 +940,7 @@ func f() error {
 	}
 	alias := qImportAlias(file)
 
-	out, _, err := rewriteFile(fset, file, []byte(src), shapes, alias, "/abs/path/p.go")
+	out, _, err := rewriteFile(fset, file, []byte(src), shapes, alias, "/abs/path/p.go", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1046,7 +1046,7 @@ func mustRewrite(t *testing.T, src string) string {
 		t.Fatal("scanner returned no shapes")
 	}
 	alias := qImportAlias(file)
-	out, _, err := rewriteFile(fset, file, []byte(src), shapes, alias, "")
+	out, _, err := rewriteFile(fset, file, []byte(src), shapes, alias, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

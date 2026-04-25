@@ -1,0 +1,5 @@
+primes: [2 3 5 7 11 13 17 19 23 29]
+weights[a]: 1
+weights[b]: 2
+weights[c]: 3
+pairs: [[alice 30] [bob 25]]

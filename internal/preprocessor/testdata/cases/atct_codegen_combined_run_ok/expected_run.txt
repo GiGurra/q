@@ -1,0 +1,6 @@
+names: [alice bob carol]
+count: 3
+greet(0): hi alice
+greet(1): hi bob
+greet(2): hi carol
+greet(99): unknown
