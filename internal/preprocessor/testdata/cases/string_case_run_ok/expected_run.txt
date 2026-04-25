@@ -1,0 +1,22 @@
+HELLO
+hello
+hello_world
+xml_http_request
+hello_world
+hello_world
+already_snake_case
+url
+hello-world
+xml-http-request
+hello-world
+helloWorld
+helloWorld
+helloWorld
+helloWorld
+xmlHttpRequest
+HelloWorld
+HelloWorld
+XmlHttpRequest
+Hello World
+A B C
+column: user_id

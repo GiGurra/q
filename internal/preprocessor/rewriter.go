@@ -296,6 +296,13 @@ func renderShape(fset *token.FileSet, src []byte, sh callShape, counter *int, al
 			subTexts[i] = text
 		case familyExhaustive:
 			subTexts[i] = exprTextSubst(fset, src, sh.Calls[i].InnerExpr, sh.Calls, subTexts)
+		case familyUpper, familyLower, familySnake, familyKebab,
+			familyCamel, familyPascal, familyTitle:
+			text, sErr := buildStringCaseReplacement(sh.Calls[i])
+			if sErr != nil {
+				return "", false, false, false, sErr
+			}
+			subTexts[i] = text
 		}
 	}
 
@@ -677,7 +684,9 @@ func isInPlaceFamily(f family) bool {
 		familyEnumParse, familyEnumValid, familyEnumOrdinal,
 		familyF, familyFerr, familyFln,
 		familySQL, familyPgSQL, familyNamedSQL,
-		familyExhaustive:
+		familyExhaustive,
+		familyUpper, familyLower, familySnake, familyKebab,
+		familyCamel, familyPascal, familyTitle:
 		return true
 	}
 	return false
@@ -904,6 +913,11 @@ func renderSubCall(fset *token.FileSet, src []byte, sh callShape, subIdx int, su
 		// q.Exhaustive in switch tag — the wrapper is removed,
 		// leaving a plain switch on the inner expression. No
 		// imports needed.
+		return "", false, false, false, nil
+	case familyUpper, familyLower, familySnake, familyKebab,
+		familyCamel, familyPascal, familyTitle:
+		// In-place expression substitutes to a string literal —
+		// no imports needed.
 		return "", false, false, false, nil
 	case familyAwait:
 		text, err := renderAwait(fset, src, sh, sub, counter, alias, subs, subTexts)

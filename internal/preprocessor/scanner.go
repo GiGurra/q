@@ -108,6 +108,13 @@ const (
 	familyPgSQL    // q.PgSQL("...{x}...") — PostgreSQL-style ($1, $2, ...)
 	familyNamedSQL // q.NamedSQL("...{x}...") — named-param style (:name1, :name2, ...)
 	familyExhaustive // switch q.Exhaustive(v) { ... } — compile-time enforced exhaustiveness
+	familyUpper  // q.Upper("...") — compile-time string-case transforms
+	familyLower
+	familySnake
+	familyKebab
+	familyCamel
+	familyPascal
+	familyTitle
 )
 
 // form is the syntactic position of a recognised q.* call:
@@ -1052,6 +1059,16 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 		}
 		return qSubCall{Family: familyNamedSQL, InnerExpr: call.Args[0], OuterCall: expr}, true, nil
 	}
+	// Compile-time string-case ops. Each takes a single string-literal
+	// arg and folds to a string literal at compile time.
+	for _, sf := range stringCaseFamilies {
+		if isSelector(call.Fun, alias, sf.name) {
+			if err := validateStringLiteralArg("q."+sf.name, call.Args); err != nil {
+				return qSubCall{}, false, err
+			}
+			return qSubCall{Family: sf.fam, InnerExpr: call.Args[0], OuterCall: expr}, true, nil
+		}
+	}
 	// Bare q.CheckCtx — ctx.Err() checkpoint. Statement-only (discard).
 	if isSelector(call.Fun, alias, "CheckCtx") {
 		if len(call.Args) != 1 {
@@ -1713,6 +1730,36 @@ func matchExhaustiveSwitch(s *ast.SwitchStmt, alias string, fnType *ast.FuncType
 		Calls:             []qSubCall{{Family: familyExhaustive, InnerExpr: call.Args[0], OuterCall: call}},
 		EnclosingFuncType: fnType,
 	}, true, nil
+}
+
+// stringCaseFamilies pairs the q-aliased name with its scanner family
+// for the compile-time string-case ops. Order doesn't matter for
+// correctness; only the names are matched.
+var stringCaseFamilies = []struct {
+	name string
+	fam  family
+}{
+	{"Upper", familyUpper},
+	{"Lower", familyLower},
+	{"Snake", familySnake},
+	{"Kebab", familyKebab},
+	{"Camel", familyCamel},
+	{"Pascal", familyPascal},
+	{"Title", familyTitle},
+}
+
+// validateStringLiteralArg enforces that the call has exactly one
+// string-literal argument. Used by the compile-time string-case ops
+// where dynamic input would defeat the whole point.
+func validateStringLiteralArg(name string, args []ast.Expr) error {
+	if len(args) != 1 {
+		return fmt.Errorf("%s takes exactly one argument (a string literal); got %d", name, len(args))
+	}
+	lit, ok := args[0].(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return fmt.Errorf("%s's argument must be a Go string literal; dynamic strings are not supported (use the standard `strings` package for those)", name)
+	}
+	return nil
 }
 
 // validateFLiteral enforces that q.F / q.Ferr / q.Fln have a single

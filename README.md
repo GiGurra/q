@@ -219,6 +219,19 @@ q.Fln("processing {len(items)} items")        // → fmt.Fprintln(q.DebugWriter,
 
 `{{` / `}}` escape literal braces. The format must be a Go string literal — dynamic formats are rejected at scan time. Inside `{…}`, anything that parses as a Go expression goes (selectors, function calls, arithmetic, even nested string literals). Tradeoff: identifiers inside the literal aren't IDE-visible — go-to-definition / rename don't see them.
 
+### Compile-time string-case transforms
+
+```go
+q.Snake("HelloWorld")       // "hello_world"
+q.Snake("XMLHttpRequest")   // "xml_http_request"
+q.Camel("hello_world")      // "helloWorld"
+q.Pascal("hello_world")     // "HelloWorld"
+q.Kebab("HelloWorld")       // "hello-world"
+q.Upper(q.Snake("DBHost"))  // "DB_HOST"
+```
+
+Each call site folds to a string literal at compile time. Useful for column names, env vars, URL slugs, JSON field names — the codegen-adjacent stuff Go forces you to spell out by hand. Inputs must be string literals; runtime values use the standard `strings` package.
+
 ### Injection-safe SQL
 
 ```go

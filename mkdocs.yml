@@ -50,6 +50,7 @@ nav:
     - q.Exhaustive (compile-time switch coverage): api/exhaustive.md
     - q.F / q.Ferr / q.Fln (string interpolation): api/format.md
     - q.SQL / q.PgSQL / q.NamedSQL (injection-safe SQL): api/sql.md
+    - q.Upper / Lower / Snake / Kebab / Camel / Pascal / Title (compile-time string case): api/string_case.md
     - q.GoroutineID:           api/goroutine_id.md
     - q.Lock:                  api/lock.md
     - q.NotNil:                api/notnil.md

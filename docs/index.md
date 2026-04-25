@@ -48,6 +48,7 @@ Around that core sit a handful of orthogonal helpers — context cancellation, f
 | [`q.Exhaustive`](api/exhaustive.md) | `switch q.Exhaustive(v) { … }` — build fails if any constant of `v`'s type is missing from the case clauses (unless a `default:` opts out). Wrapper stripped at rewrite time, zero runtime cost. |
 | [`q.F` / `q.Ferr` / `q.Fln`](api/format.md) | Compile-time `{expr}` string interpolation. `q.F("hi {name}")` → `fmt.Sprintf(...)`. Format must be a string literal. |
 | [`q.SQL` / `q.PgSQL` / `q.NamedSQL`](api/sql.md) | Injection-safe parameterised SQL. `{expr}` placeholders lift out as `?` / `$N` / `:nameN` driver binds. |
+| [`q.Upper` / `Lower` / `Snake` / `Kebab` / `Camel` / `Pascal` / `Title`](api/string_case.md) | Compile-time string-case transforms — fold a string literal to a string literal at compile time. Tokenisation handles camelCase, PascalCase, kebab-case, snake_case, and acronym runs. |
 | [`q.GoroutineID`](api/goroutine_id.md) | Returns the runtime goid Go deliberately hides — via runtime-package injection. ~1ns. |
 | [`q.Lock`](api/lock.md) | `Lock()` + `defer Unlock()` for any `sync.Locker`. |
 | [`q.NotNil` / `q.NotNilE`](api/notnil.md) | Bubble on a nil pointer (sentinel `q.ErrNil`). |

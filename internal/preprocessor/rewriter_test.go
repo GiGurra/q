@@ -184,6 +184,12 @@ func TestRewriteFixtureSource_NoExceptions(t *testing.T) {
 		if !e.IsDir() {
 			continue
 		}
+		// Skip negative fixtures — they exist precisely to produce
+		// scan-time diagnostics; including them in this "should
+		// scan cleanly" check would always fail.
+		if strings.HasSuffix(e.Name(), "_rejected") {
+			continue
+		}
 		caseDir := filepath.Join("testdata", "cases", e.Name())
 		entries, err := os.ReadDir(caseDir)
 		if err != nil {
