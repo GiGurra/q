@@ -63,6 +63,39 @@ func Assemble[T any](recipes ...any) (T, error) {
 	return zero, nil
 }
 
+// AssembleAll is the multi-provider sibling of Assemble. When several
+// recipes legitimately produce values of the same type T (plugins,
+// handlers, middlewares — any aggregation pattern), q.Assemble would
+// reject with "duplicate provider for T". AssembleAll opts into the
+// multi-provider shape and returns ([]T, error) — every recipe whose
+// output is assignable to T contributes one element, in the recipe's
+// declaration order.
+//
+//	type Plugin interface{ Name() string }
+//
+//	func newAuthPlugin()    Plugin { return &authPlugin{} }
+//	func newLoggingPlugin() Plugin { return &loggingPlugin{} }
+//	func newMetricsPlugin() Plugin { return &metricsPlugin{} }
+//
+//	plugins, err := q.AssembleAll[Plugin](
+//	    newAuthPlugin, newLoggingPlugin, newMetricsPlugin,
+//	)
+//
+// Each provider's transitive deps are still resolved through the same
+// auto-derived graph as q.Assemble — providers can take inputs that
+// other recipes supply. Errored recipes still bubble; nilable outputs
+// still get the runtime nil-check.
+//
+// As with q.Assemble, compose with q.Try / q.Unwrap at the call site
+// when you want bare []T:
+//
+//	plugins := q.Try(q.AssembleAll[Plugin](...))
+//	plugins := q.Unwrap(q.AssembleAll[Plugin](...))
+func AssembleAll[T any](recipes ...any) ([]T, error) {
+	panicUnrewritten("q.AssembleAll")
+	return nil, nil
+}
+
 // assemblyDebugKey is the unexported context-value key that
 // WithAssemblyDebug attaches the destination writer under. Using a
 // dedicated unexported struct type guarantees no key collision with

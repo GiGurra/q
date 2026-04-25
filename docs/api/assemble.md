@@ -422,11 +422,63 @@ The ctx is passed as an inline-value recipe — same as any other context.Contex
 - **Type identity is `go/types` identity.** Two named types with the same underlying type are still distinct providers — that's how `q.Tagged` works. If you have unintentional collisions (e.g. two packages with `type Config struct{...}`), use type aliases or named wrappers to disambiguate.
 - **Recipes can't be `q.*` calls** in the function-reference position. Inline-value recipes can wrap one (`q.Try(loadCfg())`) since the value-position rewrite triggers the standard q.* hoist.
 
+## Multi-provider aggregation: `q.AssembleAll`
+
+When several recipes legitimately produce values of the same type — plugins, handlers, middlewares, anywhere you'd reach for a list-of-implementers pattern — `q.Assemble` is too strict: it rejects with "duplicate provider for T". `q.AssembleAll[T]` opts into the multi-provider shape and returns `([]T, error)`. Every recipe whose output is assignable to `T` contributes one element, in recipe declaration order.
+
+```go
+type Plugin interface{ Name() string }
+
+type AuthPlugin struct{}
+type LogPlugin struct{}
+type MetricsPlugin struct{}
+
+func (AuthPlugin) Name() string    { return "auth" }
+func (LogPlugin) Name() string     { return "log" }
+func (MetricsPlugin) Name() string { return "metrics" }
+
+func newAuth() Plugin    { return AuthPlugin{} }
+func newLog() Plugin     { return LogPlugin{} }
+func newMetrics() Plugin { return MetricsPlugin{} }
+
+plugins := q.Unwrap(q.AssembleAll[Plugin](newAuth, newLog, newMetrics))
+// plugins: []Plugin{AuthPlugin{}, LogPlugin{}, MetricsPlugin{}}
+```
+
+Recipes can also produce different concrete types that all satisfy `T` via interface assignability — common when each plugin is its own struct:
+
+```go
+func newAuthImpl()    *AuthPlugin    { return &AuthPlugin{} }
+func newLogImpl()     *LogPlugin     { return &LogPlugin{} }
+func newMetricsImpl() *MetricsPlugin { return &MetricsPlugin{} }
+
+plugins := q.Unwrap(q.AssembleAll[Plugin](newAuthImpl, newLogImpl, newMetricsImpl))
+```
+
+Transitive deps still flow through the same auto-derived graph. Two providers each taking a `*Config`:
+
+```go
+func newConfig() *Config       { return &Config{Region: "eu-west-1"} }
+func newAuth(c *Config) Plugin { return AuthPlugin{cfg: c} }
+func newLog(c *Config) Plugin  { return LogPlugin{cfg: c} }
+
+plugins := q.Unwrap(q.AssembleAll[Plugin](newConfig, newAuth, newLog))
+```
+
+The topo sort produces `*Config` exactly once; both plugin recipes share that single instance.
+
+**Differences from `q.Assemble`:**
+
+- Multiple recipes producing `T` is the success case. `q.Assemble` rejects this; `q.AssembleAll` collects them.
+- Zero recipes assignable to `T` is still an error (would silently return an empty slice, almost certainly a mistake).
+- Duplicate-provider detection still applies for *non-target* types. If two recipes both produce a `*Config` that another recipe consumes as a dep, that's still ambiguous and rejected.
+- The IIFE returns `([]T, error)` instead of `(T, error)`. Compose with `q.Try` / `q.Unwrap` / `q.TryE` / `q.UnwrapE` exactly as with `q.Assemble`.
+
 ## What's coming
 
-Phase 1 (this page) ships the full single-call DI surface. Future phases:
+Phase 1 ships the full single-call DI surface plus `q.AssembleAll` for multi-provider aggregation. Future phases:
 
-- **Phase 2 — selection & multi-output.** `q.AssembleAll[T]` (multiple legitimate providers of `T` → `[]T`) for plugin-style aggregations; struct-target multi-output (`q.Assemble[App]` populating each field of `App` from a matching recipe).
+- **Phase 2b — struct-target multi-output.** `q.Assemble[App]` populates each field of `App` from a matching recipe.
 - **Phase 3 — resource lifetime.** `(T, func(), error)`-returning recipes for resources that need cleanup; defer-LIFO teardown integrates with `q.Open`'s escape detection.
 - **Phase 4 — parallel construction.** `q.WithAssemblyPar(ctx, n)` rides on the ctx like `q.WithAssemblyDebug`; the rewriter emits topo waves with a `sync.WaitGroup` per wave.
 

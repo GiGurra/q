@@ -298,6 +298,11 @@ func main() {
 // per-step trace output for diagnosing wiring.
 ctx := q.WithAssemblyDebug(context.Background())
 server := q.Unwrap(q.Assemble[*Server](ctx, newConfig, newDB, newServer))
+
+// q.AssembleAll[T] for plugin / handler / middleware aggregation —
+// every recipe whose output is assignable to T contributes one slice
+// element, in declaration order.
+plugins := q.Unwrap(q.AssembleAll[Plugin](newAuthPlugin, newLogPlugin, newMetricsPlugin))
 ```
 
 When a recipe is missing or duplicated or the graph cycles, the build fails with a tree visualisation of what the resolver sees. See [`docs/api/assemble.md`](docs/api/assemble.md).

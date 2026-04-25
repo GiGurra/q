@@ -89,16 +89,20 @@ type assembleRecipeInfo struct {
 	valid             bool
 }
 
-// isAssembleFamily reports whether sc's family is the q.Assemble
-// entry. Used by the typecheck dispatcher to pick resolveAssemble.
+// isAssembleFamily reports whether sc's family is one of the
+// q.Assemble entries (q.Assemble or q.AssembleAll). Used by the
+// typecheck dispatcher to pick resolveAssemble.
 func isAssembleFamily(f family) bool {
-	return f == familyAssemble
+	return f == familyAssemble || f == familyAssembleAll
 }
 
 // assembleFamilyLabel is the user-facing helper name for diagnostics.
 func assembleFamilyLabel(f family) string {
-	if f == familyAssemble {
+	switch f {
+	case familyAssemble:
 		return "q.Assemble"
+	case familyAssembleAll:
+		return "q.AssembleAll"
 	}
 	return "q.Assemble<?>"
 }
@@ -220,6 +224,13 @@ func resolveAssemble(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPat
 	}
 	sort.Strings(dupKeys)
 	for _, key := range dupKeys {
+		// For q.AssembleAll, multiple recipes producing the target
+		// type T is the success case (each contributes one element to
+		// the result []T). Other duplicate keys (deps shared between
+		// recipes) are still ambiguous and reported.
+		if sc.Family == familyAssembleAll && key == sc.AssembleTargetKey {
+			continue
+		}
 		ridxs := providersByKey[key]
 		var labels []string
 		for _, ridx := range ridxs {
@@ -266,20 +277,48 @@ func resolveAssemble(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPat
 		}
 	}
 
-	// Resolve target T's provider.
-	targetRes := resolveInput(targetType, sc.AssembleTargetKey)
-	if !targetRes.ok && len(targetRes.ambiguous) == 0 {
-		addProblem("target type %s is not produced by any recipe", sc.AssembleTargetTypeText)
-	} else if len(targetRes.ambiguous) > 0 {
-		var labels []string
-		for _, ridx := range targetRes.ambiguous {
-			r := recipes[ridx]
-			labels = append(labels, fmt.Sprintf("%s → %s", recipeLabel(fset, r), typeText(r.output)))
+	// Resolve target T's provider(s).
+	//
+	// q.Assemble:    target T must have exactly one provider (exact
+	//                type, q.Tagged brand, or single interface match).
+	//                Zero or multiple providers → diagnostic.
+	//
+	// q.AssembleAll: target T can have any number of providers — every
+	//                recipe whose output is assignable to T contributes
+	//                one element to the result []T. Zero providers is
+	//                still an error (the call would always return an
+	//                empty slice with no useful work).
+	if sc.Family == familyAssembleAll {
+		var providerRidxs []int
+		for ridx, r := range recipes {
+			if !r.valid {
+				continue
+			}
+			if types.AssignableTo(r.output, targetType) {
+				providerRidxs = append(providerRidxs, ridx)
+			}
 		}
-		addProblem("target interface %s is satisfied by multiple providers: %s — narrow the recipe set or use q.Tagged to disambiguate",
-			sc.AssembleTargetTypeText, strings.Join(labels, ", "))
+		if len(providerRidxs) == 0 {
+			addProblem("target type %s has no providers — q.AssembleAll[T] needs at least one recipe whose output is assignable to T",
+				sc.AssembleTargetTypeText)
+		} else {
+			sc.AssembleAllProviderRidxs = providerRidxs
+		}
 	} else {
-		sc.AssembleTargetKey = targetRes.resolvedKey
+		targetRes := resolveInput(targetType, sc.AssembleTargetKey)
+		if !targetRes.ok && len(targetRes.ambiguous) == 0 {
+			addProblem("target type %s is not produced by any recipe", sc.AssembleTargetTypeText)
+		} else if len(targetRes.ambiguous) > 0 {
+			var labels []string
+			for _, ridx := range targetRes.ambiguous {
+				r := recipes[ridx]
+				labels = append(labels, fmt.Sprintf("%s → %s", recipeLabel(fset, r), typeText(r.output)))
+			}
+			addProblem("target interface %s is satisfied by multiple providers: %s — narrow the recipe set or use q.Tagged to disambiguate",
+				sc.AssembleTargetTypeText, strings.Join(labels, ", "))
+		} else {
+			sc.AssembleTargetKey = targetRes.resolvedKey
+		}
 	}
 
 	// Resolve every valid recipe's inputs.
@@ -450,20 +489,37 @@ func resolveAssemble(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPat
 	}
 
 	needed := map[int]bool{}
-	if _, ok := providerOf[sc.AssembleTargetKey]; ok {
-		var visit func(string)
-		visit = func(key string) {
-			ridx, ok := providerOf[key]
-			if !ok || needed[ridx] {
-				return
+	var visit func(string)
+	visit = func(key string) {
+		ridx, ok := providerOf[key]
+		if !ok || needed[ridx] {
+			return
+		}
+		needed[ridx] = true
+		for _, rk := range recipes[ridx].resolvedInputKeys {
+			if rk != "" {
+				visit(rk)
 			}
-			needed[ridx] = true
-			for _, rk := range recipes[ridx].resolvedInputKeys {
+		}
+	}
+	if sc.Family == familyAssembleAll {
+		// Visit each provider recipe directly by ridx so multiple
+		// recipes sharing an outputKey (interface case) all get
+		// marked needed. Their transitive deps go through visit-by-
+		// key, which is unambiguous because the dup check still
+		// applies to non-target keys.
+		for _, pridx := range sc.AssembleAllProviderRidxs {
+			if needed[pridx] {
+				continue
+			}
+			needed[pridx] = true
+			for _, rk := range recipes[pridx].resolvedInputKeys {
 				if rk != "" {
 					visit(rk)
 				}
 			}
 		}
+	} else if _, ok := providerOf[sc.AssembleTargetKey]; ok {
 		visit(sc.AssembleTargetKey)
 	}
 	if len(problems) == 0 {
@@ -482,7 +538,7 @@ func resolveAssemble(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPat
 		}
 		if len(unused) > 0 {
 			sort.Strings(unused)
-			tree := renderAssembleTree(sc.AssembleTargetKey, recipes, providerOf, typeText, fset)
+			tree := renderAssembleTreeForCall(sc, recipes, providerOf, typeText, fset)
 			addProblem("unused recipe(s): %s\nThe target type %s requires:\n%s",
 				strings.Join(unused, "; "), sc.AssembleTargetTypeText, tree)
 		}
@@ -502,7 +558,7 @@ func resolveAssemble(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPat
 			fmt.Fprintf(&msg, "\n  - %s", p)
 		}
 		if showTree {
-			tree := renderAssembleTree(sc.AssembleTargetKey, recipes, providerOf, typeText, fset)
+			tree := renderAssembleTreeForCall(sc, recipes, providerOf, typeText, fset)
 			fmt.Fprintf(&msg, "\nWhat the resolver sees:\n%s", tree)
 			fmt.Fprintf(&msg, "\nProviders supplied: %s", listProviders(recipes, typeText, fset))
 		}
@@ -665,6 +721,28 @@ func renderAssembleTree(targetKey string, recipes []assembleRecipeInfo, provider
 	return strings.TrimRight(b.String(), "\n")
 }
 
+// renderAssembleTreeForCall renders the dep tree(s) appropriate for
+// the call's family. q.Assemble has a single root (T's provider);
+// q.AssembleAll has one root per target provider — each rendered as
+// its own sub-tree so the user can see how each contributing element
+// is built.
+func renderAssembleTreeForCall(sc *qSubCall, recipes []assembleRecipeInfo, providerOf map[string]int, typeText func(types.Type) string, fset *token.FileSet) string {
+	if sc.Family != familyAssembleAll {
+		return renderAssembleTree(sc.AssembleTargetKey, recipes, providerOf, typeText, fset)
+	}
+	if len(sc.AssembleAllProviderRidxs) == 0 {
+		return "- target ?? (no recipe provides T or anything assignable to T)"
+	}
+	var b bytes.Buffer
+	for i, pridx := range sc.AssembleAllProviderRidxs {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(renderAssembleTree(recipes[pridx].outputKey, recipes, providerOf, typeText, fset))
+	}
+	return b.String()
+}
+
 // listProviders returns a one-line summary of every valid provider
 // for the diagnostic Providers-supplied line.
 func listProviders(recipes []assembleRecipeInfo, typeText func(types.Type) string, fset *token.FileSet) string {
@@ -711,15 +789,14 @@ func typeKey(t types.Type) string {
 	})
 }
 
-// buildAssembleReplacement emits the (T, error)-returning IIFE for
-// q.Assemble and q.AssembleCtx. Returns (text, fmtUsed) — fmtUsed
-// is true when the body emits any fmt.Errorf call (currently from
-// the runtime nil-check).
+// buildAssembleReplacement emits the IIFE for q.Assemble or
+// q.AssembleAll. Returns (text, fmtUsed) — fmtUsed is true when the
+// body emits any fmt.Errorf call (currently from the runtime nil-
+// check).
 //
-// Shape:
+// q.Assemble shape — IIFE returns (T, error):
 //
 //	(func() (T, error) {
-//	    _qDep0 := <ctx-text>                           // only for q.AssembleCtx
 //	    _qDep1, _qAErr1 := newConfig()
 //	    if _qAErr1 != nil { return *new(T), _qAErr1 }
 //	    if _qDep1 == nil { return *new(T), fmt.Errorf("...: %w", q.ErrNil) }
@@ -728,13 +805,28 @@ func typeKey(t types.Type) string {
 //	    return _qDep2, nil
 //	}())
 //
-// For q.AssembleCtx with debug enabled (q.WithAssemblyDebug on the
-// ctx), each step prints a trace line to the registered writer
+// q.AssembleAll shape — IIFE returns ([]T, error); each step builds
+// the same way; the final return collects every target provider's
+// _qDep<N> into a []T literal in recipe declaration order:
+//
+//	(func() ([]T, error) {
+//	    _qDep0 := newAuth()
+//	    _qDep1 := newLogging()
+//	    _qDep2 := newMetrics()
+//	    return []T{_qDep0, _qDep1, _qDep2}, nil
+//	}())
+//
+// When debug tracing is enabled via q.WithAssemblyDebug on a ctx
+// recipe, each step prints a trace line to the registered writer
 // before invoking the recipe.
 func buildAssembleReplacement(fset *token.FileSet, src []byte, sub qSubCall, subs []qSubCall, subTexts []string, alias string) (string, bool) {
-	t := assembleTargetText(sub)
-	body, fmtUsed := buildAssembleBody(fset, src, sub, subs, subTexts, t, alias)
-	return fmt.Sprintf("(func() (%s, error) {%s\n}())", t, body), fmtUsed
+	elemText := assembleTargetText(sub)
+	returnText := elemText
+	if sub.Family == familyAssembleAll {
+		returnText = "[]" + elemText
+	}
+	body, fmtUsed := buildAssembleBody(fset, src, sub, subs, subTexts, returnText, alias)
+	return fmt.Sprintf("(func() (%s, error) {%s\n}())", returnText, body), fmtUsed
 }
 
 // assembleTargetText returns the spelling of the target type T, with
@@ -769,6 +861,7 @@ func assembleTargetText(sub qSubCall) string {
 func buildAssembleBody(fset *token.FileSet, src []byte, sub qSubCall, subs []qSubCall, subTexts []string, targetText, alias string) (string, bool) {
 	var b bytes.Buffer
 	depVar := map[string]string{}
+	depByRecipe := map[int]string{}
 	familyName := assembleFamilyLabel(sub.Family)
 	fmtUsed := false
 
@@ -798,6 +891,7 @@ func buildAssembleBody(fset *token.FileSet, src []byte, sub qSubCall, subs []qSu
 
 		dep := fmt.Sprintf("_qDep%d", n)
 		depVar[step.OutputKey] = dep
+		depByRecipe[step.RecipeIdx] = dep
 
 		// Optional pre-call trace prelude — fires when this assembly
 		// has a ctx provider AND it bound _qDbg in an earlier step.
@@ -840,6 +934,17 @@ func buildAssembleBody(fset *token.FileSet, src []byte, sub qSubCall, subs []qSu
 				dep, targetText, msg, ": %w", alias)
 			fmtUsed = true
 		}
+	}
+
+	if sub.Family == familyAssembleAll {
+		parts := make([]string, 0, len(sub.AssembleAllProviderRidxs))
+		for _, ridx := range sub.AssembleAllProviderRidxs {
+			if dep, ok := depByRecipe[ridx]; ok {
+				parts = append(parts, dep)
+			}
+		}
+		fmt.Fprintf(&b, "\n\treturn %s{%s}, nil", targetText, strings.Join(parts, ", "))
+		return b.String(), fmtUsed
 	}
 
 	targetDep, ok := depVar[sub.AssembleTargetKey]

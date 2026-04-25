@@ -126,7 +126,8 @@ const (
 	familyAtCompileTime     // q.AtCompileTime(func() R { ... }, codec...) — comptime evaluation
 	familyAtCompileTimeCode // q.AtCompileTimeCode[R](func() string { ... }) — comptime code generation
 	familyGenerator         // q.Generator[T](func() { ... q.Yield(v) ... }) — iter.Seq[T] sugar
-	familyAssemble // q.Assemble[T](recipes...) (T, error) — auto-derived DI
+	familyAssemble    // q.Assemble[T](recipes...) (T, error) — auto-derived DI
+	familyAssembleAll // q.AssembleAll[T](recipes...) ([]T, error) — multi-provider aggregation
 )
 
 // form is the syntactic position of a recognised q.* call:
@@ -357,6 +358,16 @@ type qSubCall struct {
 	// no recipe provides context.Context — debug is silently
 	// disabled in that case.
 	AssembleCtxDepKey string
+
+	// AssembleAllProviderRidxs is the recipe-index list of every
+	// recipe whose output is assignable to T, in recipe declaration
+	// order. Populated by resolveAssemble for familyAssembleAll only;
+	// nil for familyAssemble. Multiple recipes producing the same
+	// type all contribute (each becomes a distinct slice element).
+	// The rewriter looks each ridx up in the per-step
+	// RecipeIdx -> _qDep<N> map to emit the final
+	// `[]T{_qDep<i>, _qDep<j>, ...}` literal.
+	AssembleAllProviderRidxs []int
 }
 
 // matchCase is one arm of a q.Match expression — either a
@@ -1563,6 +1574,21 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 		}
 		return qSubCall{
 			Family:          familyAssemble,
+			AsType:          typeArg,
+			AssembleRecipes: append([]ast.Expr(nil), call.Args...),
+			OuterCall:       expr,
+		}, true, nil
+	}
+	// q.AssembleAll[T](recipes...) — multi-provider aggregation.
+	// Same scan shape as q.Assemble; the typecheck pass branches on
+	// family to allow multiple providers of T (rather than rejecting
+	// duplicates) and the rewriter emits a []T literal as the result.
+	if typeArg, ok := isIndexedSelector(call.Fun, alias, "AssembleAll"); ok {
+		if len(call.Args) == 0 {
+			return qSubCall{}, false, fmt.Errorf("q.AssembleAll[T] requires at least one recipe argument")
+		}
+		return qSubCall{
+			Family:          familyAssembleAll,
 			AsType:          typeArg,
 			AssembleRecipes: append([]ast.Expr(nil), call.Args...),
 			OuterCall:       expr,

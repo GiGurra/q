@@ -1,0 +1,2 @@
+count: 2
+plugins: [auth@eu-west-1 log@eu-west-1]

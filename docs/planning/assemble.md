@@ -1,22 +1,23 @@
-# q.Assemble — phase 2+ plan (resume point after context clear)
+# q.Assemble — phase 2b+ plan (resume point after context clear)
 
-This document is the resume-point for the remaining `q.Assemble` work. Phase 1 (single-entry auto-derived DI with full diagnostics, ctx-as-inline-value, runtime nil detection, debug tracing, and q.Unwrap helpers) has shipped. Read these first; phase 2/3/4 build on top.
+This document is the resume-point for the remaining `q.Assemble` work. Phase 1 (single-entry auto-derived DI with full diagnostics, ctx-as-inline-value, runtime nil detection, debug tracing, q.Unwrap helpers) and Phase 2a (`q.AssembleAll[T]` for multi-provider aggregation) have shipped. Read these first; phase 2b/3/4 build on top.
 
 A cold-state reader can pick up from this doc plus the references below.
 
 ## Where things live
 
 - **API doc:** [`docs/api/assemble.md`](../api/assemble.md) — current public surface, full happy/sad-path coverage, every diagnostic shape with examples.
-- **Stubs:** [`pkg/q/assemble.go`](../../pkg/q/assemble.go) — `Assemble[T](recipes ...any) (T, error)`, `WithAssemblyDebug`, `WithAssemblyDebugWriter`, `AssemblyDebugWriter`. `q.Unwrap` and `q.UnwrapE` live in [`pkg/q/q.go`](../../pkg/q/q.go) (plain runtime; not rewritten).
+- **Stubs:** [`pkg/q/assemble.go`](../../pkg/q/assemble.go) — `Assemble[T](recipes ...any) (T, error)`, `AssembleAll[T](recipes ...any) ([]T, error)`, `WithAssemblyDebug`, `WithAssemblyDebugWriter`, `AssemblyDebugWriter`. `q.Unwrap` and `q.UnwrapE` live in [`pkg/q/q.go`](../../pkg/q/q.go) (plain runtime; not rewritten).
 - **Implementation:** [`internal/preprocessor/assemble.go`](../../internal/preprocessor/assemble.go) — `resolveAssemble` (typecheck), `buildAssembleReplacement` + `buildAssembleBody` (rewriter). New phases hook in here.
 - **Scanner:** [`internal/preprocessor/scanner.go`](../../internal/preprocessor/scanner.go) — `familyAssemble`, `qSubCall.AssembleRecipes`, `qSubCall.AssembleCtxDepKey` (set at resolve time when a recipe provides `context.Context`).
 - **Tests:**
   - **Unit tests:** [`internal/preprocessor/assemble_unit_test.go`](../../internal/preprocessor/assemble_unit_test.go) — sub-millisecond per case, table-driven against the resolver. **Add new diagnostic cases here first; e2e fixture follows.**
   - **E2E fixtures:** `internal/preprocessor/testdata/cases/assemble_*` — full toolexec build cycle, ~0.5s each. The integration guarantee.
 
-## What phase 1 already ships
+## What's already shipped
 
 - Single entry: `q.Assemble[T](recipes ...any) (T, error)` — composes with `q.Try` / `q.TryE` / `q.Unwrap` / `q.UnwrapE` at the call site.
+- Multi-provider entry: `q.AssembleAll[T](recipes ...any) ([]T, error)` — collects every recipe whose output is assignable to `T`, in declaration order. Phase 2a.
 - Function-reference and inline-value recipes; method values; pkg-qualified funcs.
 - All return shapes (T / *T / Ifc + their (T, error) variants).
 - Interface inputs satisfied by concrete providers via `types.AssignableTo`. Exact-type wins first (q.Tagged keeps precise routing).
@@ -24,40 +25,13 @@ A cold-state reader can pick up from this doc plus the references below.
 - Runtime nil-check on every nilable output (pointer/interface/slice/map/chan/func) — bubbles `fmt.Errorf("...: %w", q.ErrNil)` so callers can `errors.Is(err, q.ErrNil)`. Catches the typed-nil-interface pitfall before downstream consumers see it.
 - Debug tracing via `q.WithAssemblyDebug` (writer defaults to `q.DebugWriter`) or `q.WithAssemblyDebugWriter(w)`. Per-recipe trace lines emitted to the writer.
 - Comprehensive diagnostics — every problem in one pass with dep-tree visualisation: missing dep, unsatisfiable target, duplicate provider, interface ambiguity, dependency cycle (with traced edges), unused recipe, recipe-shape errors (no return / too many / non-error second / variadic).
-- 21 e2e fixtures + 14 unit tests (table-driven).
 
 ZIO features intentionally NOT carried over:
 - **Composition operators (`++`, `>>>`, `>+>`)** — don't fit Go syntax. Recipes are listed at the call site; group via `[]any{...}` + variadic spread when needed.
 - **Service pattern (`ZIO.service[DB]`)** — needs ZIO's monadic env. Replaced by named function inputs.
 - **Failures vs defects** — Go has one error.
 
-## Phase 2 — selection & multi-output
-
-Two independent additions to the existing graph machinery.
-
-### 2a. `q.AssembleAll[T]` — multiple legitimate providers
-
-Plugin / handler / middleware aggregation. When several recipes legitimately produce the same type, `q.Assemble` rejects with "duplicate provider for T". `q.AssembleAll[T]` opts into the multi-provider shape and returns `([]T, error)`.
-
-```go
-type Plugin interface{ Name() string }
-
-func newAuthPlugin()    Plugin { return &authPlugin{} }
-func newLoggingPlugin() Plugin { return &loggingPlugin{} }
-func newMetricsPlugin() Plugin { return &metricsPlugin{} }
-
-plugins, err := q.AssembleAll[Plugin](newAuthPlugin, newLoggingPlugin, newMetricsPlugin)
-```
-
-**Implementation hooks:**
-
-- New stub `AssembleAll[T any](recipes ...any) ([]T, error)` in `pkg/q/assemble.go`.
-- New family entry `familyAssembleAll` in scanner; same recipe-arg capture path as `familyAssemble`.
-- `resolveAssemble` branches on the family: for AssembleAll, replace the duplicate-provider check with "collect all providers of T" into a `[]int` of recipe indices. T's own dep tree includes every collected provider transitively.
-- `buildAssembleReplacement` emits a `[]T{_qDep<i>, _qDep<j>, ...}` literal as the IIFE's return value. Each producer's other deps are still constructed and topo-ordered normally.
-- Errored recipes still bubble; nilable outputs still get the nil-check.
-
-### 2b. Struct-target multi-output
+## Phase 2b — struct-target multi-output
 
 When the user wants several products from one assembly. Detect that T is a struct type and populate each field from a matching recipe.
 
@@ -78,15 +52,13 @@ app, err := q.Assemble[App](newConfig, newDB, newServer, newWorker, newStats)
 - Tagged fields (`Server q.Tagged[*Server, _primary]`) work the same way phase 1's tagged services do — the field's type IS the brand.
 - Be careful: a struct returned from a recipe (recipe whose output IS the target struct type) takes precedence over field-by-field decomposition. Detection rule: if `providersByKey[targetKey]` has a provider, use it directly (single-recipe path); otherwise decompose into fields.
 
-### Phase 2 deliverables
+### Phase 2b deliverables
 
-1. `pkg/q/assemble.go`: `AssembleAll[T any](recipes ...any) ([]T, error)` stub.
-2. Scanner: `familyAssembleAll` + dispatch.
-3. `resolveAssemble`: branch on family; struct-target detection.
-4. `buildAssembleReplacement` / `buildAssembleBody`: `[]T` literal + struct literal emit.
-5. **Unit tests** in `assemble_unit_test.go` — add cases for AssembleAll-with-2-plugins, struct-target-happy-path, struct-target-missing-field. Iterate against these (sub-ms each).
-6. E2E fixtures: `assemble_all_run_ok`, `assemble_all_typed_run_ok`, `assemble_struct_target_run_ok`, `assemble_struct_target_missing_field_rejected`.
-7. Extend `docs/api/assemble.md` with Phase 2 sections.
+1. `resolveAssemble`: detect when target type's underlying is `*types.Struct`; iterate fields and treat each field's type as a required dep target. Single-recipe path (when a provider produces the target struct directly) takes precedence.
+2. `buildAssembleReplacement` / `buildAssembleBody`: emit a struct literal `App{Field: _qDep<i>, ...}`.
+3. Unit tests in `assemble_unit_test.go`: struct-target-happy-path, struct-target-missing-field, struct-target-tagged-fields, struct-target-recipe-takes-precedence.
+4. E2E fixtures: `assemble_struct_target_run_ok`, `assemble_struct_target_missing_field_rejected`.
+5. Extend `docs/api/assemble.md` with the struct-target section.
 
 ## Phase 3 — resource lifetime
 
@@ -203,10 +175,9 @@ When `_qDbgPar == 0` (no `WithAssemblyPar` on ctx), skip the goroutine machinery
 
 ## Recommended phase order
 
-1. **Phase 2a (`q.AssembleAll`)** first — biggest user-visible win for plugin/handler systems.
-2. **Phase 2b (struct-target)** — composes well with 2a.
-3. **Phase 3 (resource lifetime)** — biggest impact for long-running services.
-4. **Phase 4 (parallel)** — last because it's the largest emit-side change and benefits from the other phases' fixtures shaking out edge cases.
+1. **Phase 2b (struct-target)** — composes well with the existing single-target and AssembleAll machinery; small lift relative to the others.
+2. **Phase 3 (resource lifetime)** — biggest impact for long-running services.
+3. **Phase 4 (parallel)** — last because it's the largest emit-side change and benefits from the other phases' fixtures shaking out edge cases.
 
 Each phase is independent; the order is a recommendation based on payoff vs implementation cost.
 
@@ -214,6 +185,6 @@ Each phase is independent; the order is a recommendation based on payoff vs impl
 
 1. Read `docs/api/assemble.md` end-to-end (the public surface).
 2. Skim `internal/preprocessor/assemble.go` — main entry points are `resolveAssemble`, `buildAssembleReplacement`, `buildAssembleBody`.
-3. Run `go test ./internal/preprocessor/ -run 'TestUnit'` — ~1s, all green. Read the table-driven tests to see how the resolver is exercised in-process.
-4. Run `go test ./internal/preprocessor/ -run 'TestFixtures/assemble' -v` — ~30s with parallelism, 21 e2e fixtures pass.
+3. Run `go test ./internal/preprocessor/ -run 'TestUnit'` — all green in ~1-2s. Read the table-driven tests to see how the resolver is exercised in-process.
+4. Run `go test ./internal/preprocessor/ -run 'TestFixtures/assemble' -v` — full toolexec build cycle for every e2e fixture.
 5. Pick the next phase from "Recommended phase order"; read its section in this doc; implement against the unit harness first; then add e2e fixtures.

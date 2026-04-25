@@ -1,0 +1,2 @@
+plugin count: 3
+plugins: [auth log metrics]

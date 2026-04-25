@@ -494,6 +494,143 @@ func main() {
 	}
 }
 
+// TestUnitAssembleAllHappyPath exercises q.AssembleAll[T] with three
+// distinct concrete plugins implementing a common interface. The
+// resolver must collect all three providers (rather than rejecting
+// the multi-provider case as q.Assemble would) and the topo-sorted
+// step list must include each provider exactly once.
+func TestUnitAssembleAllHappyPath(t *testing.T) {
+	src := `package main
+
+import "github.com/GiGurra/q/pkg/q"
+
+type Plugin interface{ Name() string }
+
+type authP struct{}
+type logP struct{}
+type metricsP struct{}
+
+func (authP) Name() string    { return "auth" }
+func (logP) Name() string     { return "log" }
+func (metricsP) Name() string { return "metrics" }
+
+func newAuth()    Plugin { return authP{} }
+func newLog()     Plugin { return logP{} }
+func newMetrics() Plugin { return metricsP{} }
+
+func main() {
+	_, _ = q.AssembleAll[Plugin](newAuth, newLog, newMetrics)
+}
+`
+	diags, shapes, err := analyzeAssembleSrc(t, src)
+	if err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+	requireNoDiags(t, diags)
+	if len(shapes) != 1 || len(shapes[0].Calls) != 1 {
+		t.Fatalf("expected one call shape; got %d shapes", len(shapes))
+	}
+	sc := shapes[0].Calls[0]
+	if sc.Family != familyAssembleAll {
+		t.Fatalf("expected familyAssembleAll; got %v", sc.Family)
+	}
+	if len(sc.AssembleAllProviderRidxs) != 3 {
+		t.Fatalf("expected 3 provider ridxs; got %d", len(sc.AssembleAllProviderRidxs))
+	}
+	if len(sc.AssembleSteps) != 3 {
+		t.Fatalf("expected 3 topo-sorted steps; got %d", len(sc.AssembleSteps))
+	}
+}
+
+// TestUnitAssembleAllConcreteSameType — multiple recipes producing
+// the SAME concrete target type is the natural multi-element case
+// for AssembleAll: each recipe contributes one element to the
+// resulting slice. (Contrast with q.Assemble[*Cfg] where this is
+// rejected as an ambiguous duplicate-provider situation.)
+func TestUnitAssembleAllConcreteSameType(t *testing.T) {
+	src := `package main
+import "github.com/GiGurra/q/pkg/q"
+type Cfg struct{}
+func newA() *Cfg { return nil }
+func newB() *Cfg { return nil }
+func main() { _, _ = q.AssembleAll[*Cfg](newA, newB) }
+`
+	diags, shapes, err := analyzeAssembleSrc(t, src)
+	if err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+	requireNoDiags(t, diags)
+	sc := shapes[0].Calls[0]
+	if len(sc.AssembleAllProviderRidxs) != 2 {
+		t.Fatalf("expected 2 provider ridxs; got %d", len(sc.AssembleAllProviderRidxs))
+	}
+	if len(sc.AssembleSteps) != 2 {
+		t.Fatalf("expected 2 topo-sorted steps; got %d", len(sc.AssembleSteps))
+	}
+}
+
+// TestUnitAssembleAllNoProviders — calling AssembleAll[T] with no
+// recipe whose output is assignable to T must error. (The would-be
+// success path produces an empty []T which is almost certainly a
+// mistake, so we surface it.)
+func TestUnitAssembleAllNoProviders(t *testing.T) {
+	src := `package main
+import "github.com/GiGurra/q/pkg/q"
+type Plugin interface{ Name() string }
+type Cfg struct{}
+func newCfg() *Cfg { return nil }
+func main() { _, _ = q.AssembleAll[Plugin](newCfg) }
+`
+	diags, _, err := analyzeAssembleSrc(t, src)
+	if err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+	requireDiagContains(t, diags,
+		"target type Plugin has no providers",
+		"q.AssembleAll[T] needs at least one recipe whose output is assignable to T",
+	)
+}
+
+// TestUnitAssembleAllWithDeps — AssembleAll[T] still pulls in
+// transitive deps for each provider. Two providers, both depending
+// on a shared *Cfg recipe; the topo sort must produce the *Cfg step
+// exactly once and each provider step references it.
+func TestUnitAssembleAllWithDeps(t *testing.T) {
+	src := `package main
+
+import "github.com/GiGurra/q/pkg/q"
+
+type Plugin interface{ Name() string }
+type Cfg struct{}
+
+type authP struct{ cfg *Cfg }
+type logP struct{ cfg *Cfg }
+
+func (authP) Name() string { return "auth" }
+func (logP) Name() string  { return "log" }
+
+func newCfg() *Cfg                { return &Cfg{} }
+func newAuth(c *Cfg) Plugin       { return authP{cfg: c} }
+func newLog(c *Cfg) Plugin        { return logP{cfg: c} }
+
+func main() {
+	_, _ = q.AssembleAll[Plugin](newCfg, newAuth, newLog)
+}
+`
+	diags, shapes, err := analyzeAssembleSrc(t, src)
+	if err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+	requireNoDiags(t, diags)
+	sc := shapes[0].Calls[0]
+	if len(sc.AssembleSteps) != 3 {
+		t.Fatalf("expected 3 steps (cfg + 2 plugins); got %d", len(sc.AssembleSteps))
+	}
+	if sc.AssembleSteps[0].RecipeIdx != 0 {
+		t.Errorf("expected newCfg first in topo order; got recipe idx %d", sc.AssembleSteps[0].RecipeIdx)
+	}
+}
+
 // TestUnitAssembleHappyPath exercises the simplest valid call to make
 // sure the unit harness reaches resolveAssemble without errors.
 func TestUnitAssembleHappyPath(t *testing.T) {

@@ -65,11 +65,29 @@ The persistent backlog for `q`. A cold-state reader can pick up here without re-
 
   Big lift: needs flow analysis (or a heavy hand: rewrite every reference into shim-method calls), needs to interop with raw resource access (sometimes you do want the underlying `*Conn`), and adds a real per-call atomic. Probably not worth it for the 90% case (functions that own their own resources) — defer until profiles or user reports show resource ownership crosses function boundaries often enough that the existing diagnostics become annoying.
 
-- **#84 — `q.Assemble` follow-on phases.** Phase 1 shipped — single `q.Assemble[T](recipes...) (T, error)` entry, ctx-as-inline-value, runtime nil-recipe detection, debug tracing via `q.WithAssemblyDebug`, full diagnostic matrix with dep-tree visualisation, plus `q.Unwrap` / `q.UnwrapE` runtime helpers for non-bubble call sites. See [`docs/api/assemble.md`](../api/assemble.md). Remaining work, full plan in [`docs/planning/assemble.md`](assemble.md):
-    - **Phase 2a — `q.AssembleAll[T]`.** Multiple legitimate providers of T → `([]T, error)` for plugin/handler/middleware aggregation.
+- **#84 — `q.Assemble` follow-on phases.** Phase 1 (single-entry auto-derived DI with full diagnostics, ctx-as-inline-value, runtime nil detection, debug tracing, q.Unwrap helpers) and Phase 2a (`q.AssembleAll[T]` for multi-provider aggregation) have shipped. See [`docs/api/assemble.md`](../api/assemble.md). Remaining work, full plan in [`docs/planning/assemble.md`](assemble.md):
     - **Phase 2b — struct-target multi-output.** `q.Assemble[App]` populates each field of `App` from a matching recipe.
     - **Phase 3 — resource lifetime.** `(T, func(), error)`-returning resource recipes; defer-LIFO teardown integrates with q.Open's escape detection.
     - **Phase 4 — parallel construction.** `q.WithAssemblyPar(ctx, n)` rides on the ctx like `q.WithAssemblyDebug`; rewriter emits topo waves with `sync.WaitGroup` per wave.
+
+- **#87 — Ctx-attached assembly cache.** `q.WithAssemblyCache(ctx)` (name TBD) attaches a `*sync.Map` keyed by typeKey; `q.Assemble` / `q.AssembleAll` consult it before building each dep. Two consecutive calls in the same ctx scope reuse `*Config`, `*DB`, etc. — useful in long-running services where the same dep set is rebuilt for each request handler.
+
+  **Open design questions.**
+
+  - **Lookup key.** typeKey alone (simplest, but two recipes producing the same type silently share) vs `(typeKey, taggedBrand)` from `q.Tagged` (precise, requires the brand to flow through the cache key).
+  - **Phase 3 collision.** A cached `*DB` carries a `func()` cleanup. Cleanup must fire ONCE, tied to ctx cancellation — not per-Assemble-call. Either the cache owns the cleanup (registered via `context.AfterFunc(ctx, cleanup)`) or resource recipes are excluded from caching and rebuilt every time.
+  - **Errors.** Re-attempt on each call, or cache the error? Default: no cache on error so transient failures don't get pinned.
+  - **Recipe-identity divergence.** If two `q.Assemble` call sites use different recipe functions but request the same `*Config` type, the second call gets the first's `*Config`. Spec it as "ctx is the cache scope; you own its membership" rather than trying to be clever.
+
+  **Mechanism sketch.** Rewriter detects `q.AssemblyCache(ctx) != nil` at IIFE entry (one ctx.Value lookup, like the debug-trace prelude). When non-nil, each step emits `if v, ok := _qCache.Load(typeKey); ok { _qDep<N> = v.(T) } else { _qDep<N> = recipe(...); _qCache.Store(typeKey, _qDep<N>) }`. When nil, sequential serial emit unchanged.
+
+- **#88 — `q.Unique` / `q.UniqueFn` (Scala-style stdlib wrappers).** Fits the q-wraps-stdlib pattern (`q.Map` / `q.Filter` / `q.Fold` / `q.Reduce`). Surface:
+  - `q.Unique[T comparable](xs []T) []T` — order-preserving dedup via `map[T]struct{}` set; mirrors what people reach for `slices.Compact + slices.Sort` for, but without the sort step changing element order.
+  - `q.UniqueFn[T any](xs []T, eq func(T, T) bool) []T` — for non-comparable T or custom equality.
+
+  **Why over stdlib:** `slices.Compact` / `slices.CompactFunc` only dedup *adjacent* equal elements (you must sort first, which mutates order). The Scala-flavored `xs.distinct` is order-preserving and is the more common need at call sites. q.Unique earns its keep when order matters.
+
+  Skip `q.UniqueFnErr` — error path on an equality predicate is unusual; if a user needs error-bubble inside the predicate they can wrap it themselves with `q.Try`.
 
 ### Coroutines
 
