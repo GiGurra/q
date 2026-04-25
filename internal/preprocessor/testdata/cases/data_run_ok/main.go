@@ -285,6 +285,33 @@ func main() {
 		}
 	}
 
+	// Zip / Unzip — round-trip + truncates to shorter length.
+	{
+		names := []string{"alice", "bob", "carol"}
+		ages := []int{30, 25, 28}
+		pairs := q.Zip(names, ages)
+		for _, p := range pairs {
+			fmt.Printf("Zip: %s/%d\n", p.First, p.Second)
+		}
+		// Truncates to shorter length.
+		short := q.Zip([]int{1, 2, 3}, []string{"a", "b"})
+		fmt.Println("Zip truncate len:", len(short))
+		// Round-trip via Unzip.
+		ns, as := q.Unzip(pairs)
+		fmt.Println("Unzip names:", ns)
+		fmt.Println("Unzip ages:", as)
+	}
+
+	// ZipMap.
+	{
+		m := q.ZipMap([]string{"a", "b", "c"}, []int{1, 2, 3})
+		ks := q.Keys(m)
+		sort.Strings(ks)
+		for _, k := range ks {
+			fmt.Printf("ZipMap[%s]=%d\n", k, m[k])
+		}
+	}
+
 	// Pipeline composition: chain bare ops
 	pipeline := q.Fold(
 		q.Filter(

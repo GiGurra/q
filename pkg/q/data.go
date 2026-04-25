@@ -207,6 +207,63 @@ func MapKeysErr[K1, K2 comparable, V any](m map[K1]V, fn func(K1) (K2, error)) (
 	return out, nil
 }
 
+// Pair carries two values. Used by q.Zip / q.Unzip and any callers
+// that want a tiny tuple-like value type. Field names follow Go's
+// stdlib (e.g. `database/sql.NullString.{Valid, String}`-ish — not
+// `Key/Value` because Pair isn't always a key/value pair).
+type Pair[A, B any] struct {
+	First  A
+	Second B
+}
+
+// Zip pairs the elements of as and bs in input order. The output
+// length is min(len(as), len(bs)) — extra elements of the longer
+// slice are dropped. Allocates a fresh slice.
+//
+//	pairs := q.Zip(names, ages)
+//	for _, p := range pairs {
+//	    fmt.Println(p.First, p.Second)
+//	}
+func Zip[A, B any](as []A, bs []B) []Pair[A, B] {
+	n := min(len(as), len(bs))
+	out := make([]Pair[A, B], n)
+	for i := range n {
+		out[i] = Pair[A, B]{First: as[i], Second: bs[i]}
+	}
+	return out
+}
+
+// Unzip splits a slice of pairs back into two parallel slices. The
+// inverse of q.Zip:
+//
+//	names, ages := q.Unzip(q.Zip(names, ages))  // round-trip
+func Unzip[A, B any](pairs []Pair[A, B]) ([]A, []B) {
+	if len(pairs) == 0 {
+		return nil, nil
+	}
+	as := make([]A, len(pairs))
+	bs := make([]B, len(pairs))
+	for i, p := range pairs {
+		as[i] = p.First
+		bs[i] = p.Second
+	}
+	return as, bs
+}
+
+// ZipMap pairs keys and values into a map. Output length is
+// min(len(keys), len(values)) — extras dropped. Collisions among
+// keys are last-write-wins.
+//
+//	byID := q.ZipMap(ids, names)
+func ZipMap[K comparable, V any](keys []K, values []V) map[K]V {
+	n := min(len(keys), len(values))
+	out := make(map[K]V, n)
+	for i := range n {
+		out[keys[i]] = values[i]
+	}
+	return out
+}
+
 // Keys returns a slice of m's keys in unspecified order. Thin
 // wrapper over `slices.Collect(maps.Keys(m))` — saves the import +
 // the two-step incantation at the call site.

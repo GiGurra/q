@@ -58,4 +58,13 @@ Values: [1 2 3]
 MapKeys upper[A]=1
 MapKeys upper[B]=2
 MapKeys upper[C]=3
+Zip: alice/30
+Zip: bob/25
+Zip: carol/28
+Zip truncate len: 2
+Unzip names: [alice bob carol]
+Unzip ages: [30 25 28]
+ZipMap[a]=1
+ZipMap[b]=2
+ZipMap[c]=3
 Pipeline: 50

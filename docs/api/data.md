@@ -43,6 +43,12 @@ func MapEntriesErr[K1, K2 comparable, V1, V2 any](m map[K1]V1, fn func(K1, V1) (
 func Keys[K comparable, V any](m map[K]V) []K     // slices.Collect(maps.Keys(m))
 func Values[K comparable, V any](m map[K]V) []V   // slices.Collect(maps.Values(m))
 
+// Zip / Unzip
+type Pair[A, B any] struct{ First A; Second B }
+func Zip[A, B any](as []A, bs []B) []Pair[A, B]            // truncates to min(len(as), len(bs))
+func Unzip[A, B any](pairs []Pair[A, B]) ([]A, []B)
+func ZipMap[K comparable, V any](keys []K, values []V) map[K]V
+
 // Predicate searches (short-circuiting)
 func Exists[T any](slice []T, pred func(T) bool) bool          // any
 func ExistsErr[T any](slice []T, pred func(T) (bool, error)) (bool, error)
