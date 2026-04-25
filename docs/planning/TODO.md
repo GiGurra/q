@@ -10,6 +10,8 @@ The persistent backlog for `q`. Mirrors the in-session task list so a fresh conv
 
 **Status update (2026-04-25):** #80 and #81 both shipped. Surface now covers the complete data-ops kit (sequential + parallel) without forcing users into a Either/Option monad. New backlog additions parked: `#82` (q.AtCompileTime — universal preprocessor-time evaluation escape hatch), `#83` (q.Open resource-escape detection + ARC for non-RAM resources), `#84` (q.Assemble[T] compile-time DI graph — ZIO ZLayer / google-wire shape), `#85` (coroutines — three tiers from iter.Seq sugar to stackless preprocessor-rewritten state machines).
 
+**Status update (2026-04-25, late):** Substantial run of small additions shipped this session: `#79` (Lax-default rule for q.Exhaustive / q.Match), `#85 tier 2` (q.Coro bidirectional coroutines), q.MapValues / q.MapKeys / q.MapEntries / q.Keys / q.Values (map ops), q.Pair / q.Zip / q.Unzip / q.ZipMap (zip family), q.Sort / q.SortBy / q.SortFunc / q.Min / q.Max / q.MinBy / q.MaxBy / q.Sum (sort + extrema). The data-ops surface is now genuinely complete. The next big feature on the roadmap is `#82` q.AtCompileTime — its full implementation plan lives at [atcompiletime.md](atcompiletime.md). **Read that document before starting #82 work.** Phase 1 (primitives + stdlib) is the entry point; Phases 2 (JSON pass-through + module access) and 3 (chained AtCompileTime + caching) follow.
+
 The big-picture trajectory: q is becoming a Scala-style compile-time macro toolkit for Go — every shipped helper folds at the AST level, runtime cost is zero, IDE sees ordinary Go. Each new feature reuses the typecheck pass + file-synthesis primitive established earlier.
 
 **Standing rule (bookkeeping).** When a task lands, move it to the "Done" section *in the same commit* with a one-line note about what shipped (and a commit ref if useful). When a new task is created, add it here *in the same commit* that creates the in-session task. The two views must not drift.
@@ -250,42 +252,35 @@ The features below all fit q's model: parse as valid Go, rewrite at compile time
 
   **Open question:** does running multiple toolexec passes on the same compile produce correct results, or does pass N+1 trip on temp paths from pass N? Likely fine since each pass writes its own tempdir and the final argv just lists them all, but worth a smoke test before going deeper.
 
-- [ ] **#82 — `q.AtCompileTime[R](fn func() R) R` (compile-time evaluation).** Earlier in q's design history this was excluded as too speculative; with the rest of the macro toolkit shipped (q.Match, q.Enum*, q.F, q.SQL, q.Fields, q.Tag, q.Gen*…) it now sits naturally next to them. Each call site folds at compile time to a literal carrying the result of evaluating fn. Pure runtime stub on the value path — body is `panicUnrewritten("q.AtCompileTime")` — the rewriter does the actual work.
+- [ ] **#82 — `q.AtCompileTime[R](fn func() R) R` (compile-time evaluation).** Run pure Go code at preprocessor time and splice the result as a value at the call site. Universal escape hatch: every other compile-time helper (q.F, q.Snake, q.SQL, q.Match resolution, etc.) is a special case of this.
 
-  **Surface (working draft):**
+  **The full implementation plan lives in [atcompiletime.md](atcompiletime.md)** — that document is the authoritative resume-point with:
+  - Surface API + restrictions
+  - Three-phase rollout (Phase 1: primitives + stdlib, Phase 2: JSON pass-through + module access, Phase 3: chained AtCompileTime + q.* in closures + caching)
+  - Implementation architecture per phase (which file gets what)
+  - $TMPDIR module setup mechanics
+  - JSON encoding details
+  - Edge cases and open questions
+  - Test fixture matrix per phase
+  - Cold-state resume checklist
 
-  ```go
-  // Evaluates fn at preprocessor time and splices the result as a Go
-  // literal at the call site.
-  func AtCompileTime[R any](fn func() R) R
-  ```
+  Read atcompiletime.md before starting any work on this. The summary below is intentionally lean.
 
-  Variant ideas — pick whichever earns its keep:
-  - `q.AtCompileTime(fn)` — no-arg func, returns R
-  - `q.AtCompileTimeF[R any](fnExpr string) R` — evaluate a Go expression literal as a string (more powerful but harder to type-check at the IDE level — probably skip, fights the "valid Go syntax" rule)
-  - `q.AtCompileTimeFor[T, R any](xs []T, fn func(T) R) []R` — fold-time map; might be cute but `q.Map` over a literal slice already constant-folds in the Go compiler if the fn is small
+  **Surface:** `func AtCompileTime[R any](fn func() R) R` — pure runtime stub, body panics if reached. The preprocessor rewrites every call site away.
 
-  **What "preprocessor time" means here.** The preprocessor would need to actually *execute* fn at toolexec time. Three escalating implementation paths:
+  **Phase summary** (full detail in [atcompiletime.md](atcompiletime.md)):
+  - **Phase 1** — primitives + stdlib only. Closure body uses stdlib + builtins, returns primitives (int/string/bool/float). $TMPDIR `go run` subprocess (no go.mod needed). Inline-literal splice at call site. Estimated 1-2 sessions.
+  - **Phase 2** — JSON pass-through + module access. Closure body can import the user's module. $TMPDIR with replace-directive go.mod. Complex R encoded as JSON; rewriter generates `init()` + `var` synthesis. Estimated 2-3 sessions.
+  - **Phase 3** — chained AtCompileTime + q.* in closures + caching. Topo-sort for chained calls, subprocess `-toolexec=q` for q.* support, hash-based cache. Estimated 1-2 sessions.
 
-  1. **`go run` the closure in a hermetic sub-process.** Synthesize a tiny program that calls fn and prints its result via `fmt.Sprintf("%#v", v)`; capture stdout, splice as a literal at the call site. Pros: works for any pure-Go fn the user wrote; Go's own toolchain handles imports and types. Cons: spawns a subprocess per call site (slow); the synthesized program needs to import the user's module + dependencies (build cost); fn must be self-contained (no captures from the surrounding closure).
-  2. **Go-AST interpreter (constexpr-style).** Walk fn's body via `go/ast` + `go/types` and interpret a small whitelist of operations (arithmetic, string ops, slice/map literals, function calls into a stdlib whitelist). No subprocess; fast; restricted to "pure constexpr" fns. Inspired by Rust's `const fn` rules. Pros: fast, no IO; Cons: implementing the interpreter is a lift, scope creep risk.
-  3. **Hybrid:** start with stdlib-whitelist interpretation for cheap calls, fall back to `go run` subprocess for anything else. Diagnostic when the subprocess fails.
+  **Restrictions** (enforced at compile time, full list in atcompiletime.md):
+  - Argument MUST be a `*ast.FuncLit` literal (not a named-function reference / variable)
+  - No captures from enclosing scope (Phase 3 lifts: AtCompileTime results are allowed)
+  - R must be a primitive (Phase 1) / JSON-encodable (Phase 2+) / not a generic type parameter
+  - Closure body must be pure (no time / random / I/O of mutable state) — documented, not enforced
+  - No q.* in closure body (Phase 3 lifts)
 
-  Lean: **start with path 1 (`go run` subprocess)** and document the cost. Most call sites won't trip the slow path often, and it makes the feature genuinely powerful. Optimize via path 2 later if subprocess overhead bites.
-
-  **Constraints on fn (any path).**
-  - Must be a function literal (not a named function reference) so the rewriter can extract the body.
-  - No free-variable captures from the enclosing scope (the subprocess can't see them; the interpreter can't bind them).
-  - Result type R must be representable as a Go literal — primitives, arrays, slices, maps, structs, pointers (rejected), channels (rejected), funcs (rejected).
-  - Pure: no I/O, no time queries, no random — anything that returns different values across runs is a footgun in compile-time evaluation. (Hard to enforce without sandboxing the subprocess; document the rule and optionally enforce a `GOFLAGS=-trimpath` + restricted `GOENV` to make it deterministic.)
-
-  **Use cases that motivate it:**
-  - Precompute lookup tables: `var sinTable = q.AtCompileTime(buildSinTable)` — no init() goroutine, no first-call cost
-  - Encode build metadata: `var commit = q.AtCompileTime(func() string { return git.HeadHash() })` (assuming the fn shells out to git via os/exec, which the subprocess path supports)
-  - Inline expensive constants: `var maxFib = q.AtCompileTime(func() uint64 { return fib(45) })`
-  - Parse-and-validate static config: `var schema = q.AtCompileTime(parseSchemaFile)`
-
-  **Why parked vs. shipped.** It's the natural cap-stone of the macro toolkit — q.AtCompileTime is the universal escape hatch every other macro is a special case of (q.F is `q.AtCompileTime(buildFmtCall)`, q.Snake is `q.AtCompileTime(toSnake)`, etc.). But the implementation is genuinely involved (subprocess discipline, subprocess error handling, literal-printer for arbitrary R, cache key sensitivity). Park until the existing helpers settle; visit when somebody has a concrete use case the others don't cover.
+  **Why this matters.** It's the universal escape hatch every other compile-time helper is a special case of. Once it ships cleanly, future "I want a compile-time helper that does X" requests reduce to "wrap X in `q.AtCompileTime`."
 
 - [ ] **#83 — Resource-escape detection for `q.Open` (and longer-term ARC).** A `q.Open(...).Release(cleanup)` value is alive *only* until the enclosing function returns — the rewriter registers `defer cleanup(v)` at that scope. Letting the value escape that scope (returning it, handing it to a goroutine that outlives the function, storing it in a field) is a use-after-close in waiting. Detect at compile time and surface a diagnostic.
 

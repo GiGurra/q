@@ -15,6 +15,7 @@
 - [`README.md`](README.md) — user-facing API tour, install, smallest end-to-end example.
 - [`docs/design.md`](docs/design.md) — authoritative design: link-gate mechanism, the bubble-family entries (Try / NotNil / Check / Open and the later additions), the chain method semantics, and the rewriter's contract.
 - [`docs/planning/TODO.md`](docs/planning/TODO.md) — **persistent backlog. The resume-point for any new session.** Mirrors the in-session task list; updated in the same commit as task creation / completion. If picking up a fresh chat, scan this first.
+- [`docs/planning/atcompiletime.md`](docs/planning/atcompiletime.md) — **detailed implementation plan for q.AtCompileTime (TODO #82).** Three-phase rollout, $TMPDIR module setup, JSON pass-through, edge cases, fixture matrix, cold-state resume checklist. The authoritative source for that feature; TODO.md only carries the summary.
 
 ## Current implementation state
 
