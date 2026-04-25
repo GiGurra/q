@@ -31,46 +31,13 @@ Signatures stay plain Go. There are no special types you have to learn, no closu
 
 ## What's in q
 
-The core is the **bubble family** — entries that turn a failure (error / nil / not-ok / channel close / type-assertion miss) into an early return at the call site. Each entry has a **bare** form (`q.Try`) for the 90% case and an **`E`-suffixed chain** form (`q.TryE`) with `Wrap` / `Wrapf` / `Err` / `ErrF` / `Catch` methods for shaping the bubble.
+Three families of helpers, each with the same shape contract: the call site reads as ordinary Go, the rewriter folds it to a flat replacement at compile time, and runtime cost is zero where possible.
 
-Around that core sit a handful of orthogonal helpers — context cancellation, futures, channels, panic recovery, locking, and dev-time markers — that all use the same bubble shape so call sites read uniformly. The full list, alphabetical:
+- **The bubble family.** Failure-shape helpers (`q.Try`, `q.NotNil`, `q.Ok`, `q.Check`, `q.Open`, `q.Trace`, `q.Recv`, `q.As`, `q.Await*`, `q.Recv*`, …). Each turns a failure (`error` / nil / not-ok / channel close / type-assertion miss / ctx cancellation) into an early return. A bare form (`q.Try`) handles the 90% case; an `E`-suffixed chain form (`q.TryE`) exposes `Wrap` / `Wrapf` / `Err` / `ErrF` / `Catch` for shaping the bubble.
+- **Compile-time helpers.** Things that fold to a Go literal or AST at preprocess time, with no runtime work: `q.AtCompileTime` (universal escape hatch — run pure Go at preprocess time, splice the result), `q.Enum*` (helpers for the iota-enum pattern), `q.Exhaustive` (compile-checked switch coverage), `q.Match` (value-returning switch), `q.F` / `q.SQL` / string-case transforms, `q.Fields` / `q.Tag` / `q.TypeName` (compile-time reflection), `q.GenStringer` / `q.GenEnumJSON*` (method generators), `q.Tagged` / `q.MkTag` (phantom types).
+- **Runtime helpers.** Things that need real machinery but compose with the rest of q: `q.Async` / `q.Await*` (futures + fan-in), `q.Coro` / `q.Generator` (coroutines + iterators), `q.Lock`, `q.Recover`, `q.Timeout` / `q.Deadline`, `q.Map` / `Filter` / `Fold` / … (functional data ops), `q.ParMap` / `ParFilter` (parallel variants), `q.GoroutineID`.
 
-| Helper | What it does |
-|--------|--------------|
-| [`q.AtCompileTime` / `q.AtCompileTimeCode`](api/atcompiletime.md) | Run pure Go code at preprocessor time and splice the result as a value (or as parsed source code) at the call site. The universal escape hatch every other compile-time helper is a special case of. Recursive — closures can contain further `q.AtCompileTime` calls (each level becomes a deeper compiler invocation). |
-| [`q.As` / `q.AsE`](api/as.md) | Comma-ok specialised to type assertion; bubbles `q.ErrBadTypeAssert` on miss. |
-| [`q.Async`, `q.Await` / `q.AwaitE`](api/async.md) | JS-flavour promises on top of goroutines + channels. |
-| [`q.AwaitAll` / `q.AwaitAny`](api/await_multi.md) | Fan-in over many futures: gather all (`[]T`) or first-success-wins (`T`). |
-| [`q.AwaitCtx` / `q.AwaitCtxE`](api/await_ctx.md) | ctx-aware future await — bubble on cancel. |
-| [`q.Coro`](api/coro.md) | Bidirectional coroutines — Resume/Close API over a goroutine + two channels. Stateful conversations Go's `iter.Seq` can't express. |
-| [`q.Map` / `Filter` / `Fold` / `Reduce` / `GroupBy` / …](api/data.md) | Functional data ops over slices. Bare + `…Err` flavours; pure runtime, compose with `q.Try` / `q.Ok`. |
-| [`q.ParMap` / `ParFilter` / `ParEach` / `WithPar`](api/par.md) | Parallel variants — bounded worker pool, concurrency limit carried on `ctx` via `q.WithPar(ctx, n)`. Default `runtime.NumCPU()`. |
-| [`q.CheckCtx` / `q.CheckCtxE`](api/bubble.md) | `ctx.Err()` cancellation checkpoint as a statement. |
-| [`q.Check` / `q.CheckE`](api/check.md) | Bubble on `error` alone — for `db.Ping`, `file.Close`, `validate(x)`. Statement-only. |
-| [`q.DebugPrintln` / `q.DebugSlogAttr`](api/debug.md) | Go's missing `dbg!` — prints `file:line src = value` mid-expression, or produces an auto-keyed `slog.Attr`. |
-| [`q.EnumValues` / `EnumName` / `EnumParse` / `EnumValid` / `EnumOrdinal`](api/enums.md) | Compile-time helpers for Go's `const X = iota` enum pattern — list all values, name lookup, parse from name, membership, ordinal. Int- and string-backed. |
-| [`q.Exhaustive`](api/exhaustive.md) | `switch q.Exhaustive(v) { … }` — build fails if any constant of `v`'s type is missing from the case clauses (unless a `default:` opts out). Wrapper stripped at rewrite time, zero runtime cost. |
-| [`q.GenStringer` / `q.GenEnumJSONStrict` / `q.GenEnumJSONLax`](api/gen.md) | Package-level directives that synthesize `String()` / `MarshalJSON` / `UnmarshalJSON` methods on enum types. Strict errors on unknown wire values; Lax preserves them for forward-compat. |
-| [`q.Fields` / `q.AllFields` / `q.TypeName` / `q.Tag`](api/reflection.md) | Compile-time reflection — fold a struct's field names / type name / struct-tag value to a literal at the call site. Codegen-free JSON / CSV / SQL row mappers without runtime `reflect`. |
-| [`q.Match` / `q.Case` / `q.Default`](api/match.md) | Value-returning switch as an expression. Coverage-checked when matching on an enum type. |
-| [`q.F` / `q.Ferr` / `q.Fln`](api/format.md) | Compile-time `{expr}` string interpolation. `q.F("hi {name}")` → `fmt.Sprintf(...)`. Format must be a string literal. |
-| [`q.SQL` / `q.PgSQL` / `q.NamedSQL`](api/sql.md) | Injection-safe parameterised SQL. `{expr}` placeholders lift out as `?` / `$N` / `:nameN` driver binds. |
-| [`q.Upper` / `Lower` / `Snake` / `Kebab` / `Camel` / `Pascal` / `Title`](api/string_case.md) | Compile-time string-case transforms — fold a string literal to a string literal at compile time. Tokenisation handles camelCase, PascalCase, kebab-case, snake_case, and acronym runs. |
-| [`q.GoroutineID`](api/goroutine_id.md) | Returns the runtime goid Go deliberately hides — via runtime-package injection. ~1ns. |
-| [`q.Lock`](api/lock.md) | `Lock()` + `defer Unlock()` for any `sync.Locker`. |
-| [`q.NotNil` / `q.NotNilE`](api/notnil.md) | Bubble on a nil pointer (sentinel `q.ErrNil`). |
-| [`q.Ok` / `q.OkE`](api/ok.md) | Bubble on `(T, bool)` — the general comma-ok pattern. |
-| [`q.Open` / `q.OpenE`](api/open.md) | `(T, error)` plus `defer cleanup(v)` on success. |
-| [`q.Recover` / `q.RecoverE`](api/recover.md) | `defer q.Recover()` — function-wide panic→error. |
-| [`q.Recv` / `q.RecvE`](api/recv.md) | Comma-ok specialised to channel receive; bubbles `q.ErrChanClosed` on close. |
-| [`q.RecvAny` / `q.Drain` / `q.DrainAll`](api/channel_multi.md) | Multi-channel select / drain-until-close / per-channel drain-all. |
-| [`q.RecvCtx` / `q.RecvCtxE`](api/recv_ctx.md) | ctx-aware channel receive — bubble on close or cancel. |
-| [`q.Require`](api/require.md) | Runtime precondition — bubble an error when `cond` is false. |
-| [`q.SlogAttr` / `q.SlogCtx` / `q.File` / `q.Line` / `q.Expr` ...](api/slog.md) | Compile-time info builders + plain-string/int counterparts + context-attached attrs (correlation IDs across a request). |
-| [`q.Timeout` / `q.Deadline`](api/timeout.md) | Derive a child ctx with an auto-`defer cancel()`. |
-| [`q.TODO` / `q.Unreachable`](api/todo.md) | Rust-style panic markers with file:line. |
-| [`q.Trace` / `q.TraceE`](api/trace.md) | Try-shape with a compile-time `file:line:` prefix on the bubble. |
-| [`q.Try` / `q.TryE`](api/try.md) | Bubble on `(T, error)`. The 90% case. |
+The left navbar has the full list with one page per feature; that's the authoritative index. This page intentionally does not enumerate everything — it would drift out of sync with the actual surface as q grows.
 
 ## Statement positions
 
