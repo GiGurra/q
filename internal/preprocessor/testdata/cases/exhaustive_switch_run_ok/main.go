@@ -61,14 +61,20 @@ func describeStatus(s Status) string {
 	return "unknown"
 }
 
-// Default opts out of exhaustiveness — only Red is covered, but the
-// default catches everything else, so the build accepts it.
+// Default catches unknown values (e.g. forward-compat for Lax-JSON
+// types or runtime drift) but does NOT replace coverage of declared
+// constants. Every const must still appear in some case clause, AND
+// the default arm handles values outside the declared set.
 func describeColorWithDefault(c Color) string {
 	switch q.Exhaustive(c) {
 	case Red:
-		return "red only"
+		return "warm-with-default"
+	case Green:
+		return "natural-with-default"
+	case Blue:
+		return "cool-with-default"
 	default:
-		return "anything else"
+		return "unknown — possibly a future Color value"
 	}
 }
 

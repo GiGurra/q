@@ -7,6 +7,6 @@ group Blue: extreme
 status Pending: wait
 status Done: ok
 status Failed: uh oh
-default red: red only
-default green: anything else
+default red: warm-with-default
+default green: natural-with-default
 from init: init/green

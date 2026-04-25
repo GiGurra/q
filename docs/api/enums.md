@@ -195,14 +195,14 @@ If you forget a case (say, `Blue`), the build fails with:
 main.go:42:12: q: q.Exhaustive switch on Color is missing case(s) for: Blue. Add the missing case(s), or use `default:` to opt out.
 ```
 
-A `default:` clause opts out — the catch-all covers anything missing:
+A `default:` clause **does not** replace coverage of declared constants — it's for catching values outside the declared set (forward-compat / wire drift). Every declared constant still needs its own case:
 
 ```go
 switch q.Exhaustive(c) {
-case Red:
-    return "red only"
-default:
-    return "anything else"
+case Red:   return "red"
+case Green: return "green"
+case Blue:  return "blue"
+default:    return "unknown"  // catches future / unrecognised values
 }
 ```
 

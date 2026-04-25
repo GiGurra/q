@@ -97,8 +97,14 @@ func EnumOrdinal[T comparable](v T) int {
 //
 // at compile time: if any constant of v's defined type is missing
 // from the case clauses, the build fails with a diagnostic naming
-// the missing constants. Adding a `default:` clause opts out — the
-// catch-all covers any unhandled value.
+// the missing constants.
+//
+// A `default:` clause does NOT replace coverage of the declared
+// constants — it catches values outside the declared set
+// (forward-compat with Lax-JSON-opted types, wire drift, or future
+// constants a downstream service hasn't adopted yet). Every declared
+// constant still needs its own case; default is additive and
+// recommended for any type that can carry unknown values.
 //
 // The wrapper is removed at rewrite time, so the runtime code is a
 // plain `switch v { … }`. Legal only as the tag of a switch

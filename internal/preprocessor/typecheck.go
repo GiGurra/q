@@ -194,21 +194,26 @@ func validateExhaustive(fset *token.FileSet, sh *callShape, sc *qSubCall, info *
 		}, true
 	}
 
-	// Walk the SwitchStmt's body for case clauses. Track which
-	// constants are covered, and whether a default exists.
+	// Walk the SwitchStmt's body for case clauses. Every declared
+	// constant must appear in some case — `default:` catches values
+	// outside the declared set (forward-compat / Lax-opted types /
+	// runtime drift) but does NOT replace coverage of the declared
+	// constants. This rule keeps q.Exhaustive's promise honest for
+	// Lax-JSON types: known values still must each have a dedicated
+	// case, default catches the genuinely-unknown.
 	swStmt, ok := sh.Stmt.(*ast.SwitchStmt)
 	if !ok || swStmt.Body == nil {
 		return Diagnostic{}, false
 	}
 	covered := map[string]bool{}
-	hasDefault := false
 	for _, body := range swStmt.Body.List {
 		cc, ok := body.(*ast.CaseClause)
 		if !ok {
 			continue
 		}
 		if cc.List == nil {
-			hasDefault = true
+			// `default:` clause — catches unknown values, not a
+			// substitute for declared-constant coverage.
 			continue
 		}
 		for _, expr := range cc.List {
@@ -240,9 +245,6 @@ func validateExhaustive(fset *token.FileSet, sh *callShape, sc *qSubCall, info *
 				}
 			}
 		}
-	}
-	if hasDefault {
-		return Diagnostic{}, false
 	}
 
 	var missing []string

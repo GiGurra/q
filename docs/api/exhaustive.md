@@ -38,21 +38,47 @@ main.go:42:12: q: q.Exhaustive switch on Color is missing case(s) for: Blue. Add
 2. Walk the package's scope for `*types.Const` whose type is identical to `v`'s type. That's the **expected set** of constants.
 3. Walk the switch's case clauses, resolving each case expression to a `*types.Const` via `info.Uses` (handles bare `Red`, qualified `pkg.Red`, parenthesised `(Red)`).
 4. The **covered set** is the union of all such constants across every case clause (multi-value cases like `case A, B, C:` count as three).
-5. If the switch has a `default:` clause, the check is skipped — the catch-all covers anything missing, by design.
-6. Otherwise, any constant in the expected set that's not in the covered set is reported in a single diagnostic, sorted alphabetically.
+5. Any constant in the expected set that's not in the covered set is reported in a single diagnostic, sorted alphabetically.
+
+### `default:` does not replace coverage
+
+A `default:` clause **catches values outside the declared set** — runtime drift, forward-compat with Lax-JSON-opted types, future enum additions a downstream service hasn't adopted yet. It does **not** substitute for covering the known constants:
+
+```go
+switch q.Exhaustive(c) {
+case Red:   return "red"
+case Green: return "green"
+default:    return "fallback"  // ← does NOT cover Blue
+}
+// → build fails: missing case(s) for: Blue
+```
+
+To pass, every declared constant needs its own case (or a multi-value `case A, B:`); `default:` is then optional, additive, and recommended for any type that can carry unknown values:
+
+```go
+switch q.Exhaustive(c) {
+case Red:   return "red"
+case Green: return "green"
+case Blue:  return "blue"
+default:    return "unknown"  // for forward-compat with newer producers
+}
+```
+
+This keeps the promise honest: "every declared constant has a dedicated arm; unknown drift goes through default."
 
 ## What gets enforced
 
-| Source                                                  | Behaviour                                                                 |
-|---------------------------------------------------------|---------------------------------------------------------------------------|
-| `switch q.Exhaustive(c) { … all cases … }`              | Build passes.                                                             |
-| `switch q.Exhaustive(c) { … missing one … }`            | Build fails: `missing case(s) for: <names>`.                              |
-| `switch q.Exhaustive(c) { … any cases …; default: … }`  | Build passes (default opts out).                                          |
-| `switch q.Exhaustive(c) { case A, B: …; case C: … }`    | Multi-value cases count as covering each value.                           |
-| `switch x := f(); q.Exhaustive(x) { … }`                | Switch-with-init works.                                                   |
-| `q.Exhaustive(c)` outside a switch tag                  | Build fails: `q.Exhaustive can only be used as the tag of a switch`.      |
-| `q.Exhaustive(123)`, `q.Exhaustive("foo")`              | Build fails: type isn't a defined named type.                             |
-| `q.Exhaustive(otherpkg.Color(c))`                       | Build fails: cross-package type — declare a wrapper in the home package.  |
+| Source                                                       | Behaviour                                                                 |
+|--------------------------------------------------------------|---------------------------------------------------------------------------|
+| `switch q.Exhaustive(c) { … all declared cases … }`          | Build passes.                                                             |
+| `switch q.Exhaustive(c) { … missing one … }`                 | Build fails: `missing case(s) for: <names>`.                              |
+| `switch q.Exhaustive(c) { … missing one …; default: … }`     | Build still fails — `default:` is for unknown values, not declared ones.  |
+| `switch q.Exhaustive(c) { … all declared …; default: … }`    | Build passes; default catches values outside the declared set.            |
+| `switch q.Exhaustive(c) { case A, B: …; case C: … }`         | Multi-value cases count as covering each value.                           |
+| `switch x := f(); q.Exhaustive(x) { … }`                     | Switch-with-init works.                                                   |
+| `q.Exhaustive(c)` outside a switch tag                       | Build fails: `q.Exhaustive can only be used as the tag of a switch`.      |
+| `q.Exhaustive(123)`, `q.Exhaustive("foo")`                   | Build fails: type isn't a defined named type.                             |
+| `q.Exhaustive(otherpkg.Color(c))`                            | Build fails: cross-package type — declare a wrapper in the home package.  |
 
 ## Why this shape (and not the alternatives)
 
@@ -90,29 +116,27 @@ fmt.Println(colors.Describe(colors.Red))
 
 The rewriter currently writes case names unqualified; lifting the cross-package restriction would require it to emit `colors.Red`, `colors.Green`, etc. Tracked as a future enhancement.
 
-## Default opts out — not a bug
+## Forward-compatibility (Lax JSON / wire drift)
 
-Adding `default:` opts out of the missing-case check. This is intentional:
-
-```go
-switch q.Exhaustive(c) {
-case Red:
-    return "red"
-default:
-    return "anything else"  // catches Green, Blue, and any future Color additions
-}
-```
-
-If you want to enforce exhaustiveness *and* have a fallback, omit `default:`:
+When a type is opted into a Lax JSON marshaller (so the wire can carry values outside the declared set — e.g. a service that hasn't adopted a new enum value yet), a `default:` arm is required to handle the genuinely-unknown values. The declared cases still must each be present:
 
 ```go
+type Color int
+const (Red Color = iota; Green; Blue)
+var _ = q.GenEnumJSONLax[Color]()  // (planned, see TODO)
+
 switch q.Exhaustive(c) {
 case Red:   return "red"
 case Green: return "green"
 case Blue:  return "blue"
+default:
+    // c carries a value outside Red/Green/Blue (e.g. an unfamiliar
+    // wire value from a newer producer). Log, forward, or fall back.
+    return forwardUnknown(c)
 }
-return "unreachable" // bare return after the switch acts as the fallback
 ```
+
+This is the "open type at the boundary, closed type internally" pattern made compile-time-checked. New constants added later still trigger the missing-case diagnostic — `default:` doesn't silently swallow them.
 
 ## See also
 
