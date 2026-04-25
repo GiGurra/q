@@ -61,5 +61,5 @@ nav:
     - q.TODO / Unreachable:    api/todo.md
     - q.Trace:                 api/trace.md
     - q.Try:                   api/try.md
-  - Typed-nil guard: typed-nil-guard.md
+  - Why builds fail on `*MyErr` returns: typed-nil-guard.md
   - Design: design.md

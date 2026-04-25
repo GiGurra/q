@@ -277,7 +277,7 @@ GOFLAGS="-toolexec=q" go test  ./...
 
 - **[Documentation site](https://gigurra.github.io/q/)** — per-helper reference, examples, and design notes.
 - **[Design doc](docs/design.md)** — link gate, rewriter contract, what's recognised and what isn't.
-- **[Typed-nil guard](https://gigurra.github.io/q/typed-nil-guard/)** — why the preprocessor rejects callees that return `*MyErr` instead of `error`.
+- **[Why builds fail on `*MyErr` returns](https://gigurra.github.io/q/typed-nil-guard/)** — the preprocessor rejects callees that return concrete error types instead of `error`.
 
 ## Status
 
