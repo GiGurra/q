@@ -1,0 +1,4 @@
+main id nonzero: true
+main id stable across calls: true
+distinct child ids: 4
+children differ from main: true

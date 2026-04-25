@@ -321,6 +321,7 @@ var qRuntimeHelpers = map[string]bool{
 	"DrainAllRawCtx":  true,
 	"Recover":         true,
 	"RecoverE":        true,
+	"GoroutineID":     true,
 }
 
 // scanFile walks one parsed source file and returns the list of

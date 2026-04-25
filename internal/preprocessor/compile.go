@@ -59,6 +59,8 @@ func planCompile(toolPath string, toolArgs []string) (*Plan, error) {
 	switch pkgPath {
 	case qPkgPath:
 		return planQStub(toolArgs)
+	case runtimePkgPath:
+		return planRuntimeStub(toolArgs)
 	}
 
 	return planUserPackage(pkgPath, toolArgs)

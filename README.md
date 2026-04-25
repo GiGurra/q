@@ -205,6 +205,20 @@ slog.Info("loaded", q.DebugSlogAttr(userID))
 
 The `Debug*` family carries `file:line` *inside the key text* — easy to spot in scrolling stderr, but noisy in shipping logs. Pull these out before merging; reach for `q.SlogAttr` / `q.SlogFile` / `q.SlogLine` for permanent logging.
 
+### Get the goroutine ID Go won't give you
+
+```go
+id := q.GoroutineID()        // uint64, the goid in panic traces
+slog.Info("processing", q.SlogAttr(id))
+```
+
+The `runtime` package deliberately hides goroutine IDs. q's preprocessor
+injects a one-line accessor (`getg().goid`) into the stdlib runtime
+compile and `//go:linkname`-pulls it from `pkg/q`. Cost: ~1 ns,
+just an inlined struct-field read. No stack-walk, no assembly, no
+pprof-labels dependency. Loses to a future Go release if Go closes the
+linkname loophole; works on Go 1.26.
+
 ### Trace a bubble back to its call site
 
 ```go

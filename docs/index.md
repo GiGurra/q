@@ -44,6 +44,7 @@ Around that core sit a handful of orthogonal helpers — context cancellation, f
 | [`q.CheckCtx` / `q.CheckCtxE`](api/bubble.md) | `ctx.Err()` cancellation checkpoint as a statement. |
 | [`q.Check` / `q.CheckE`](api/check.md) | Bubble on `error` alone — for `db.Ping`, `file.Close`, `validate(x)`. Statement-only. |
 | [`q.DebugPrintln` / `q.DebugSlogAttr`](api/debug.md) | Go's missing `dbg!` — prints `file:line src = value` mid-expression, or produces an auto-keyed `slog.Attr`. |
+| [`q.GoroutineID`](api/goroutine_id.md) | Returns the runtime goid Go deliberately hides — via runtime-package injection. ~1ns. |
 | [`q.Lock`](api/lock.md) | `Lock()` + `defer Unlock()` for any `sync.Locker`. |
 | [`q.NotNil` / `q.NotNilE`](api/notnil.md) | Bubble on a nil pointer (sentinel `q.ErrNil`). |
 | [`q.Ok` / `q.OkE`](api/ok.md) | Bubble on `(T, bool)` — the general comma-ok pattern. |
