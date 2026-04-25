@@ -132,20 +132,18 @@ func rewriteFile(fset *token.FileSet, file *ast.File, src []byte, shapes []callS
 
 	// log/slog is injected by syntactic detection — q.DebugSlogAttr
 	// rewrites to a literal slog.Any call, so any shape containing
-	// that family forces the import.
+	// that family forces the import. Same approach for `iter` —
+	// q.Generator rewrites to `iter.Seq[T](...)` literally.
 	needsSlog := false
+	needsIter := false
 	for _, sh := range shapes {
 		for _, c := range sh.Calls {
 			switch c.Family {
 			case familyDebugSlogAttr, familySlogAttr, familySlogFile, familySlogLine, familySlogFileLine:
 				needsSlog = true
+			case familyGenerator:
+				needsIter = true
 			}
-			if needsSlog {
-				break
-			}
-		}
-		if needsSlog {
-			break
 		}
 	}
 
@@ -165,6 +163,10 @@ func rewriteFile(fset *token.FileSet, file *ast.File, src []byte, shapes []callS
 	if needsSlog && !hasImport(file, "log/slog") {
 		out = ensureImport(file, fset, out, "log/slog")
 		addedImports = append(addedImports, "log/slog")
+	}
+	if needsIter && !hasImport(file, "iter") {
+		out = ensureImport(file, fset, out, "iter")
+		addedImports = append(addedImports, "iter")
 	}
 
 	if alias != "" {
@@ -334,6 +336,12 @@ func renderShape(fset *token.FileSet, src []byte, sh callShape, counter *int, al
 			subTexts[i] = buildMatchReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts)
 		case familyAtCompileTime, familyAtCompileTimeCode:
 			subTexts[i] = buildAtCompileTimeReplacement(sh.Calls[i])
+		case familyGenerator:
+			text, gerr := buildGeneratorReplacement(fset, src, sh.Calls[i], alias, counters[i])
+			if gerr != nil {
+				return "", false, false, false, gerr
+			}
+			subTexts[i] = text
 		}
 	}
 
@@ -706,6 +714,72 @@ func buildAtCompileTimeReplacement(sub qSubCall) string {
 	return sub.AtCTResolved
 }
 
+// buildGeneratorReplacement is the per-sub replacement for
+// q.Generator[T](func() { ... q.Yield(v) ... }). Walks the closure
+// body, rewrites every q.Yield call into the iter.Seq early-return
+// shape, and wraps the whole expression as an iter.Seq[T] callback.
+//
+// Output shape:
+//
+//	iter.Seq[T](func(_qYieldN func(T) bool) { <body with Yield rewritten> })
+//
+// The yield function is named with the per-call counter so generator
+// nests don't collide. q.Yield calls in nested closures are also
+// rewritten — the early-return semantics match what writing iter.Seq
+// by hand would produce (the `return` exits the innermost enclosing
+// func).
+func buildGeneratorReplacement(fset *token.FileSet, src []byte, sub qSubCall, alias string, counter int) (string, error) {
+	fnLit, ok := sub.InnerExpr.(*ast.FuncLit)
+	if !ok {
+		return "", fmt.Errorf("buildGeneratorReplacement: q.Generator's argument was not captured as a *ast.FuncLit")
+	}
+	typeText := exprText(fset, src, sub.AsType)
+	yieldName := fmt.Sprintf("_qYield%d", counter)
+
+	bodyStart := fset.Position(fnLit.Body.Pos()).Offset
+	bodyEnd := fset.Position(fnLit.Body.End()).Offset
+
+	type span struct {
+		start, end int
+		argText    string
+	}
+	var yields []span
+	ast.Inspect(fnLit.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if !isSelector(call.Fun, alias, "Yield") {
+			return true
+		}
+		if len(call.Args) != 1 {
+			return true
+		}
+		argStart := fset.Position(call.Args[0].Pos()).Offset
+		argEnd := fset.Position(call.Args[0].End()).Offset
+		yields = append(yields, span{
+			start:   fset.Position(call.Pos()).Offset,
+			end:     fset.Position(call.End()).Offset,
+			argText: string(src[argStart:argEnd]),
+		})
+		return true
+	})
+
+	sort.Slice(yields, func(i, j int) bool {
+		return yields[i].start > yields[j].start
+	})
+	bodyText := append([]byte(nil), src[bodyStart:bodyEnd]...)
+	for _, y := range yields {
+		replacement := fmt.Sprintf("if !%s(%s) { return }", yieldName, y.argText)
+		s := y.start - bodyStart
+		e := y.end - bodyStart
+		bodyText = append(bodyText[:s], append([]byte(replacement), bodyText[e:]...)...)
+	}
+
+	return fmt.Sprintf("iter.Seq[%s](func(%s func(%s) bool) %s)",
+		typeText, yieldName, typeText, string(bodyText)), nil
+}
+
 // buildExprReplacement is the per-sub replacement for q.Expr: a
 // Go-quoted string literal of the argument's literal source text.
 // The argument's runtime value is discarded.
@@ -735,7 +809,8 @@ func isInPlaceFamily(f family) bool {
 		familyGenStringer, familyGenEnumJSONStrict, familyGenEnumJSONLax,
 		familyFields, familyAllFields, familyTypeName, familyTag,
 		familyMatch,
-		familyAtCompileTime, familyAtCompileTimeCode:
+		familyAtCompileTime, familyAtCompileTimeCode,
+		familyGenerator:
 		return true
 	}
 	return false
@@ -930,7 +1005,8 @@ func renderSubCall(fset *token.FileSet, src []byte, sh callShape, subIdx int, su
 		familyFile, familyLine, familyFileLine, familyExpr,
 		familyEnumValues, familyEnumNames, familyEnumName,
 		familyEnumValid, familyEnumOrdinal,
-		familyAtCompileTime, familyAtCompileTimeCode:
+		familyAtCompileTime, familyAtCompileTimeCode,
+		familyGenerator:
 		// In-place expression transforms — the replacement text
 		// lives in subTexts[subIdx] and is applied when
 		// substituteSpans rebuilds the final stmt. No bind/check

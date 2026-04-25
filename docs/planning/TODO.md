@@ -155,33 +155,13 @@ The persistent backlog for `q`. A cold-state reader can pick up here without re-
 
 ### Coroutines
 
-- **#85 — Coroutines (tier 1 + tier 3).** Go has goroutines (concurrency, separate stacks) and Go 1.23 has `iter.Seq` (pull-based iteration). It does not have full coroutines: bidirectional, suspendable functions you can pass values into and out of cooperatively. Tier 2 (bidirectional `q.Coro` via goroutine + channels) lives in `pkg/q/`; the remaining tiers are below.
+- **#85 tier 3 — Stackless coroutines (preprocessor-rewritten state machines).** The preprocessor analyses a function containing `q.Yield(v)` calls, identifies yield points as state-machine transitions, and rewrites the entire function into a state-machine struct with a `Resume(input) (output, done)` method. No goroutine. No channel. Just a struct holding the saved local variables and a `state int` field.
 
-  **Tier 1 — `iter.Seq` sugar.** Smallest. A helper that takes a body using `q.Yield(v)` and produces a stdlib `iter.Seq[T]`:
-
-  ```go
-  // Today:
-  fibs := func(yield func(int) bool) {
-      a, b := 0, 1
-      for { if !yield(a) { return }; a, b = b, a+b }
-  }
-
-  // With q:
-  fibs := q.Generator(func() {
-      a, b := 0, 1
-      for { q.Yield(a); a, b = b, a+b }
-  })
-  ```
-
-  The rewriter wraps the body, threads the yield func through, and rewrites `q.Yield(v)` to `if !yield(v) { return }`. Result is a plain `iter.Seq[int]` — interop is free. Entirely sugar over Go 1.23's existing pull mechanism.
-
-  **Tier 3 — Stackless coroutines (preprocessor-rewritten state machines).** The ambitious version. The preprocessor analyzes a function containing `q.Yield(v)` calls, identifies yield points as state-machine transitions, and rewrites the entire function into a state machine struct with a `Resume(input) (output, done)` method. No goroutine. No channel. Just a struct holding the saved local variables and a `state int` field.
-
-  Pros: zero goroutine overhead; faster than tier 2 for tight loops (no channel send/receive on each yield).
+  Pros: zero goroutine overhead; faster than tier 2 (`q.Coro`) for tight loops (no channel send/receive on each yield).
 
   Cons: this is THE hard problem. Closures over local variables need to lift to struct fields. Defer / recover semantics get weird (where does a deferred call go in a state machine?). Loops that span yield points need careful state tracking. C#'s async-rewriter took years to get right, and Go's syntax is more permissive (defer, goroutine spawning, panic/recover all interact with control flow).
 
-  Realistic scope: tier 3 might be too big for q. Tier 1 covers most of the remaining ergonomic win. Park tier 3 unless someone has a specific tight-loop workload that justifies the lift.
+  Realistic scope: probably too big for q. Tier 1 (`q.Generator`) and tier 2 (`q.Coro`) cover most of the ergonomic win. Park unless a specific tight-loop workload justifies the lift.
 
 ### Future / parking lot
 

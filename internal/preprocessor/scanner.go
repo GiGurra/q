@@ -125,6 +125,7 @@ const (
 	familyMatch     // q.Match(v, q.Case(...), q.Default(...)) — value-returning switch
 	familyAtCompileTime     // q.AtCompileTime(func() R { ... }, codec...) — comptime evaluation
 	familyAtCompileTimeCode // q.AtCompileTimeCode[R](func() string { ... }) — comptime code generation
+	familyGenerator         // q.Generator[T](func() { ... q.Yield(v) ... }) — iter.Seq[T] sugar
 )
 
 // form is the syntactic position of a recognised q.* call:
@@ -524,12 +525,16 @@ func scanFile(fset *token.FileSet, path string, file *ast.File) ([]callShape, []
 	var shapes []callShape
 	var diags []Diagnostic
 
-	// Pre-collect q.AtCompileTime closure FuncLit nodes — the
-	// synthesis pass owns their bodies, so the scanner should not
-	// descend into them (otherwise q.* calls inside the closure
-	// would be picked up as separate shapes that the rewriter
-	// double-rewrites alongside the outer q.AtCompileTime span).
-	atCTSkipFuncLits = map[*ast.FuncLit]bool{}
+	// Pre-collect closure FuncLit nodes whose bodies the scanner
+	// should NOT descend into:
+	//   - q.AtCompileTime / q.AtCompileTimeCode — synthesis pass owns
+	//     the body.
+	//   - q.Generator — the renderer rewrites q.Yield calls inside the
+	//     body itself; outer scanning would mis-classify q.Yield (it
+	//     has no rendering when not inside a Generator) or descend
+	//     into a func() body where q.Try / etc. have nothing to bubble
+	//     to.
+	skipFuncLits = map[*ast.FuncLit]bool{}
 	ast.Inspect(file, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
@@ -541,10 +546,11 @@ func scanFile(fset *token.FileSet, path string, file *ast.File) ([]callShape, []
 		}
 		if sel, ok := fn.(*ast.SelectorExpr); ok {
 			if x, ok := sel.X.(*ast.Ident); ok && x.Name == alias &&
-				(sel.Sel.Name == "AtCompileTime" || sel.Sel.Name == "AtCompileTimeCode") {
+				(sel.Sel.Name == "AtCompileTime" || sel.Sel.Name == "AtCompileTimeCode" ||
+					sel.Sel.Name == "Generator") {
 				if len(call.Args) >= 1 {
 					if lit, ok := call.Args[0].(*ast.FuncLit); ok {
-						atCTSkipFuncLits[lit] = true
+						skipFuncLits[lit] = true
 					}
 				}
 			}
@@ -567,16 +573,17 @@ func scanFile(fset *token.FileSet, path string, file *ast.File) ([]callShape, []
 		}
 	}
 
-	atCTSkipFuncLits = nil
+	skipFuncLits = nil
 	return shapes, diags, nil
 }
 
-// atCTSkipFuncLits collects FuncLit AST nodes whose body the scanner
-// should NOT recurse into — currently only the closures handed to
-// q.AtCompileTime, since the synthesis pass owns those bodies. The
-// set is populated at the start of scanFile and consulted by
-// walkFuncLits + collectQCalls to short-circuit descent.
-var atCTSkipFuncLits map[*ast.FuncLit]bool
+// skipFuncLits collects FuncLit AST nodes whose body the scanner
+// should NOT recurse into. Today: closures handed to q.AtCompileTime
+// (synthesis pass owns the body) and q.Generator (the renderer
+// rewrites q.Yield calls inside the body itself). The set is
+// populated at the start of scanFile and consulted by walkFuncLits +
+// collectQCalls to short-circuit descent.
+var skipFuncLits map[*ast.FuncLit]bool
 
 // scanTopLevelVarSpec recognises the package-level directive shape
 //
@@ -749,8 +756,9 @@ func walkFuncLits(fset *token.FileSet, path string, stmt ast.Stmt, alias string,
 		if !ok {
 			return true
 		}
-		if atCTSkipFuncLits[lit] {
-			// q.AtCompileTime closure — synthesis pass owns it.
+		if skipFuncLits[lit] {
+			// Body is owned by another pass (synthesis for
+			// q.AtCompileTime, the Generator renderer for q.Generator).
 			return false
 		}
 		walkBlock(fset, path, lit.Body, alias, lit.Type, shapes, diags)
@@ -1383,6 +1391,32 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 			AtCTClosure:   fnLit,
 			AtCTCodecExpr: codecExpr,
 			OuterCall:     expr,
+		}, true, nil
+	}
+	// q.Generator[T](func() { ... q.Yield(v) ... }) — sugar over
+	// iter.Seq[T]. The closure body is rewritten in place by the
+	// Generator renderer, which substitutes each q.Yield(v) inside
+	// it with `if !yield(v) { return }` and wraps the whole
+	// expression as `iter.Seq[T](func(yield func(T) bool) { ... })`.
+	if typeArg, ok := isIndexedSelector(call.Fun, alias, "Generator"); ok {
+		if len(call.Args) != 1 {
+			return qSubCall{}, false, fmt.Errorf("q.Generator takes exactly one argument (a func() closure); got %d", len(call.Args))
+		}
+		fnLit, ok := call.Args[0].(*ast.FuncLit)
+		if !ok {
+			return qSubCall{}, false, fmt.Errorf("q.Generator: argument must be a function literal (anonymous function), not a function reference or variable")
+		}
+		if fnLit.Type == nil || fnLit.Type.Params == nil || fnLit.Type.Params.NumFields() != 0 {
+			return qSubCall{}, false, fmt.Errorf("q.Generator: closure must take zero parameters")
+		}
+		if fnLit.Type.Results != nil && fnLit.Type.Results.NumFields() != 0 {
+			return qSubCall{}, false, fmt.Errorf("q.Generator: closure must have no return values")
+		}
+		return qSubCall{
+			Family:    familyGenerator,
+			AsType:    typeArg,
+			InnerExpr: fnLit,
+			OuterCall: expr,
 		}, true, nil
 	}
 	// q.Match(value, q.Case(...), q.Default(...)) — value-returning

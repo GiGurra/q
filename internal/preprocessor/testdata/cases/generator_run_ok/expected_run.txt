@@ -1,0 +1,15 @@
+fib: 0
+fib: 1
+fib: 1
+fib: 2
+fib: 3
+fib: 5
+fib: 8
+letter: a
+letter: b
+letter: c
+doubled: 2
+doubled: 4
+doubled: 6
+pair: 100
+pair: 200

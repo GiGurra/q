@@ -45,6 +45,7 @@ nav:
     - q.AwaitAll / AwaitAny:   api/await_multi.md
     - q.AwaitCtx:              api/await_ctx.md
     - q.Coro (coroutines):     api/coro.md
+    - q.Generator / q.Yield (iter.Seq sugar): api/generator.md
     - q.Map / Filter / Fold / Reduce (functional data ops): api/data.md
     - q.ParMap / ParFilter / WithPar (parallel data ops): api/par.md
     - q.CheckCtx:              api/checkctx.md

@@ -120,6 +120,24 @@ results := q.AwaitAll(fa, fb, fc)     // []T in input order; bubble first error
 fastest := q.AwaitAny(fa, fb, fc)     // first success wins, errors.Join on all-fail
 ```
 
+### Generators (`iter.Seq` sugar)
+
+```go
+// q.Yield(v) inside the body becomes `if !yield(v) { return }`;
+// the whole expression is rewritten to iter.Seq[int](...) at compile time.
+fibs := q.Generator[int](func() {
+    a, b := 0, 1
+    for { q.Yield(a); a, b = b, a+b }
+})
+
+for v := range fibs {
+    if v > 100 { break }
+    fmt.Println(v)
+}
+```
+
+`q.Generator[T]` produces a stdlib `iter.Seq[T]`. The type param is required (Go can't infer a result-only type argument). Free interop with `for ... range` and any other `iter.Seq` consumer.
+
 ### Bidirectional coroutines
 
 ```go
@@ -135,7 +153,7 @@ v, _ := doubler.Resume(21) // 42
 v, _  = doubler.Resume(100) // 200
 ```
 
-`q.Coro` wraps a goroutine + two channels into a Resume / Close / Wait / Done API. Useful for stateful conversations Go's `iter.Seq` (one-way pull) can't express. Pure runtime — no preprocessor work.
+`q.Coro` wraps a goroutine + two channels into a Resume / Close / Wait / Done API. Useful for stateful conversations `iter.Seq` (one-way pull) can't express. Pure runtime — no preprocessor work. Reach for `q.Generator` for the simpler emit-only case.
 
 ### Multi-channel select and drain
 
