@@ -68,7 +68,7 @@ The original four bubble entries cover the dominant Go signatures:
 | `error` alone                     | `Check` / `CheckE` (void — stmt only) |
 | `(T, error)` + cleanup on success | `Open` / `OpenE` |
 
-Subsequent additions follow the same shape: each new helper picks a distinct source signature and exposes a bare + chain pair. `q.Ok` / `q.OkE` for `(T, bool)`, `q.Recv` / `q.RecvE` and `q.As` / `q.AsE` as comma-ok specialisations, `q.Await*` / `q.Recv*Ctx` / `q.Bubble*` for context cancellation and futures, and so on. The bubble shape is the constant; what varies is the *trigger* (error, nil, not-ok, ctx, channel close) that fires it.
+Subsequent additions follow the same shape: each new helper picks a distinct source signature and exposes a bare + chain pair. `q.Ok` / `q.OkE` for `(T, bool)`, `q.Recv` / `q.RecvE` and `q.As` / `q.AsE` as comma-ok specialisations, `q.Await*` / `q.Recv*Ctx` / `q.CheckCtx*` for context cancellation and futures, and so on. The bubble shape is the constant; what varies is the *trigger* (error, nil, not-ok, ctx, channel close) that fires it.
 
 **Why terminal `.Release` for Open (not `.WithDefer` earlier in the chain)?** `.Release(cleanup)` has to *own* both the error-bubble path and the success-defer path. Making it a modifier in the middle of the chain would mean another method comes after it — but that method can't undo the defer registration, so Release's placement relative to other chain methods would matter. As the terminal, Release's position is unambiguous: error shaping happens first, defer registration on success is the last step.
 

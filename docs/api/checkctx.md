@@ -1,20 +1,22 @@
-# `q.Bubble` and `q.BubbleE`
+# `q.CheckCtx` and `q.CheckCtxE`
 
 Context-cancellation checkpoint. Statement-only: at the call site, `ctx.Err()` is checked, and a non-nil value bubbles out of the enclosing function.
 
 ## Signatures
 
 ```go
-func Bubble(ctx context.Context)
-func BubbleE(ctx context.Context) CheckResult
+func CheckCtx(ctx context.Context)
+func CheckCtxE(ctx context.Context) CheckResult
 ```
 
-Both return nothing — same rule as `q.Check`: only valid as an expression statement. `v := q.Bubble(ctx)` is a Go type error.
+Both return nothing — same rule as `q.Check`: only valid as an expression statement. `v := q.CheckCtx(ctx)` is a Go type error.
 
-## What `q.Bubble` does
+`q.CheckCtx` covers both cancellation *and* deadline expiration in a single check: `ctx.Err()` returns `context.Canceled` for the cancel path and `context.DeadlineExceeded` for the deadline path. Both bubble.
+
+## What `q.CheckCtx` does
 
 ```go
-q.Bubble(ctx)
+q.CheckCtx(ctx)
 ```
 
 rewrites to:
@@ -35,7 +37,7 @@ Wherever a long-running operation could be safely interrupted — between iterat
 ```go
 func processBatch(ctx context.Context, items []Item) error {
     for _, item := range items {
-        q.Bubble(ctx)               // cheap per-iteration cancellation check
+        q.CheckCtx(ctx)               // cheap per-iteration cancellation check
         if err := process(item); err != nil {
             return err
         }
@@ -46,7 +48,7 @@ func processBatch(ctx context.Context, items []Item) error {
 
 For blocking operations (channel receive, future await) reach for `q.RecvCtx` / `q.AwaitCtx` — those fold the ctx check into the blocking operation itself.
 
-## Chain methods on `q.BubbleE`
+## Chain methods on `q.CheckCtxE`
 
 Identical vocabulary to `q.CheckE` — the captured error is `ctx.Err()`, and every method reshapes it before the bubble. All methods return void.
 
@@ -59,10 +61,10 @@ Identical vocabulary to `q.CheckE` — the captured error is `ctx.Err()`, and ev
 | `.Catch(fn func(error) error)`        | `fn(ctx.Err())` — **`nil` suppresses**, non-nil bubbles |
 
 ```go
-q.BubbleE(ctx).Wrap("loading users")
+q.CheckCtxE(ctx).Wrap("loading users")
 // rewrites to: if err := ctx.Err(); err != nil { return …, fmt.Errorf("loading users: %w", err) }
 
-q.BubbleE(ctx).Catch(func(e error) error {
+q.CheckCtxE(ctx).Catch(func(e error) error {
     if errors.Is(e, context.Canceled) {
         return nil                    // user cancelled — not a bug
     }
@@ -72,9 +74,9 @@ q.BubbleE(ctx).Catch(func(e error) error {
 
 ## Not supported
 
-- `v := q.Bubble(...)` — Bubble returns `()`; this is a Go type error.
-- `return q.Bubble(...), nil` — same reason.
-- `q.Bubble` in a return-position or hoisted inside another expression.
+- `v := q.CheckCtx(...)` — Bubble returns `()`; this is a Go type error.
+- `return q.CheckCtx(...), nil` — same reason.
+- `q.CheckCtx` in a return-position or hoisted inside another expression.
 
 ## See also
 

@@ -72,6 +72,22 @@ var ErrBadTypeAssert = errors.New("q: type assertion failed")
 // file:line and any user-supplied message before the sentinel.
 var ErrRequireFailed = errors.New("q.Require failed")
 
+// Const builds a Catch handler that always recovers to the supplied
+// value, ignoring the captured error. Pure runtime helper — not
+// rewritten by the preprocessor. Useful as the fallback in any chain
+// method that takes a func(error) (T, error):
+//
+//	n := q.TryE(strconv.Atoi(s)).Catch(q.Const(0))
+//	conn := q.OpenE(dial(addr)).Catch(q.Const(fallbackConn)).Release((*Conn).Close)
+//
+// q.Const fits the err-taking Catch shape used by ErrResult /
+// OpenResultE / TraceResult / AwaitE chains. The no-arg-Catch shapes
+// on q.NotNilE / q.OkE require a different signature; for those write
+// the closure inline.
+func Const[T any](v T) func(error) (T, error) {
+	return func(error) (T, error) { return v, nil }
+}
+
 // _qLink is the bodyless link-gate symbol. //go:linkname binds it to
 // the external _q_atCompileTime symbol that only the q preprocessor's
 // toolexec pass supplies (as a no-op companion file appended to
@@ -205,6 +221,51 @@ func (r ErrResult[T]) Wrap(msg string) T {
 func (r ErrResult[T]) Wrapf(format string, args ...any) T {
 	panicUnrewritten("q.TryE(...).Wrapf")
 	return r.v
+}
+
+// RecoverIs is a chain-continuing recovery: when the captured err
+// matches sentinel via errors.Is, the chain's value becomes value
+// and the err is cleared. Otherwise the err passes through to the
+// next chain step. The intermediate result is still ErrResult[T],
+// so RecoverIs MUST be followed by a terminal method (Err, ErrF,
+// Catch, Wrap, Wrapf) — using it as the chain's last step is a
+// build-time error from the preprocessor (the bubble would be
+// silently swallowed otherwise).
+//
+// Example:
+//
+//	n := q.TryE(strconv.Atoi(s)).
+//	    RecoverIs(strconv.ErrSyntax, 0).
+//	    Wrapf("parsing %q", s)
+//	// Returns 0 if s isn't a valid syntax; bubbles the wrapped err otherwise.
+//
+// Multiple RecoverIs / RecoverAs steps may be chained in source
+// order; each runs its check only if no earlier step has already
+// recovered.
+func (r ErrResult[T]) RecoverIs(sentinel error, value T) ErrResult[T] {
+	panicUnrewritten("q.TryE(...).RecoverIs")
+	return r
+}
+
+// RecoverAs is the errors.As-flavoured chain-continuing recovery.
+// When the captured err can be extracted into the type carried by
+// typedNil (a typed-nil literal such as `(*MyErr)(nil)`), the
+// chain's value becomes value and the err is cleared. The
+// preprocessor extracts the target type syntactically from the
+// typedNil arg at compile time, so it must be a typed-nil
+// expression (e.g. `(*strconv.NumError)(nil)`); arbitrary error
+// values are rejected with a diagnostic.
+//
+// Like RecoverIs, RecoverAs must be followed by a terminal method.
+//
+// Example:
+//
+//	n := q.TryE(strconv.Atoi(s)).
+//	    RecoverAs((*strconv.NumError)(nil), -1).
+//	    Wrapf("parsing %q", s)
+func (r ErrResult[T]) RecoverAs(typedNil error, value T) ErrResult[T] {
+	panicUnrewritten("q.TryE(...).RecoverAs")
+	return r
 }
 
 // NilResult carries a captured *T for the q.NotNilE chain. Methods
@@ -367,6 +428,16 @@ func (r OpenResult[T]) Release(cleanup func(T)) T {
 	return r.v
 }
 
+// NoRelease bubbles err on failure and returns v on success without
+// registering any deferred cleanup. Use it to make the
+// "no cleanup needed" intent explicit at the call site, instead of
+// passing a do-nothing function to .Release. The bubble path is
+// identical to .Release's; only the success path differs.
+func (r OpenResult[T]) NoRelease() T {
+	panicUnrewritten("q.Open(...).NoRelease")
+	return r.v
+}
+
 // OpenResultE is the chain-capable Open handle. Shape methods return
 // OpenResultE[T] so Release can terminate the chain; Release itself
 // returns T.
@@ -412,6 +483,15 @@ func (r OpenResultE[T]) Catch(fn func(error) (T, error)) OpenResultE[T] {
 // success.
 func (r OpenResultE[T]) Release(cleanup func(T)) T {
 	panicUnrewritten("q.OpenE(...).Release")
+	return r.v
+}
+
+// NoRelease bubbles the shaped error on failure and returns v on
+// success without registering any deferred cleanup. Same semantics
+// as q.OpenResult.NoRelease but composes with the shape methods
+// (Wrap/Wrapf/Err/ErrF/Catch) on q.OpenE.
+func (r OpenResultE[T]) NoRelease() T {
+	panicUnrewritten("q.OpenE(...).NoRelease")
 	return r.v
 }
 
@@ -872,14 +952,14 @@ func (r OkResult[T]) Wrapf(format string, args ...any) T {
 // Example:
 //
 //	for _, item := range items {
-//	    q.Bubble(ctx)
+//	    q.CheckCtx(ctx)
 //	    process(item)
 //	}
 //
-// Reach for q.BubbleE to shape the bubbled error via the ErrResult
+// Reach for q.CheckCtxE to shape the bubbled error via the ErrResult
 // vocabulary (Err / ErrF / Catch / Wrap / Wrapf).
 func Bubble(ctx context.Context) {
-	panicUnrewritten("q.Bubble")
+	panicUnrewritten("q.CheckCtx")
 }
 
 // BubbleE starts a chain on a context-cancellation checkpoint. The
@@ -887,7 +967,7 @@ func Bubble(ctx context.Context) {
 // Catch). Reuses CheckResult — BubbleE has no value to thread, only
 // an error to shape.
 func BubbleE(ctx context.Context) CheckResult {
-	panicUnrewritten("q.BubbleE")
+	panicUnrewritten("q.CheckCtxE")
 	return CheckResult{}
 }
 

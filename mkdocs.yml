@@ -43,7 +43,7 @@ nav:
     - q.Async:                 api/async.md
     - q.AwaitAll / AwaitAny:   api/await_multi.md
     - q.AwaitCtx:              api/await_ctx.md
-    - q.Bubble:                api/bubble.md
+    - q.CheckCtx:              api/checkctx.md
     - q.Check:                 api/check.md
     - q.DebugPrintln / SlogAttr: api/debug.md
     - q.Lock:                  api/lock.md

@@ -1,0 +1,5 @@
+noReleaseSuccess: id=1 err=<nil> closes=0
+noReleaseBubble: nil=true err=boom closes=0
+noReleaseEWrap: nil=true err=dialing: boom closes=0
+noReleaseECatch: id=99 err=<nil> closes=0
+releaseSuccess: id=5 err=<nil> closes=1

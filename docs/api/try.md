@@ -30,7 +30,9 @@ The zeros come from the enclosing function's result list — one `*new(T)` per n
 
 ## Chain methods on `q.TryE`
 
-All methods are terminal — they return `T`.
+### Terminals
+
+These end the chain by emitting the bubble check; they return `T`.
 
 | Method                                | Bubbled error                                         |
 |---------------------------------------|-------------------------------------------------------|
@@ -54,6 +56,54 @@ n := q.TryE(strconv.Atoi(s)).Catch(func(e error) (int, error) {
 ```
 
 `errors.Is` and `errors.As` traverse `.Wrap` / `.Wrapf` correctly — the generated `fmt.Errorf` uses `%w`, so the underlying sentinel / typed error is reachable downstream.
+
+### Recovers (chain-continuing)
+
+Two intermediates that recover specific failure modes without ending the chain — they return `ErrResult[T]`, so a terminal still has to follow.
+
+| Method                                          | Effect                                                                                          |
+|-------------------------------------------------|-------------------------------------------------------------------------------------------------|
+| `.RecoverIs(sentinel error, value T)`           | If `errors.Is(capturedErr, sentinel)`, recover with `value` and clear the err. Else pass through. |
+| `.RecoverAs(typedNil error, value T)`           | If `errors.As` succeeds extracting capturedErr into the type carried by `typedNil`, recover.    |
+
+`typedNil` for `RecoverAs` must be a typed-nil literal (`(*MyErr)(nil)` or `MyErrType(nil)`); the rewriter extracts the target type at compile time.
+
+The user's "recover this case, wrap everything else" pattern collapses into a one-liner:
+
+```go
+// Before
+n := q.TryE(strconv.Atoi(s)).Catch(func(e error) (int, error) {
+    if errors.Is(e, strconv.ErrSyntax) {
+        return 0, nil
+    }
+    return 0, fmt.Errorf("parsing %q: %w", s, e)
+})
+
+// After
+n := q.TryE(strconv.Atoi(s)).
+    RecoverIs(strconv.ErrSyntax, 0).
+    Wrapf("parsing %q", s)
+```
+
+Multiple Recover steps may be chained; each runs only if no earlier step has already recovered:
+
+```go
+n := q.TryE(call()).
+    RecoverIs(ErrA, 1).
+    RecoverIs(ErrB, 2).
+    RecoverAs((*MyErr)(nil), 3).
+    Wrap("loading")
+```
+
+Standalone use (RecoverIs / RecoverAs as the chain's last step) is rejected by the preprocessor — the bubble would be silently swallowed otherwise. Always pair them with a terminal.
+
+### Standalone runtime helpers
+
+Not chain methods, but they pair naturally with `.Catch`:
+
+| Helper                              | Returns                                                |
+|-------------------------------------|--------------------------------------------------------|
+| `q.Const[T any](v T) func(error) (T, error)` | Always recovers to `v`. Useful as `.Catch(q.Const(0))`. |
 
 ## Statement forms
 

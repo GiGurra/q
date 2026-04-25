@@ -27,8 +27,8 @@ func defineForm(parent context.Context) (derived context.Context) {
 func assignForm(ctx context.Context) error {
 	ctx = q.Timeout(ctx, 5*time.Millisecond)
 	time.Sleep(20 * time.Millisecond)
-	// Bubble so we can observe that the derived ctx did expire.
-	q.Bubble(ctx)
+	// CheckCtx so we can observe that the derived ctx did expire.
+	q.CheckCtx(ctx)
 	return nil
 }
 
@@ -36,7 +36,7 @@ func assignForm(ctx context.Context) error {
 func deadlineForm(parent context.Context) error {
 	ctx := q.Deadline(parent, time.Now().Add(5*time.Millisecond))
 	time.Sleep(20 * time.Millisecond)
-	q.Bubble(ctx)
+	q.CheckCtx(ctx)
 	return nil
 }
 
@@ -56,7 +56,7 @@ func main() {
 	d := defineForm(bg)
 	fmt.Printf("define.err: %v\n", d.Err())
 
-	// assignForm — the deadline fires before Bubble, so Bubble
+	// assignForm — the deadline fires before CheckCtx, so CheckCtx
 	// bubbles context.DeadlineExceeded.
 	err := assignForm(bg)
 	fmt.Printf("assign.err: %v\n", err)

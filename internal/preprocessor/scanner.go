@@ -63,8 +63,8 @@ const (
 	familyAwaitE      // q.AwaitE(f).<method> — TryE-like chain over q.AwaitRaw
 	familyRecoverAuto  // defer q.Recover()       — inject &err from enclosing sig
 	familyRecoverEAuto // defer q.RecoverE().M(x) — same, for the chain variant
-	familyBubble       // q.Bubble(ctx) — ctx.Err() checkpoint
-	familyBubbleE      // q.BubbleE(ctx).<method> — chain variant
+	familyCheckCtx       // q.CheckCtx(ctx) — ctx.Err() checkpoint
+	familyCheckCtxE      // q.CheckCtxE(ctx).<method> — chain variant
 	familyRecvCtx      // q.RecvCtx(ctx, ch) — ctx-aware channel receive
 	familyRecvCtxE     // q.RecvCtxE(ctx, ch).<method> — chain variant
 	familyAwaitCtx     // q.AwaitCtx(ctx, f) — ctx-aware future await
@@ -145,10 +145,22 @@ type qSubCall struct {
 
 	// ReleaseArg is the cleanup function passed to .Release in the
 	// Open family (familyOpen / familyOpenE). nil for every other
-	// family. When non-nil, the rewriter emits a `defer
-	// (<cleanup>)(<resultVar>)` line on the success path so the
-	// cleanup fires when the enclosing function returns.
+	// family AND for the .NoRelease() variant. When non-nil, the
+	// rewriter emits a `defer (<cleanup>)(<resultVar>)` line on the
+	// success path so the cleanup fires when the enclosing function
+	// returns.
 	ReleaseArg ast.Expr
+
+	// NoRelease is true when the Open chain terminates with the
+	// zero-arg .NoRelease() instead of .Release(cleanup). Bubble
+	// path is identical; the rewriter skips the defer-cleanup line.
+	NoRelease bool
+
+	// RecoverSteps carries any leading .RecoverIs / .RecoverAs chain
+	// methods that sit between the entry call and the terminal
+	// method (in source order). Currently only the TryE chain
+	// exposes these. Empty for every other chain shape.
+	RecoverSteps []recoverStep
 
 	// OkArgs is the raw argument list of the q.Ok / q.OkE entry
 	// call. nil for every other family. Ok accepts either a single
@@ -170,6 +182,30 @@ type qSubCall struct {
 	// valid, the rewriter appends `...` to the raw-helper call it
 	// emits so the variadic spread survives the rewrite.
 	EntryEllipsis token.Pos
+}
+
+// recoverKind selects between the errors.Is and errors.As variants
+// of the chain-continuing recovery methods.
+type recoverKind int
+
+const (
+	recoverKindIs recoverKind = iota // .RecoverIs(sentinel, value)
+	recoverKindAs                    // .RecoverAs(typedNil, value)
+)
+
+// recoverStep encodes one .RecoverIs(sentinel, value) or
+// .RecoverAs(typedNil, value) chain step. Stored on qSubCall and
+// rendered before the terminal bubble check.
+type recoverStep struct {
+	// Kind selects between errors.Is (sentinel) and errors.As (type).
+	Kind recoverKind
+	// MatchArg is the first arg to RecoverIs / RecoverAs:
+	// - For Is: the sentinel error expression.
+	// - For As: a typed-nil literal whose type the rewriter extracts
+	//   at compile time (e.g. `(*MyErr)(nil)`).
+	MatchArg ast.Expr
+	// ValueArg is the second arg — the recovery value of type T.
+	ValueArg ast.Expr
 }
 
 // callShape describes one recognised q.* call site, captured at scan
@@ -225,6 +261,7 @@ var chainMethods = map[string]bool{
 // flag.
 var qRuntimeHelpers = map[string]bool{
 	"ToErr":           true,
+	"Const":           true,
 	"DebugPrintlnAt":  true,
 	"Async":           true,
 	"AwaitRaw":        true,
@@ -731,12 +768,12 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 		}
 		return qSubCall{Family: familyAs, InnerExpr: call.Args[0], AsType: typeArg, OuterCall: expr}, true, nil
 	}
-	// Bare q.Bubble — ctx.Err() checkpoint. Statement-only (discard).
-	if isSelector(call.Fun, alias, "Bubble") {
+	// Bare q.CheckCtx — ctx.Err() checkpoint. Statement-only (discard).
+	if isSelector(call.Fun, alias, "CheckCtx") {
 		if len(call.Args) != 1 {
-			return qSubCall{}, false, fmt.Errorf("q.Bubble must take exactly one argument (a context.Context); got %d", len(call.Args))
+			return qSubCall{}, false, fmt.Errorf("q.CheckCtx must take exactly one argument (a context.Context); got %d", len(call.Args))
 		}
-		return qSubCall{Family: familyBubble, InnerExpr: call.Args[0], OuterCall: expr}, true, nil
+		return qSubCall{Family: familyCheckCtx, InnerExpr: call.Args[0], OuterCall: expr}, true, nil
 	}
 	// Bare q.RecvCtx(ctx, ch) — ctx-aware receive.
 	if isSelector(call.Fun, alias, "RecvCtx") {
@@ -874,19 +911,37 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 	// Chain on q.TryE / q.NotNilE / q.CheckE, or a q.Open / q.OpenE
 	// chain terminated by .Release.
 	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-		// .Release terminal — walk down through an optional shape
-		// method to find q.Open / q.OpenE.
-		if sel.Sel.Name == "Release" {
+		// .Release / .NoRelease terminal — walk down through an
+		// optional shape method to find q.Open / q.OpenE.
+		if sel.Sel.Name == "Release" || sel.Sel.Name == "NoRelease" {
 			return classifyOpenChain(call, sel, alias)
+		}
+		// Reject .RecoverIs / .RecoverAs as the outer (terminal)
+		// method — they continue the chain and must be followed by
+		// a real terminal that bubbles. Standalone use leaves the
+		// captured err silently swallowed.
+		if sel.Sel.Name == "RecoverIs" || sel.Sel.Name == "RecoverAs" {
+			return qSubCall{}, false, fmt.Errorf("%s must be followed by a terminal method (Err, ErrF, Wrap, Wrapf, Catch); standalone use would silently swallow the bubble", sel.Sel.Name)
 		}
 		entry, isEntry := sel.X.(*ast.CallExpr)
 		if !isEntry {
 			return qSubCall{}, false, nil
 		}
+		// Peel any leading .RecoverIs / .RecoverAs steps off `entry`
+		// before dispatching on the underlying entry name. Currently
+		// only the q.TryE chain accepts these intermediates.
+		actualEntry, recoverSteps, err := peelRecovers(entry)
+		if err != nil {
+			return qSubCall{}, false, err
+		}
+		entry = actualEntry
+		if len(recoverSteps) > 0 && !isSelector(entry.Fun, alias, "TryE") {
+			return qSubCall{}, false, fmt.Errorf("RecoverIs / RecoverAs are only supported on the q.TryE chain; chain entry must be q.TryE(...) for these intermediates to apply")
+		}
 		switch {
 		case isSelector(entry.Fun, alias, "TryE"):
 			if !chainMethods[sel.Sel.Name] {
-				return qSubCall{}, false, fmt.Errorf("q.TryE chain method %q not recognised; valid: Err, ErrF, Catch, Wrap, Wrapf", sel.Sel.Name)
+				return qSubCall{}, false, fmt.Errorf("q.TryE chain method %q not recognised; valid: Err, ErrF, Catch, Wrap, Wrapf, RecoverIs, RecoverAs", sel.Sel.Name)
 			}
 			if len(entry.Args) != 1 {
 				return qSubCall{}, false, fmt.Errorf("q.TryE must take exactly one argument (a (T, error)-returning call); got %d", len(entry.Args))
@@ -894,7 +949,7 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 			if _, ok := entry.Args[0].(*ast.CallExpr); !ok {
 				return qSubCall{}, false, fmt.Errorf("q.TryE's argument must itself be a call expression returning (T, error)")
 			}
-			return qSubCall{Family: familyTryE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Args[0], OuterCall: expr}, true, nil
+			return qSubCall{Family: familyTryE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Args[0], OuterCall: expr, RecoverSteps: recoverSteps}, true, nil
 		case isSelector(entry.Fun, alias, "NotNilE"):
 			if !chainMethods[sel.Sel.Name] {
 				return qSubCall{}, false, fmt.Errorf("q.NotNilE chain method %q not recognised; valid: Err, ErrF, Catch, Wrap, Wrapf", sel.Sel.Name)
@@ -938,14 +993,14 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 				return qSubCall{}, false, fmt.Errorf("q.RecvE must take exactly one argument (a channel); got %d", len(entry.Args))
 			}
 			return qSubCall{Family: familyRecvE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Args[0], OuterCall: expr}, true, nil
-		case isSelector(entry.Fun, alias, "BubbleE"):
+		case isSelector(entry.Fun, alias, "CheckCtxE"):
 			if !chainMethods[sel.Sel.Name] {
-				return qSubCall{}, false, fmt.Errorf("q.BubbleE chain method %q not recognised; valid: Err, ErrF, Catch, Wrap, Wrapf", sel.Sel.Name)
+				return qSubCall{}, false, fmt.Errorf("q.CheckCtxE chain method %q not recognised; valid: Err, ErrF, Catch, Wrap, Wrapf", sel.Sel.Name)
 			}
 			if len(entry.Args) != 1 {
-				return qSubCall{}, false, fmt.Errorf("q.BubbleE must take exactly one argument (a context.Context); got %d", len(entry.Args))
+				return qSubCall{}, false, fmt.Errorf("q.CheckCtxE must take exactly one argument (a context.Context); got %d", len(entry.Args))
 			}
-			return qSubCall{Family: familyBubbleE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Args[0], OuterCall: expr}, true, nil
+			return qSubCall{Family: familyCheckCtxE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Args[0], OuterCall: expr}, true, nil
 		case isSelector(entry.Fun, alias, "RecvCtxE"):
 			if !chainMethods[sel.Sel.Name] {
 				return qSubCall{}, false, fmt.Errorf("q.RecvCtxE chain method %q not recognised; valid: Err, ErrF, Catch, Wrap, Wrapf", sel.Sel.Name)
@@ -1045,23 +1100,81 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 	return qSubCall{}, false, nil
 }
 
-// classifyOpenChain recognises the q.Open / q.OpenE terminal Release
-// shape, optionally with one intermediate shape method between the
-// entry and Release:
+// peelRecovers walks down through any leading
+// .RecoverIs(sentinel, value) / .RecoverAs(typedNil, value) chain
+// calls on `entry`, returning the underlying entry call and the
+// recover steps in source order. If `entry` itself is not a chain
+// (i.e. its .Fun is not a SelectorExpr selecting RecoverIs/RecoverAs),
+// returns entry and nil.
+//
+// `entry` is the outer terminal's `.X` — what would otherwise be
+// the entry call directly. If RecoverIs/RecoverAs sit between the
+// entry and the terminal, this peels them off.
+func peelRecovers(entry *ast.CallExpr) (*ast.CallExpr, []recoverStep, error) {
+	var steps []recoverStep
+	cur := entry
+	for {
+		sel, ok := cur.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return cur, steps, nil
+		}
+		var kind recoverKind
+		switch sel.Sel.Name {
+		case "RecoverIs":
+			kind = recoverKindIs
+		case "RecoverAs":
+			kind = recoverKindAs
+		default:
+			// Not a Recover step — done peeling.
+			return cur, steps, nil
+		}
+		if len(cur.Args) != 2 {
+			return nil, nil, fmt.Errorf("q.TryE(...).%s requires exactly two arguments (match target, recovery value); got %d", sel.Sel.Name, len(cur.Args))
+		}
+		// Prepend so steps end up in source order
+		// (innermost-first walked, so build in reverse).
+		steps = append([]recoverStep{{
+			Kind:     kind,
+			MatchArg: cur.Args[0],
+			ValueArg: cur.Args[1],
+		}}, steps...)
+		next, ok := sel.X.(*ast.CallExpr)
+		if !ok {
+			return nil, nil, fmt.Errorf("q.TryE(...).%s applied to a non-call expression; the chain must reach a q.TryE entry call", sel.Sel.Name)
+		}
+		cur = next
+	}
+}
+
+// classifyOpenChain recognises the q.Open / q.OpenE terminal
+// Release / NoRelease shape, optionally with one intermediate shape
+// method between the entry and the terminal:
 //
 //	q.Open(call()).Release(cleanup)
+//	q.Open(call()).NoRelease()                       // explicit no-cleanup
 //	q.OpenE(call()).Release(cleanup)
-//	q.OpenE(call()).<Shape>(args).Release(cleanup)    // Shape ∈ Err/ErrF/Wrap/Wrapf/Catch
+//	q.OpenE(call()).NoRelease()
+//	q.OpenE(call()).<Shape>(args).Release(cleanup)   // Shape ∈ Err/ErrF/Wrap/Wrapf/Catch
+//	q.OpenE(call()).<Shape>(args).NoRelease()
 //
-// call is the outer Release CallExpr; sel is its .Fun SelectorExpr
-// (sel.Sel.Name == "Release"). expr is the source expression
-// (== call) used for OuterCall span.
+// call is the outer Release/NoRelease CallExpr; sel is its .Fun
+// SelectorExpr (sel.Sel.Name ∈ {"Release", "NoRelease"}). expr is
+// the source expression (== call) used for OuterCall span.
 func classifyOpenChain(call *ast.CallExpr, sel *ast.SelectorExpr, alias string) (qSubCall, bool, error) {
 	expr := ast.Expr(call)
-	if len(call.Args) != 1 {
-		return qSubCall{}, false, fmt.Errorf("q.Open/OpenE(...).Release requires exactly one argument (a cleanup fn); got %d", len(call.Args))
+	noRelease := sel.Sel.Name == "NoRelease"
+
+	var releaseArg ast.Expr
+	if noRelease {
+		if len(call.Args) != 0 {
+			return qSubCall{}, false, fmt.Errorf("q.Open/OpenE(...).NoRelease takes no arguments; got %d", len(call.Args))
+		}
+	} else {
+		if len(call.Args) != 1 {
+			return qSubCall{}, false, fmt.Errorf("q.Open/OpenE(...).Release requires exactly one argument (a cleanup fn); got %d", len(call.Args))
+		}
+		releaseArg = call.Args[0]
 	}
-	releaseArg := call.Args[0]
 
 	inner, ok := sel.X.(*ast.CallExpr)
 	if !ok {
@@ -1081,10 +1194,11 @@ func classifyOpenChain(call *ast.CallExpr, sel *ast.SelectorExpr, alias string) 
 			InnerExpr:  entry.Args[0],
 			OuterCall:  expr,
 			ReleaseArg: releaseArg,
+			NoRelease:  noRelease,
 		}, true, nil
 	}
 
-	// Case 2: inner is a shape-method call on q.OpenE: q.OpenE(x).<Shape>(args).Release(...).
+	// Case 2: inner is a shape-method call on q.OpenE: q.OpenE(x).<Shape>(args).<Release|NoRelease>().
 	shapeSel, ok := inner.Fun.(*ast.SelectorExpr)
 	if !ok {
 		return qSubCall{}, false, nil
@@ -1116,6 +1230,7 @@ func classifyOpenChain(call *ast.CallExpr, sel *ast.SelectorExpr, alias string) 
 		InnerExpr:  entry.Args[0],
 		OuterCall:  expr,
 		ReleaseArg: releaseArg,
+		NoRelease:  noRelease,
 	}, true, nil
 }
 

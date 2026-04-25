@@ -669,8 +669,8 @@ func renderSubCall(fset *token.FileSet, src []byte, sh callShape, subIdx int, su
 		text, err := renderTry(fset, src, sh, sub, counter, subs, subTexts)
 		return text, false, false, false, err
 	case familyTryE:
-		text, fmtUsed, err := renderTryE(fset, src, sh, sub, counter, subs, subTexts)
-		return text, fmtUsed, false, false, err
+		text, fmtUsed, errorsUsed, err := renderTryE(fset, src, sh, sub, counter, subs, subTexts)
+		return text, fmtUsed, errorsUsed, false, err
 	case familyNotNil:
 		text, err := renderNotNil(fset, src, sh, sub, counter, alias, subs, subTexts)
 		return text, false, false, false, err
@@ -740,11 +740,11 @@ func renderSubCall(fset *token.FileSet, src []byte, sh callShape, subIdx int, su
 	case familyRecoverEAuto:
 		text, err := renderRecoverEAuto(fset, src, sh, sub, alias, subs, subTexts)
 		return text, false, false, false, err
-	case familyBubble:
-		text, err := renderBubble(fset, src, sh, sub, counter, subs, subTexts)
+	case familyCheckCtx:
+		text, err := renderCheckCtx(fset, src, sh, sub, counter, subs, subTexts)
 		return text, false, false, false, err
-	case familyBubbleE:
-		text, fmtUsed, err := renderBubbleE(fset, src, sh, sub, counter, subs, subTexts)
+	case familyCheckCtxE:
+		text, fmtUsed, err := renderCheckCtxE(fset, src, sh, sub, counter, subs, subTexts)
 		return text, fmtUsed, false, false, err
 	case familyRecvCtx:
 		text, err := renderRecvCtx(fset, src, sh, sub, counter, alias, subs, subTexts)
@@ -974,6 +974,10 @@ func renderOpen(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, cou
 		return "", false, fmt.Errorf("renderOpen: unknown method %q", sub.Method)
 	}
 
+	if sub.NoRelease {
+		// .NoRelease() — bubble check only, no defer cleanup.
+		return block, fmtUsed, nil
+	}
 	cleanupText := exprTextSubst(fset, src, sub.ReleaseArg, subs, subTexts)
 	deferLine := fmt.Sprintf("defer (%s)(%s)", cleanupText, valueVar)
 	return block + "\n" + indent + deferLine, fmtUsed, nil
@@ -1035,45 +1039,57 @@ func renderTry(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, coun
 
 // renderTryE produces the replacement for q.TryE chains across all
 // four forms. The chain method picks how the bubbled error is
-// shaped; the form picks the bind line.
-func renderTryE(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, counter int, subs []qSubCall, subTexts []string) (string, bool, error) {
+// shaped; the form picks the bind line. RecoverIs / RecoverAs
+// intermediates (if any) emit a per-step `if errors.Is/As(...) { v,
+// _qErr = value, nil }` block between the bind and the terminal
+// bubble check.
+func renderTryE(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, counter int, subs []qSubCall, subTexts []string) (string, bool, bool, error) {
 	zeros, indent, errVar, innerText, err := commonRenderInputs(fset, src, sh, sub, counter, subs, subTexts)
 	if err != nil {
-		return "", false, err
+		return "", false, false, err
 	}
 	bindLine := tryBindLine(fset, src, sh, errVar, innerText, indent, counter)
+	recoveryLHS := lhsTextOrUnderscore(fset, src, sh, counter)
+	recoverPrelude, recoverErr := renderRecoverSteps(fset, src, sub, counter, indent, errVar, recoveryLHS, subs, subTexts)
+	if recoverErr != nil {
+		return "", false, false, recoverErr
+	}
+	bindLine = bindLine + recoverPrelude
+	// Recover steps emit errors.Is / errors.As, which require the
+	// errors import. Flag for the import-injection pass.
+	errorsUsed := len(sub.RecoverSteps) > 0
 
 	switch sub.Method {
 	case "Err":
 		if len(sub.MethodArgs) != 1 {
-			return "", false, fmt.Errorf("q.TryE(...).Err requires exactly one argument (the replacement error); got %d", len(sub.MethodArgs))
+			return "", false, false, fmt.Errorf("q.TryE(...).Err requires exactly one argument (the replacement error); got %d", len(sub.MethodArgs))
 		}
 		zeros[len(zeros)-1] = exprTextSubst(fset, src, sub.MethodArgs[0], subs, subTexts)
-		return assembleErrBlock(bindLine, errVar, indent, zeros), false, nil
+		return assembleErrBlock(bindLine, errVar, indent, zeros), false, errorsUsed, nil
 
 	case "ErrF":
 		if len(sub.MethodArgs) != 1 {
-			return "", false, fmt.Errorf("q.TryE(...).ErrF requires exactly one argument (an error-transform fn); got %d", len(sub.MethodArgs))
+			return "", false, false, fmt.Errorf("q.TryE(...).ErrF requires exactly one argument (an error-transform fn); got %d", len(sub.MethodArgs))
 		}
 		fn := exprTextSubst(fset, src, sub.MethodArgs[0], subs, subTexts)
 		zeros[len(zeros)-1] = fmt.Sprintf("(%s)(%s)", fn, errVar)
-		return assembleErrBlock(bindLine, errVar, indent, zeros), false, nil
+		return assembleErrBlock(bindLine, errVar, indent, zeros), false, errorsUsed, nil
 
 	case "Wrap":
 		if len(sub.MethodArgs) != 1 {
-			return "", false, fmt.Errorf("q.TryE(...).Wrap requires exactly one argument (the message string); got %d", len(sub.MethodArgs))
+			return "", false, false, fmt.Errorf("q.TryE(...).Wrap requires exactly one argument (the message string); got %d", len(sub.MethodArgs))
 		}
 		msg := exprTextSubst(fset, src, sub.MethodArgs[0], subs, subTexts)
 		zeros[len(zeros)-1] = fmt.Sprintf(`fmt.Errorf("%%s: %%w", %s, %s)`, msg, errVar)
-		return assembleErrBlock(bindLine, errVar, indent, zeros), true, nil
+		return assembleErrBlock(bindLine, errVar, indent, zeros), true, errorsUsed, nil
 
 	case "Wrapf":
 		if len(sub.MethodArgs) < 1 {
-			return "", false, fmt.Errorf("q.TryE(...).Wrapf requires at least one argument (the format string); got %d", len(sub.MethodArgs))
+			return "", false, false, fmt.Errorf("q.TryE(...).Wrapf requires at least one argument (the format string); got %d", len(sub.MethodArgs))
 		}
 		formatExpr, ok := sub.MethodArgs[0].(*ast.BasicLit)
 		if !ok || formatExpr.Kind != token.STRING {
-			return "", false, fmt.Errorf("q.TryE(...).Wrapf's first argument must be a string literal so the rewriter can splice in `: %%w`")
+			return "", false, false, fmt.Errorf("q.TryE(...).Wrapf's first argument must be a string literal so the rewriter can splice in `: %%w`")
 		}
 		raw := formatExpr.Value
 		formatWithW := raw[:len(raw)-1] + `: %w` + `"`
@@ -1083,11 +1099,11 @@ func renderTryE(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, cou
 		}
 		argParts = append(argParts, errVar)
 		zeros[len(zeros)-1] = fmt.Sprintf("fmt.Errorf(%s)", joinWith(argParts, ", "))
-		return assembleErrBlock(bindLine, errVar, indent, zeros), true, nil
+		return assembleErrBlock(bindLine, errVar, indent, zeros), true, errorsUsed, nil
 
 	case "Catch":
 		if len(sub.MethodArgs) != 1 {
-			return "", false, fmt.Errorf("q.TryE(...).Catch requires exactly one argument (a (T, error)-returning fn); got %d", len(sub.MethodArgs))
+			return "", false, false, fmt.Errorf("q.TryE(...).Catch requires exactly one argument (a (T, error)-returning fn); got %d", len(sub.MethodArgs))
 		}
 		fn := exprTextSubst(fset, src, sub.MethodArgs[0], subs, subTexts)
 		retErrVar := fmt.Sprintf("_qRet%d", counter)
@@ -1096,11 +1112,75 @@ func renderTryE(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, cou
 		// recovered value — i.e. formDefine or formAssign. In
 		// formDiscard there is no LHS to rebind; rewrite as if it were
 		// ErrF returning the second tuple element.
-		recoveryLHS := lhsTextOrUnderscore(fset, src, sh, counter)
-		return assembleCatchErrBlock(bindLine, recoveryLHS, errVar, retErrVar, fn, indent, zeros), false, nil
+		return assembleCatchErrBlock(bindLine, recoveryLHS, errVar, retErrVar, fn, indent, zeros), false, errorsUsed, nil
 	}
 
-	return "", false, fmt.Errorf("renderTryE: unknown method %q", sub.Method)
+	return "", false, false, fmt.Errorf("renderTryE: unknown method %q", sub.Method)
+}
+
+// renderRecoverSteps emits one block per RecoverIs / RecoverAs step,
+// to be inserted between the bind line and the terminal bubble check
+// in renderTryE. Each block clears the captured err and rebinds the
+// recovery target when the captured err matches the step's predicate.
+//
+// Returns the prelude string (with a leading "\n<indent>" per step
+// so it concatenates cleanly onto the bind line) and any error from
+// invalid step shape (e.g. RecoverAs called without a typed-nil
+// arg). The caller is responsible for marking errorsUsed=true when
+// any step is present, since the emitted blocks reference
+// errors.Is / errors.As.
+func renderRecoverSteps(fset *token.FileSet, src []byte, sub qSubCall, counter int, indent, errVar, recoveryLHS string, subs []qSubCall, subTexts []string) (string, error) {
+	if len(sub.RecoverSteps) == 0 {
+		return "", nil
+	}
+	var b bytes.Buffer
+	for i, step := range sub.RecoverSteps {
+		valueText := exprTextSubst(fset, src, step.ValueArg, subs, subTexts)
+		b.WriteByte('\n')
+		b.WriteString(indent)
+		switch step.Kind {
+		case recoverKindIs:
+			matchText := exprTextSubst(fset, src, step.MatchArg, subs, subTexts)
+			fmt.Fprintf(&b, "if %s != nil && errors.Is(%s, %s) {\n", errVar, errVar, matchText)
+			fmt.Fprintf(&b, "%s\t%s, %s = %s, nil\n", indent, recoveryLHS, errVar, valueText)
+			fmt.Fprintf(&b, "%s}", indent)
+		case recoverKindAs:
+			typeExpr, ok := extractTypeFromTypedNil(step.MatchArg)
+			if !ok {
+				return "", fmt.Errorf("q.TryE(...).RecoverAs (step %d): first argument must be a typed-nil literal like `(*MyErr)(nil)` so the rewriter can extract the target type at compile time", i+1)
+			}
+			typeText := exprText(fset, src, typeExpr)
+			asVar := fmt.Sprintf("_qAs%d_%d", counter, i)
+			fmt.Fprintf(&b, "if %s != nil {\n", errVar)
+			fmt.Fprintf(&b, "%s\tvar %s %s\n", indent, asVar, typeText)
+			fmt.Fprintf(&b, "%s\tif errors.As(%s, &%s) {\n", indent, errVar, asVar)
+			fmt.Fprintf(&b, "%s\t\t%s, %s = %s, nil\n", indent, recoveryLHS, errVar, valueText)
+			fmt.Fprintf(&b, "%s\t}\n", indent)
+			fmt.Fprintf(&b, "%s}", indent)
+		}
+	}
+	return b.String(), nil
+}
+
+// extractTypeFromTypedNil parses a typed-nil literal expression like
+// `(*MyErr)(nil)` or `MyErrType(nil)` and returns the underlying
+// type expression (`*MyErr` / `MyErrType`). The expression must be
+// a single-arg call whose only arg is the identifier `nil`. Parens
+// wrapping the type are stripped.
+func extractTypeFromTypedNil(arg ast.Expr) (ast.Expr, bool) {
+	call, ok := arg.(*ast.CallExpr)
+	if !ok || len(call.Args) != 1 {
+		return nil, false
+	}
+	id, ok := call.Args[0].(*ast.Ident)
+	if !ok || id.Name != "nil" {
+		return nil, false
+	}
+	typeExpr := call.Fun
+	if paren, ok := typeExpr.(*ast.ParenExpr); ok {
+		typeExpr = paren.X
+	}
+	return typeExpr, true
 }
 
 // renderNotNil produces the replacement for bare q.NotNil across all
@@ -1812,13 +1892,13 @@ func zeroExprs(fset *token.FileSet, src []byte, results *ast.FieldList) ([]strin
 	return out, nil
 }
 
-// renderBubble produces the replacement for bare q.Bubble. Always
+// renderCheckCtx produces the replacement for bare q.CheckCtx. Always
 // statement-only: binds `_qErrN := (ctx).Err()` and bubbles when
 // non-nil. The bubbled error is ctx.Err() itself (already carries
 // context.Canceled / context.DeadlineExceeded identity).
-func renderBubble(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, counter int, subs []qSubCall, subTexts []string) (string, error) {
+func renderCheckCtx(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, counter int, subs []qSubCall, subTexts []string) (string, error) {
 	if sh.Form != formDiscard {
-		return "", fmt.Errorf("q.Bubble must be an expression statement (no LHS, no return position); the call returns no value")
+		return "", fmt.Errorf("q.CheckCtx must be an expression statement (no LHS, no return position); the call returns no value")
 	}
 	zeros, indent, errVar, _, err := commonRenderInputs(fset, src, sh, sub, counter, subs, subTexts)
 	if err != nil {
@@ -1830,13 +1910,13 @@ func renderBubble(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, c
 	return assembleErrBlock(bindLine, errVar, indent, zeros), nil
 }
 
-// renderBubbleE produces the replacement for q.BubbleE chains.
+// renderCheckCtxE produces the replacement for q.CheckCtxE chains.
 // Mirrors renderCheckE's chain dispatch but with `(ctx).Err()` as
 // the bind-line source. The captured err (ctx.Err()) is available
 // as `_qErrN` in the bubble expression for each method.
-func renderBubbleE(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, counter int, subs []qSubCall, subTexts []string) (string, bool, error) {
+func renderCheckCtxE(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, counter int, subs []qSubCall, subTexts []string) (string, bool, error) {
 	if sh.Form != formDiscard {
-		return "", false, fmt.Errorf("q.BubbleE must be an expression statement (no LHS, no return position); the chain returns no value")
+		return "", false, fmt.Errorf("q.CheckCtxE must be an expression statement (no LHS, no return position); the chain returns no value")
 	}
 	zeros, indent, errVar, _, err := commonRenderInputs(fset, src, sh, sub, counter, subs, subTexts)
 	if err != nil {
@@ -1848,31 +1928,31 @@ func renderBubbleE(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, 
 	switch sub.Method {
 	case "Err":
 		if len(sub.MethodArgs) != 1 {
-			return "", false, fmt.Errorf("q.BubbleE(...).Err requires exactly one argument (the replacement error); got %d", len(sub.MethodArgs))
+			return "", false, fmt.Errorf("q.CheckCtxE(...).Err requires exactly one argument (the replacement error); got %d", len(sub.MethodArgs))
 		}
 		zeros[len(zeros)-1] = exprTextSubst(fset, src, sub.MethodArgs[0], subs, subTexts)
 		return assembleErrBlock(bindLine, errVar, indent, zeros), false, nil
 	case "ErrF":
 		if len(sub.MethodArgs) != 1 {
-			return "", false, fmt.Errorf("q.BubbleE(...).ErrF requires exactly one argument (an error-transform fn); got %d", len(sub.MethodArgs))
+			return "", false, fmt.Errorf("q.CheckCtxE(...).ErrF requires exactly one argument (an error-transform fn); got %d", len(sub.MethodArgs))
 		}
 		fn := exprTextSubst(fset, src, sub.MethodArgs[0], subs, subTexts)
 		zeros[len(zeros)-1] = fmt.Sprintf("(%s)(%s)", fn, errVar)
 		return assembleErrBlock(bindLine, errVar, indent, zeros), false, nil
 	case "Wrap":
 		if len(sub.MethodArgs) != 1 {
-			return "", false, fmt.Errorf("q.BubbleE(...).Wrap requires exactly one argument (the message string); got %d", len(sub.MethodArgs))
+			return "", false, fmt.Errorf("q.CheckCtxE(...).Wrap requires exactly one argument (the message string); got %d", len(sub.MethodArgs))
 		}
 		msg := exprTextSubst(fset, src, sub.MethodArgs[0], subs, subTexts)
 		zeros[len(zeros)-1] = fmt.Sprintf(`fmt.Errorf("%%s: %%w", %s, %s)`, msg, errVar)
 		return assembleErrBlock(bindLine, errVar, indent, zeros), true, nil
 	case "Wrapf":
 		if len(sub.MethodArgs) < 1 {
-			return "", false, fmt.Errorf("q.BubbleE(...).Wrapf requires at least one argument (the format string); got %d", len(sub.MethodArgs))
+			return "", false, fmt.Errorf("q.CheckCtxE(...).Wrapf requires at least one argument (the format string); got %d", len(sub.MethodArgs))
 		}
 		formatExpr, ok := sub.MethodArgs[0].(*ast.BasicLit)
 		if !ok || formatExpr.Kind != token.STRING {
-			return "", false, fmt.Errorf("q.BubbleE(...).Wrapf's first argument must be a string literal so the rewriter can splice in `: %%w`")
+			return "", false, fmt.Errorf("q.CheckCtxE(...).Wrapf's first argument must be a string literal so the rewriter can splice in `: %%w`")
 		}
 		raw := formatExpr.Value
 		formatWithW := raw[:len(raw)-1] + `: %w` + `"`
@@ -1885,7 +1965,7 @@ func renderBubbleE(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, 
 		return assembleErrBlock(bindLine, errVar, indent, zeros), true, nil
 	case "Catch":
 		if len(sub.MethodArgs) != 1 {
-			return "", false, fmt.Errorf("q.BubbleE(...).Catch requires exactly one argument (a func(error) error); got %d", len(sub.MethodArgs))
+			return "", false, fmt.Errorf("q.CheckCtxE(...).Catch requires exactly one argument (a func(error) error); got %d", len(sub.MethodArgs))
 		}
 		// Shape matches CheckE.Catch: fn returns error alone.
 		// nil = suppress (fall through), non-nil = bubble.
@@ -1903,7 +1983,7 @@ func renderBubbleE(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, 
 		fmt.Fprintf(&b, "%s}", indent)
 		return b.String(), false, nil
 	}
-	return "", false, fmt.Errorf("renderBubbleE: unknown method %q", sub.Method)
+	return "", false, fmt.Errorf("renderCheckCtxE: unknown method %q", sub.Method)
 }
 
 // ctxHelperInnerText returns `<alias>.<helper>(<spread of OkArgs>)` with

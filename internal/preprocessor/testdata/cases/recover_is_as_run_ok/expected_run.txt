@@ -1,0 +1,14 @@
+recoverIsWrapf.syntax: ok=0
+recoverIsWrapf.custom1: err=parsing "custom1": custom-1
+recoverAsErr.syntax: ok=-1
+recoverAsErr.custom1: err=custom-2
+multiRecover.custom1: ok=100
+multiRecover.custom2: ok=200
+multiRecover.syntax: err=multi: strconv.Atoi: parsing "abc": invalid syntax
+mixedIsAs.custom1: ok=11
+mixedIsAs.syntax: ok=22
+mixedIsAs.custom2: err=custom-2
+recoverIsCatch.custom1: ok=33
+recoverIsCatch.custom2: err=caught: custom-2
+happyPath: ok=7
+recoverIsWrapf.custom1.is: true

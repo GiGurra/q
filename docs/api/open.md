@@ -9,10 +9,12 @@ func Open[T any](v T, err error) OpenResult[T]
 func OpenE[T any](v T, err error) OpenResultE[T]
 
 func (OpenResult[T])  Release(cleanup func(T)) T
+func (OpenResult[T])  NoRelease() T
 func (OpenResultE[T]) Release(cleanup func(T)) T
+func (OpenResultE[T]) NoRelease() T
 ```
 
-Unlike the other families, `.Release` is the *terminal* method — it's what actually returns `T`. `q.Open(v, err)` on its own returns a `OpenResult[T]` that exposes nothing else; you always chain `.Release(cleanup)` onto it. (Why: Go's multi-return spread only fires when the multi-return call is the sole argument, so `q.Open(call(), cleanup)` won't compile. The terminal-method shape side-steps that.)
+`.Release(cleanup)` and `.NoRelease()` are both terminals — what actually returns `T`. `q.Open(v, err)` on its own returns an `OpenResult[T]` that exposes nothing else; you always chain one of the two terminals onto it. (Why a method, not an extra arg: Go's multi-return spread only fires when the multi-return call is the sole argument, so `q.Open(call(), cleanup)` won't compile. The terminal-method shape side-steps that.)
 
 ## What `q.Open` does
 
@@ -32,6 +34,26 @@ defer ((*Conn).Close)(conn)
 
 On error: bubble, no cleanup registered (nothing was acquired).
 On success: register the deferred cleanup so it fires when the enclosing function returns (whether via normal return or via a later bubble).
+
+## `.NoRelease()` — opt-in "no cleanup" terminal
+
+Some resources don't need a cleanup at the call site — for example, you might be passing the value off to a long-lived owner that handles teardown elsewhere, or the type genuinely has nothing to release. Spell that intent explicitly with `.NoRelease()`:
+
+```go
+val := q.Open(loadValue(key)).NoRelease()
+// rewrites to:
+//     val, _qErr1 := loadValue(key)
+//     if _qErr1 != nil { return /* zeros */, _qErr1 }
+//     // no defer
+```
+
+`.NoRelease()` shares the bubble path with `.Release(...)` — only the success-defer line is omitted. Composes with the OpenE shape methods just like Release does:
+
+```go
+val := q.OpenE(loadValue(key)).Wrap("loading").NoRelease()
+```
+
+Why a separate terminal instead of `Release(q.NoRelease)` (a no-op cleanup)? Spelling it as a method makes the intent obvious in code review — "we acquired this and we're not closing it, here's the call that says so" — instead of needing to look up what `q.NoRelease` does in the docs.
 
 ## Chain methods on `q.OpenE`
 

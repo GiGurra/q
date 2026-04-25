@@ -43,7 +43,7 @@ Around that core sit a handful of orthogonal helpers — context cancellation, f
 | [`q.Async`, `q.Await` / `q.AwaitE`](api/async.md) | JS-flavour promises on top of goroutines + channels. |
 | [`q.AwaitAll` / `q.AwaitAny`](api/await_multi.md) | Fan-in over many futures: gather all (`[]T`) or first-success-wins (`T`). |
 | [`q.AwaitCtx` / `q.AwaitCtxE`](api/await_ctx.md) | ctx-aware future await — bubble on cancel. |
-| [`q.Bubble` / `q.BubbleE`](api/bubble.md) | `ctx.Err()` cancellation checkpoint as a statement. |
+| [`q.CheckCtx` / `q.CheckCtxE`](api/bubble.md) | `ctx.Err()` cancellation checkpoint as a statement. |
 | [`q.Check` / `q.CheckE`](api/check.md) | Bubble on `error` alone — for `db.Ping`, `file.Close`, `validate(x)`. Statement-only. |
 | [`q.DebugPrintln` / `q.DebugSlogAttr`](api/debug.md) | Go's missing `dbg!` — prints `file:line src = value` mid-expression, or produces an auto-keyed `slog.Attr`. |
 | [`q.Lock`](api/lock.md) | `Lock()` + `defer Unlock()` for any `sync.Locker`. |
@@ -72,7 +72,7 @@ return q.Try(call()), nil                // return-position
 x := f(q.Try(call()), q.NotNil(p))       // hoist — q.* nested inside any expression
 ```
 
-`q.Check`, `q.CheckE`, `q.Lock`, `q.Bubble`, `q.TODO`, `q.Unreachable`, `q.Require`, and `q.Timeout` / `q.Deadline` are statement-only by design.
+`q.Check`, `q.CheckE`, `q.Lock`, `q.CheckCtx`, `q.TODO`, `q.Unreachable`, `q.Require`, and `q.Timeout` / `q.Deadline` are statement-only by design.
 
 ## Where to go next
 

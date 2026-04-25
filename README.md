@@ -47,15 +47,14 @@ user := q.TryE(loadUser(id)).Wrapf("loading user %d", id)
 ### Recover from a specific failure mode mid-call
 
 ```go
-n := q.TryE(strconv.Atoi(s)).Catch(func(e error) (int, error) {
-    if errors.Is(e, strconv.ErrSyntax) {
-        return 0, nil                 // recover with a default
-    }
-    return 0, fmt.Errorf("parsing %q: %w", s, e)
-})
+n := q.TryE(strconv.Atoi(s)).
+    RecoverIs(strconv.ErrSyntax, 0).
+    Wrapf("parsing %q", s)
 ```
 
-`Catch` is the union of "transform the error" and "substitute a fallback value": `(value, nil)` recovers, `(zero, err)` bubbles.
+`.RecoverIs(sentinel, value)` recovers when the captured err matches the sentinel via `errors.Is`. `.RecoverAs((*MyErr)(nil), value)` does the same via `errors.As` for typed errors. Both continue the chain — pair them with a terminal (`Wrap`, `Wrapf`, `Err`, `ErrF`, `Catch`) for the non-matching path. Multiple `Recover*` steps may be chained in source order.
+
+For full control, `.Catch(fn)` takes a `func(error) (T, error)` — return `(v, nil)` to recover, `(zero, err)` to bubble. `q.Const(v)` is a shortcut: `q.TryE(call).Catch(q.Const(0))` always recovers to 0.
 
 ### Acquire and release a resource in one statement
 
@@ -67,6 +66,12 @@ return process(conn, file)
 ```
 
 If `os.Open` fails, `conn` was already opened and `conn.Close` runs. Same semantics as hand-written `defer conn.Close()` chains, half the lines.
+
+For "we acquired this and we're explicitly *not* closing it" cases, use the `.NoRelease()` terminal — same bubble path, no defer registered:
+
+```go
+val := q.Open(loadValue(key)).NoRelease()
+```
 
 ### Bubble nil pointers, channel closes, type-assertion misses
 
@@ -83,7 +88,7 @@ Each helper picks a different failure shape; the rewrite is the same `if X { ret
 ```go
 func sync(ctx context.Context, items []Item) error {
     for _, it := range items {
-        q.Bubble(ctx)                 // bubble ctx.Err() if cancelled, no-op otherwise
+        q.CheckCtx(ctx)                 // bubble ctx.Err() if cancelled OR timed out, no-op otherwise
         q.Try(process(it))
     }
     return nil
