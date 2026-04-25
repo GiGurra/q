@@ -179,6 +179,20 @@ slog.Info("request handled",
 
 Auto-derives keys from the source text / file / line at compile time. No runtime stack walk; everything's a constant the compiler folds in.
 
+### Context-attached attrs (correlation IDs, etc.)
+
+Install once at startup, then attach attrs anywhere in request flow:
+
+```go
+q.InstallSlogJSON(nil, nil)   // JSON to os.Stderr (or pass your own base handler)
+
+// in request middleware / handler:
+ctx = q.SlogCtx(ctx, q.SlogAttr(reqID), q.SlogAttr(userID))
+slog.InfoContext(ctx, "processing")  // record auto-carries reqID + userID
+```
+
+Standard Go pattern (a wrapping `slog.Handler` that pulls attrs out of the ctx) — q just gives you the ctx key, the wrapper, and the install one-liner. Accumulating via repeated `q.SlogCtx` calls works: deeper attrs add to whatever the parent already had.
+
 ### Dev-time `dbg!` and stderr-flavored slog
 
 ```go

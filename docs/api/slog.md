@@ -97,6 +97,80 @@ The value of the argument is discarded — `q.Expr(sideEffect())` does NOT call 
 
 The `Slog*` family is valid wherever a `slog.Attr` value is wanted — typically as varargs arguments to `slog.Info` / `slog.Error` / `slog.With`. The primitive-typed family (`q.File` / `q.Line` / `q.FileLine` / `q.Expr`) is valid wherever a string or int literal is. Each is rewritten in place; nothing about q's other forms (define, assign, return, hoist) applies because these are pure expressions.
 
+## Context-aware logging
+
+Three helpers wire up "every log call through this request automatically picks up the request's correlation ID / user ID / etc.":
+
+```go
+func SlogCtx(ctx context.Context, attrs ...slog.Attr) context.Context
+func SlogContextHandler(base slog.Handler) slog.Handler
+
+func InstallSlog(base slog.Handler)                                    // generic
+func InstallSlogJSON(w io.Writer, opts *slog.HandlerOptions)            // sugar
+func InstallSlogText(w io.Writer, opts *slog.HandlerOptions)            // sugar
+```
+
+Pure runtime helpers (no preprocessor magic). The pattern is the standard Go one: a wrapping `slog.Handler` reads attrs from `ctx.Value(...)` on every record. q gives you the ctx key, the wrapping handler, and three installers for the most common cases.
+
+### Setup
+
+Once at process startup, install a logger:
+
+```go
+// JSON to stderr, default options:
+q.InstallSlogJSON(nil, nil)
+
+// Text to a file with custom options:
+q.InstallSlogText(logFile, &slog.HandlerOptions{Level: slog.LevelDebug})
+
+// Or your own base handler:
+q.InstallSlog(myCustomHandler)
+```
+
+All three call `slog.SetDefault(slog.New(q.SlogContextHandler(base)))`. The base handler is yours; q just adds the ctx-attr lookup on top.
+
+### Per-request attr accumulation
+
+Anywhere in request flow, attach attrs to the context:
+
+```go
+ctx = q.SlogCtx(ctx,
+    q.SlogAttr(reqID),
+    q.SlogAttr(userID))
+
+slog.InfoContext(ctx, "processing")
+// → record automatically carries reqID + userID
+```
+
+Repeat calls accumulate — a deeper `q.SlogCtx` adds attrs on top of whatever the parent context already had:
+
+```go
+ctx = q.SlogCtx(ctx, q.SlogAttr(traceID))
+slog.InfoContext(ctx, "step done")
+// → record carries reqID + userID + traceID (in source order)
+```
+
+The ctx is propagated as usual via Go's normal `context.Context` flow — through goroutines, RPC client middlewares, http.Request.WithContext, etc. Anywhere that ctx travels, the attrs travel with it.
+
+### Caveat: only `*Context` slog calls trigger the lookup
+
+`slog.Info(...)` does not carry a `context.Context`, so the handler has no way to find ctx-attrs. Use `slog.InfoContext(ctx, ...)` / `slog.ErrorContext(ctx, ...)` / etc. when you want the auto-attach.
+
+### Composing with other handlers
+
+q.SlogContextHandler is just a `slog.Handler` that wraps another. You can layer it with other wrappers (sampling, redaction, async) by nesting:
+
+```go
+q.InstallSlog(samplingHandler(redactingHandler(slog.NewJSONHandler(os.Stderr, nil))))
+// q's ctx-attr lookup runs first, then sampling, then redaction.
+```
+
+If you want q's ctx-attr lookup *under* another wrapper instead of on top, build the chain manually:
+
+```go
+slog.SetDefault(slog.New(samplingHandler(q.SlogContextHandler(base))))
+```
+
 ## See also
 
 - [q.DebugPrintln / q.DebugSlogAttr](debug.md) — the dev-time / `dbg!`-style cousins. Same compile-time capture mechanism, different key shape.

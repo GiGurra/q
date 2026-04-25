@@ -1,0 +1,6 @@
+empty-slogctx: input returned unchanged
+--- slog ---
+level=INFO msg=before-attach
+level=INFO msg=with-attrs reqID=r-7 userID=42
+level=INFO msg=after-accumulate reqID=r-7 userID=42 traceID=t-99
+level=INFO msg=no-ctx-call

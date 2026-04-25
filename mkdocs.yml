@@ -55,7 +55,7 @@ nav:
     - q.RecvAny / Drain:       api/channel_multi.md
     - q.RecvCtx:               api/recv_ctx.md
     - q.Require:               api/require.md
-    - q.Slog* / File / Line / Expr: api/slog.md
+    - q.Slog* / SlogCtx / File / Line / Expr: api/slog.md
     - q.Timeout / Deadline:    api/timeout.md
     - q.TODO / Unreachable:    api/todo.md
     - q.Trace:                 api/trace.md

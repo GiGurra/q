@@ -297,9 +297,14 @@ var chainMethods = map[string]bool{
 // so a standalone `q.ToErr(...)` call doesn't trip the fallback
 // flag.
 var qRuntimeHelpers = map[string]bool{
-	"ToErr":           true,
-	"Const":           true,
-	"DebugPrintlnAt":  true,
+	"ToErr":              true,
+	"Const":              true,
+	"DebugPrintlnAt":     true,
+	"SlogCtx":            true,
+	"SlogContextHandler": true,
+	"InstallSlog":        true,
+	"InstallSlogJSON":    true,
+	"InstallSlogText":    true,
 	"Async":           true,
 	"AwaitRaw":        true,
 	"AwaitRawCtx":     true,
