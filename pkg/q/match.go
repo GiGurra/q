@@ -44,7 +44,11 @@ func Match[V comparable, R any](value V, cases ...MatchCase[V, R]) R {
 	return zero
 }
 
-// Case constructs one value→result arm of a q.Match.
+// Case constructs one value→result arm of a q.Match. The result
+// expression is evaluated EAGERLY at the q.Match call site (Go's
+// argument-evaluation rules), so use q.CaseFn for expensive or
+// side-effecting computations that should only run when this arm
+// matches.
 //
 //	q.Match(c, q.Case(Red, "warm"), q.Case(Blue, "cool"))
 func Case[V, R any](value V, result R) MatchCase[V, R] {
@@ -52,13 +56,43 @@ func Case[V, R any](value V, result R) MatchCase[V, R] {
 	return MatchCase[V, R]{}
 }
 
-// Default constructs the catch-all arm of a q.Match. Up to one
-// q.Default per q.Match call. When present, the typecheck pass
-// skips the missing-constants coverage check (the catch-all covers
-// anything missing).
+// CaseFn constructs a value→result arm whose result is produced
+// LAZILY by calling fn — only when this arm matches. Useful when
+// the result is expensive to compute or has side effects you only
+// want on the matching branch.
+//
+//	q.Match(c,
+//	    q.Case(Red, "warm"),
+//	    q.CaseFn(Green, func() string { return loadFromDB() }),
+//	    q.Case(Blue, "cool"),
+//	)
+//
+// Mixes freely with q.Case in the same q.Match.
+func CaseFn[V, R any](value V, fn func() R) MatchCase[V, R] {
+	panicUnrewritten("q.CaseFn")
+	return MatchCase[V, R]{}
+}
+
+// Default constructs the catch-all arm of a q.Match. The result is
+// evaluated EAGERLY at the call site. Use q.DefaultFn for lazy
+// catch-all computation. Up to one q.Default / q.DefaultFn per
+// q.Match call. When present, the typecheck pass skips the
+// missing-constants coverage check (the catch-all covers anything
+// missing).
 //
 //	q.Match(c, q.Case(Red, "warm"), q.Default("unknown"))
 func Default[V comparable, R any](result R) MatchCase[V, R] {
 	panicUnrewritten("q.Default")
+	return MatchCase[V, R]{isDefault: true}
+}
+
+// DefaultFn is the lazy form of q.Default — fn runs only when the
+// match falls through to the catch-all. Symmetric with q.CaseFn.
+//
+//	q.Match(c, q.Case(Red, "warm"),
+//	    q.DefaultFn(func() string { return logUnknown(c); return "unknown" }),
+//	)
+func DefaultFn[V comparable, R any](fn func() R) MatchCase[V, R] {
+	panicUnrewritten("q.DefaultFn")
 	return MatchCase[V, R]{isDefault: true}
 }

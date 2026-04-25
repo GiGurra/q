@@ -6,8 +6,14 @@ Go's `switch` is a statement — it doesn't return a value. Most other modern la
 
 ```go
 func Match[V comparable, R any](value V, cases ...MatchCase[V, R]) R
+
+// Eager — result evaluates at the q.Match call site:
 func Case[V, R any](value V, result R) MatchCase[V, R]
 func Default[V comparable, R any](result R) MatchCase[V, R]
+
+// Lazy — fn runs only when this arm matches:
+func CaseFn[V, R any](value V, fn func() R) MatchCase[V, R]
+func DefaultFn[V comparable, R any](fn func() R) MatchCase[V, R]
 ```
 
 `V` must be `comparable` (Go's `switch` requirement). `R` is the result type. Both are usually inferred from the cases; you rarely need to spell them.
@@ -53,6 +59,30 @@ result := (func() string {
 ```
 
 The IIFE pattern is what you'd write by hand; q just hides the boilerplate. The Go compiler optimises away the closure for direct switches.
+
+## Lazy arms — `q.CaseFn` / `q.DefaultFn`
+
+By default each `q.Case` result evaluates eagerly at the `q.Match` call site (Go's argument-evaluation rules: every arg is evaluated before the call). For expensive computations or side effects you only want on the matching arm, use `q.CaseFn` / `q.DefaultFn`:
+
+```go
+desc := q.Match(c,
+    q.CaseFn(Red,   func() string { return loadRedDescription() }),    // only runs if c == Red
+    q.CaseFn(Green, func() string { return loadGreenDescription() }),  // only runs if c == Green
+    q.CaseFn(Blue,  func() string { return loadBlueDescription() }),   // only runs if c == Blue
+)
+```
+
+Mix freely with the eager forms in the same `q.Match`:
+
+```go
+desc := q.Match(c,
+    q.Case(Red,    "warm"),                                             // cheap, eager
+    q.CaseFn(Green, func() string { return analyseGreenAtRuntime() }), // expensive, lazy
+    q.Case(Blue,   "cool"),
+)
+```
+
+The rewriter emits `case <val>: return (<fn>)()` for lazy arms and `case <val>: return <result>` for eager. The function is invoked exactly once on the matching branch — Go's compiler typically inlines anonymous closures, so the cost is the same as a hand-written switch.
 
 ## `q.Default` opts out of coverage
 

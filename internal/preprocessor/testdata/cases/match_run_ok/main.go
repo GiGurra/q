@@ -56,6 +56,24 @@ func directionVec(dir string) Coords {
 	)
 }
 
+// Lazy: q.CaseFn / q.DefaultFn — the result is produced by calling
+// the supplied func, and only when the arm matches. Side effects in
+// non-matching arms must NOT fire.
+var sideEffectCount int
+
+func sideEffect(name string) string {
+	sideEffectCount++
+	return name
+}
+
+func lazyDescribe(c Color) string {
+	return q.Match(c,
+		q.CaseFn(Red, func() string { return sideEffect("warm") }),
+		q.CaseFn(Green, func() string { return sideEffect("natural") }),
+		q.CaseFn(Blue, func() string { return sideEffect("cool") }),
+	)
+}
+
 func main() {
 	fmt.Println(describe(Red))
 	fmt.Println(describe(Green))
@@ -66,4 +84,23 @@ func main() {
 	fmt.Println(httpStatus(503))
 	fmt.Println(directionVec("up"))
 	fmt.Println(directionVec("nowhere"))
+
+	// Lazy: only the matching arm should run sideEffect.
+	sideEffectCount = 0
+	out := lazyDescribe(Green)
+	fmt.Printf("lazyDescribe(Green) = %s sideEffects=%d\n", out, sideEffectCount)
+
+	// q.DefaultFn — only fires when no value arm matches.
+	sideEffectCount = 0
+	out = q.Match("xyz",
+		q.Case("a", "alpha"),
+		q.DefaultFn(func() string { return sideEffect("default") }),
+	)
+	fmt.Printf("DefaultFn miss = %s sideEffects=%d\n", out, sideEffectCount)
+	sideEffectCount = 0
+	out = q.Match("a",
+		q.Case("a", "alpha"),
+		q.DefaultFn(func() string { return sideEffect("default") }),
+	)
+	fmt.Printf("DefaultFn match = %s sideEffects=%d\n", out, sideEffectCount)
 }

@@ -135,14 +135,19 @@ func buildMatchReplacement(fset *token.FileSet, src []byte, sub qSubCall, subs [
 	var defaultText string
 	hasDefault := false
 	for _, mc := range sub.MatchCases {
+		resText := exprTextSubst(fset, src, mc.ResultExpr, subs, subTexts)
+		if mc.IsLazy {
+			// Lazy arm — call the user-supplied func only when
+			// this branch fires.
+			resText = "(" + resText + ")()"
+		}
 		if mc.IsDefault {
-			defaultText = exprTextSubst(fset, src, mc.ResultExpr, subs, subTexts)
+			defaultText = resText
 			hasDefault = true
 			continue
 		}
 		valExpr := exprTextSubst(fset, src, mc.ValueExpr, subs, subTexts)
-		resExpr := exprTextSubst(fset, src, mc.ResultExpr, subs, subTexts)
-		caseLines = append(caseLines, fmt.Sprintf("case %s: return %s", valExpr, resExpr))
+		caseLines = append(caseLines, fmt.Sprintf("case %s: return %s", valExpr, resText))
 	}
 	cases := joinWith(caseLines, "; ")
 	if hasDefault {

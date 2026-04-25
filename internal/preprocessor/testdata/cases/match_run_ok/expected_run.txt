@@ -7,3 +7,6 @@ ok
 unknown
 {0 -1}
 {0 0}
+lazyDescribe(Green) = natural sideEffects=1
+DefaultFn miss = default sideEffects=1
+DefaultFn match = alpha sideEffects=0

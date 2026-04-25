@@ -460,27 +460,36 @@ func resolveMatch(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPath s
 	if tv, ok := info.Types[sc.InnerExpr]; ok && tv.Type != nil {
 		sc.EnumTypeText = types.TypeString(tv.Type, qualifier)
 	}
-	// Result type from the first non-default arm's result expr,
-	// or the default arm if no value arms exist (rare — q.Match
-	// requires at least one arm).
-	var resultExpr ast.Expr
-	for _, mc := range sc.MatchCases {
+	// Result type from the first arm whose result expression
+	// resolves cleanly. For q.Case / q.Default the result expr's
+	// type IS R. For q.CaseFn / q.DefaultFn the result expr is a
+	// `func() R` — unwrap the func's single return.
+	var resultArm *matchCase
+	for i := range sc.MatchCases {
+		mc := &sc.MatchCases[i]
 		if !mc.IsDefault {
-			resultExpr = mc.ResultExpr
+			resultArm = mc
 			break
 		}
 	}
-	if resultExpr == nil {
-		for _, mc := range sc.MatchCases {
+	if resultArm == nil {
+		for i := range sc.MatchCases {
+			mc := &sc.MatchCases[i]
 			if mc.IsDefault {
-				resultExpr = mc.ResultExpr
+				resultArm = mc
 				break
 			}
 		}
 	}
-	if resultExpr != nil {
-		if tv, ok := info.Types[resultExpr]; ok && tv.Type != nil {
-			sc.ResolvedString = types.TypeString(tv.Type, qualifier)
+	if resultArm != nil {
+		if tv, ok := info.Types[resultArm.ResultExpr]; ok && tv.Type != nil {
+			resultType := tv.Type
+			if resultArm.IsLazy {
+				if sig, isSig := tv.Type.(*types.Signature); isSig && sig.Results().Len() == 1 {
+					resultType = sig.Results().At(0).Type()
+				}
+			}
+			sc.ResolvedString = types.TypeString(resultType, qualifier)
 		}
 	}
 
