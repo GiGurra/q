@@ -156,6 +156,22 @@ type qSubCall struct {
 	// path is identical; the rewriter skips the defer-cleanup line.
 	NoRelease bool
 
+	// AutoRelease is true when the Open chain terminates with the
+	// zero-arg .Release() form. The preprocessor infers the cleanup
+	// from the resource's type at compile time (channel close, or
+	// a Close() method). The typecheck pass populates AutoCleanup
+	// with the inferred kind; the rewriter consults AutoCleanup
+	// when emitting the defer line. Mutually exclusive with
+	// NoRelease and with a non-nil ReleaseArg.
+	AutoRelease bool
+
+	// AutoCleanup is the cleanup form the typecheck pass inferred
+	// for an AutoRelease=true call. Zero (cleanupUnknown) until
+	// the typecheck pass has run; if still zero by rewriter time
+	// the typecheck pass either skipped (no importcfg) or emitted
+	// a diagnostic that aborted the build.
+	AutoCleanup cleanupKind
+
 	// RecoverSteps carries any leading .RecoverIs / .RecoverAs chain
 	// methods that sit between the entry call and the terminal
 	// method (in source order). Currently only the TryE chain
@@ -183,6 +199,19 @@ type qSubCall struct {
 	// emits so the variadic spread survives the rewrite.
 	EntryEllipsis token.Pos
 }
+
+// cleanupKind is the inferred cleanup form for q.Open(...).Release()
+// (zero-arg, auto-inferred). The typecheck pass populates it on
+// each AutoRelease qSubCall; the rewriter dispatches on it when
+// emitting the defer line.
+type cleanupKind int
+
+const (
+	cleanupUnknown   cleanupKind = iota // not inferred yet (or typecheck skipped)
+	cleanupChanClose                    // channel type → defer close(v)
+	cleanupCloseVoid                    // T has Close() → defer v.Close()
+	cleanupCloseErr                     // T has Close() error → defer func() { _ = v.Close() }()
+)
 
 // recoverKind selects between the errors.Is and errors.As variants
 // of the chain-continuing recovery methods.
@@ -1164,16 +1193,23 @@ func classifyOpenChain(call *ast.CallExpr, sel *ast.SelectorExpr, alias string) 
 	expr := ast.Expr(call)
 	noRelease := sel.Sel.Name == "NoRelease"
 
-	var releaseArg ast.Expr
-	if noRelease {
+	var (
+		releaseArg  ast.Expr
+		autoRelease bool
+	)
+	switch {
+	case noRelease:
 		if len(call.Args) != 0 {
 			return qSubCall{}, false, fmt.Errorf("q.Open/OpenE(...).NoRelease takes no arguments; got %d", len(call.Args))
 		}
-	} else {
-		if len(call.Args) != 1 {
-			return qSubCall{}, false, fmt.Errorf("q.Open/OpenE(...).Release requires exactly one argument (a cleanup fn); got %d", len(call.Args))
-		}
+	case len(call.Args) == 0:
+		// .Release() with no args — preprocessor infers the cleanup
+		// from the resource type at compile time.
+		autoRelease = true
+	case len(call.Args) == 1:
 		releaseArg = call.Args[0]
+	default:
+		return qSubCall{}, false, fmt.Errorf("q.Open/OpenE(...).Release accepts at most one cleanup function; got %d", len(call.Args))
 	}
 
 	inner, ok := sel.X.(*ast.CallExpr)
@@ -1190,11 +1226,12 @@ func classifyOpenChain(call *ast.CallExpr, sel *ast.SelectorExpr, alias string) 
 			return qSubCall{}, false, fmt.Errorf("q.Open/OpenE's argument must itself be a call expression returning (T, error)")
 		}
 		return qSubCall{
-			Family:     family,
-			InnerExpr:  entry.Args[0],
-			OuterCall:  expr,
-			ReleaseArg: releaseArg,
-			NoRelease:  noRelease,
+			Family:      family,
+			InnerExpr:   entry.Args[0],
+			OuterCall:   expr,
+			ReleaseArg:  releaseArg,
+			NoRelease:   noRelease,
+			AutoRelease: autoRelease,
 		}, true, nil
 	}
 
@@ -1224,13 +1261,14 @@ func classifyOpenChain(call *ast.CallExpr, sel *ast.SelectorExpr, alias string) 
 		return qSubCall{}, false, fmt.Errorf("q.OpenE's argument must itself be a call expression returning (T, error)")
 	}
 	return qSubCall{
-		Family:     familyOpenE,
-		Method:     shapeSel.Sel.Name,
-		MethodArgs: inner.Args,
-		InnerExpr:  entry.Args[0],
-		OuterCall:  expr,
-		ReleaseArg: releaseArg,
-		NoRelease:  noRelease,
+		Family:      familyOpenE,
+		Method:      shapeSel.Sel.Name,
+		MethodArgs:  inner.Args,
+		InnerExpr:   entry.Args[0],
+		OuterCall:   expr,
+		ReleaseArg:  releaseArg,
+		NoRelease:   noRelease,
+		AutoRelease: autoRelease,
 	}, true, nil
 }
 

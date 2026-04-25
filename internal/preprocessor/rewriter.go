@@ -978,9 +978,36 @@ func renderOpen(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, cou
 		// .NoRelease() — bubble check only, no defer cleanup.
 		return block, fmtUsed, nil
 	}
-	cleanupText := exprTextSubst(fset, src, sub.ReleaseArg, subs, subTexts)
-	deferLine := fmt.Sprintf("defer (%s)(%s)", cleanupText, valueVar)
+	var deferLine string
+	if sub.AutoRelease {
+		text, err := autoReleaseDeferLine(sub, valueVar)
+		if err != nil {
+			return "", false, err
+		}
+		deferLine = text
+	} else {
+		cleanupText := exprTextSubst(fset, src, sub.ReleaseArg, subs, subTexts)
+		deferLine = fmt.Sprintf("defer (%s)(%s)", cleanupText, valueVar)
+	}
 	return block + "\n" + indent + deferLine, fmtUsed, nil
+}
+
+// autoReleaseDeferLine returns the defer line for a zero-arg
+// .Release() call, dispatching on the cleanup form the typecheck
+// pass inferred. cleanupUnknown is the "typecheck didn't run"
+// (no importcfg) fallback: emit no defer line. In real builds the
+// typecheck pass either runs and resolves a kind, or surfaces a
+// diagnostic that aborts before the rewriter is invoked.
+func autoReleaseDeferLine(sub qSubCall, valueVar string) (string, error) {
+	switch sub.AutoCleanup {
+	case cleanupChanClose:
+		return fmt.Sprintf("defer close(%s)", valueVar), nil
+	case cleanupCloseVoid:
+		return fmt.Sprintf("defer %s.Close()", valueVar), nil
+	case cleanupCloseErr:
+		return fmt.Sprintf("defer func() { _ = %s.Close() }()", valueVar), nil
+	}
+	return "", nil
 }
 
 // openBindLine mirrors tryBindLine but always binds to a named
@@ -989,8 +1016,16 @@ func renderOpen(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, cou
 func openBindLine(fset *token.FileSet, src []byte, sh callShape, errVar, innerText, indent string, counter int) string {
 	switch sh.Form {
 	case formDefine:
+		if isBlankIdent(sh.LHSExpr) {
+			// `_ := q.Open(...)` — bind to a real temp so the
+			// defer-cleanup line has something to reference.
+			return fmt.Sprintf("_qTmp%d, %s := %s", counter, errVar, innerText)
+		}
 		return fmt.Sprintf("%s, %s := %s", exprText(fset, src, sh.LHSExpr), errVar, innerText)
 	case formAssign:
+		if isBlankIdent(sh.LHSExpr) {
+			return fmt.Sprintf("_qTmp%d, %s := %s", counter, errVar, innerText)
+		}
 		return fmt.Sprintf("var %s error\n%s%s, %s = %s", errVar, indent, exprText(fset, src, sh.LHSExpr), errVar, innerText)
 	case formDiscard, formReturn, formHoist:
 		return fmt.Sprintf("_qTmp%d, %s := %s", counter, errVar, innerText)
@@ -1001,13 +1036,27 @@ func openBindLine(fset *token.FileSet, src []byte, sh callShape, errVar, innerTe
 // openValueVar returns the name of the bound resource variable for
 // this Open sub-call. Used to spell the deferred cleanup arg and
 // (for Catch) the recovery LHS.
+//
+// formDefine / formAssign normally reuse the user-visible LHS. The
+// one exception is `_ = q.Open(...)` (assign-to-blank): `_` is not
+// a usable identifier in `defer cleanup(_)`. Fall through to the
+// temp-var path for that case so the defer wires to a real local.
 func openValueVar(fset *token.FileSet, src []byte, sh callShape, counter int) string {
 	switch sh.Form {
 	case formDefine, formAssign:
+		if isBlankIdent(sh.LHSExpr) {
+			return fmt.Sprintf("_qTmp%d", counter)
+		}
 		return exprText(fset, src, sh.LHSExpr)
 	default:
 		return fmt.Sprintf("_qTmp%d", counter)
 	}
+}
+
+// isBlankIdent reports whether expr is the bare blank identifier `_`.
+func isBlankIdent(expr ast.Expr) bool {
+	id, ok := expr.(*ast.Ident)
+	return ok && id.Name == "_"
 }
 
 // finalStmtSuffix builds the `\n<indent><reconstructed-stmt>` tail

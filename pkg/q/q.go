@@ -429,7 +429,23 @@ type OpenResult[T any] struct {
 
 // Release bubbles err on failure; registers `defer cleanup(v)` in
 // the enclosing function and returns v on success.
-func (r OpenResult[T]) Release(cleanup func(T)) T {
+//
+// Two forms:
+//
+//   - Release(cleanup) — explicit cleanup function, used for any T.
+//   - Release()        — no args; the preprocessor infers the
+//     cleanup from T's type at compile time. Supported shapes:
+//     channel types (rewrites to `defer close(v)`), types with
+//     a `Close() error` method (rewrites to
+//     `defer func() { _ = v.Close() }()`), and types with a
+//     `Close()` method (rewrites to `defer v.Close()`). Any
+//     other T is a build error — pass an explicit cleanup or use
+//     .NoRelease() to opt out.
+//
+// The variadic signature is the smallest Go-valid shape that
+// admits both forms; calls with two-or-more args are rejected by
+// the preprocessor.
+func (r OpenResult[T]) Release(cleanup ...func(T)) T {
 	panicUnrewritten("q.Open(...).Release")
 	return r.v
 }
@@ -486,8 +502,9 @@ func (r OpenResultE[T]) Catch(fn func(error) (T, error)) OpenResultE[T] {
 
 // Release bubbles the shaped error on failure; registers
 // `defer cleanup(v)` in the enclosing function and returns v on
-// success.
-func (r OpenResultE[T]) Release(cleanup func(T)) T {
+// success. Same auto-cleanup inference as q.Open.Release when
+// called with zero args — see that doc for the supported T shapes.
+func (r OpenResultE[T]) Release(cleanup ...func(T)) T {
 	panicUnrewritten("q.OpenE(...).Release")
 	return r.v
 }

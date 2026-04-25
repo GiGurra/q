@@ -60,18 +60,19 @@ For full control, `.Catch(fn)` takes a `func(error) (T, error)` — return `(v, 
 
 ```go
 conn := q.Open(dial(addr)).Release((*Conn).Close)
-file := q.Open(os.Open(path)).Release((*os.File).Close)
-return process(conn, file)
-// On return: file.Close fires first, then conn.Close. LIFO defer order.
+file := q.Open(os.Open(path)).Release()       // auto: defer file.Close()
+ch   := q.Open(makeChan()).Release()          // auto: defer close(ch)
+return process(conn, file, ch)
+// On return, the defers fire LIFO.
 ```
 
-If `os.Open` fails, `conn` was already opened and `conn.Close` runs. Same semantics as hand-written `defer conn.Close()` chains, half the lines.
-
-For "we acquired this and we're explicitly *not* closing it" cases, use the `.NoRelease()` terminal — same bubble path, no defer registered:
+`.Release(cleanup)` takes the cleanup explicitly. `.Release()` (no args) lets the preprocessor infer it from the resource type — channel close, `Close() error` (close-time error discarded), or `Close()` (no return). For "we acquired this and we're *not* closing it":
 
 ```go
 val := q.Open(loadValue(key)).NoRelease()
 ```
+
+If `os.Open` fails, `conn` was already opened and `conn.Close` runs. Same semantics as hand-written `defer file.Close()` chains, half the lines.
 
 ### Bubble nil pointers, channel closes, type-assertion misses
 

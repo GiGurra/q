@@ -49,17 +49,25 @@ import (
 
 // checkErrorSlots type-checks the package and validates that every
 // recognised q.* call site has the built-in `error` interface at
-// its error slot.
+// its error slot. The same type-check pass also infers cleanups for
+// any q.Open(...).Release() calls the user wrote with no args
+// (AutoRelease=true): each is mutated in place with an
+// AutoCleanup kind, or surfaces a diagnostic if T's shape is
+// unrecognised.
 //
 // Returns a list of diagnostics (one per offending call). A nil or
-// empty result means every slot checks out — the caller proceeds
-// to the rewrite pass. A non-empty result aborts the build via
-// planUserPackage's diag path.
+// empty result means every slot checks out and every AutoRelease
+// has a resolved cleanup — the caller proceeds to the rewrite
+// pass. A non-empty result aborts the build via planUserPackage's
+// diag path.
 //
 // If the type check itself cannot run (no importcfg, importer
 // construction fails, pkgPath empty), returns nil — we are
 // strictly a lint; the real compile will fail on anything q's
-// own rewrite pass can't handle.
+// own rewrite pass can't handle. AutoRelease calls in this case
+// reach the rewriter with cleanupUnknown and produce an explicit
+// runtime panic via panicUnrewritten on the q.Open stub if the
+// rewriter can't emit a defer.
 func checkErrorSlots(fset *token.FileSet, pkgPath, importcfgPath string, files []*ast.File, shapes []callShape) []Diagnostic {
 	if len(shapes) == 0 || pkgPath == "" || importcfgPath == "" {
 		return nil
@@ -86,14 +94,113 @@ func checkErrorSlots(fset *token.FileSet, pkgPath, importcfgPath string, files [
 	errType := types.Universe.Lookup("error").Type()
 
 	var diags []Diagnostic
-	for _, sh := range shapes {
-		for _, sc := range sh.Calls {
-			if d, ok := validateSlot(fset, sc, info, errType); ok {
+	for i := range shapes {
+		for j := range shapes[i].Calls {
+			sc := &shapes[i].Calls[j]
+			if d, ok := validateSlot(fset, *sc, info, errType); ok {
 				diags = append(diags, d)
+			}
+			if sc.AutoRelease {
+				if d, ok := inferAutoCleanup(fset, sc, info, errType); ok {
+					diags = append(diags, d)
+				}
 			}
 		}
 	}
 	return diags
+}
+
+// inferAutoCleanup populates sc.AutoCleanup with the cleanup form
+// inferred from sc's resource type (the first return of InnerExpr).
+// Returns a diagnostic when the type doesn't expose a recognised
+// cleanup shape (channel / Close()/error / Close()).
+//
+// Recognised shapes (in order):
+//
+//   - channel type T → cleanupChanClose, rewrites to `defer close(v)`.
+//   - T (or *T) has `Close() error` → cleanupCloseErr, rewrites to
+//     `defer func() { _ = v.Close() }()` (silently discards the
+//     close-time error; pass an explicit cleanup if you need to
+//     handle it).
+//   - T (or *T) has `Close()` (no return) → cleanupCloseVoid,
+//     rewrites to `defer v.Close()`.
+//
+// Anything else is rejected with a diagnostic naming T and
+// suggesting the two ways to fix the build (explicit cleanup or
+// .NoRelease()).
+func inferAutoCleanup(fset *token.FileSet, sc *qSubCall, info *types.Info, errType types.Type) (Diagnostic, bool) {
+	t := info.TypeOf(sc.InnerExpr)
+	if t == nil {
+		// types pass didn't resolve — leave AutoCleanup zero. The
+		// rewriter will see cleanupUnknown and emit a placeholder
+		// (or surface its own error). Don't block the build here.
+		return Diagnostic{}, false
+	}
+	tup, ok := t.(*types.Tuple)
+	if !ok || tup.Len() < 2 {
+		return Diagnostic{}, false
+	}
+	resourceType := tup.At(0).Type()
+
+	// 1) Channel type: T = chan U / chan<- U / <-chan U.
+	if _, isChan := resourceType.Underlying().(*types.Chan); isChan {
+		sc.AutoCleanup = cleanupChanClose
+		return Diagnostic{}, false
+	}
+
+	// 2) Method-set lookup. The method set of *T includes methods
+	//    declared on either T or *T (per Go spec). When T is itself a
+	//    pointer type (`*Foo`), *T is `**Foo` whose method set is
+	//    empty — use T directly in that case so Close() declared on
+	//    *Foo is reachable.
+	lookupType := resourceType
+	if _, isPtr := resourceType.(*types.Pointer); !isPtr {
+		lookupType = types.NewPointer(resourceType)
+	}
+	mset := types.NewMethodSet(lookupType)
+	for i := 0; i < mset.Len(); i++ {
+		sel := mset.At(i)
+		if sel.Obj().Name() != "Close" {
+			continue
+		}
+		fn, ok := sel.Obj().(*types.Func)
+		if !ok {
+			continue
+		}
+		sig, ok := fn.Type().(*types.Signature)
+		if !ok {
+			continue
+		}
+		if sig.Params().Len() != 0 {
+			continue
+		}
+		switch sig.Results().Len() {
+		case 0:
+			sc.AutoCleanup = cleanupCloseVoid
+			return Diagnostic{}, false
+		case 1:
+			if types.Identical(sig.Results().At(0).Type(), errType) {
+				sc.AutoCleanup = cleanupCloseErr
+				return Diagnostic{}, false
+			}
+		}
+	}
+
+	// 3) No match — diagnostic.
+	pos := fset.Position(sc.OuterCall.Pos())
+	msg := fmt.Sprintf(
+		"q.Open/OpenE(...).Release() (auto) cannot infer a cleanup for type %s. "+
+			"Auto-Release supports channel types (rewrites to `close(v)`), and types with a "+
+			"`Close() error` or `Close()` method. Either pass an explicit cleanup function "+
+			"(`Release(myCleanup)`), or opt out with `.NoRelease()` if no cleanup is wanted.",
+		resourceType.String(),
+	)
+	return Diagnostic{
+		File: pos.Filename,
+		Line: pos.Line,
+		Col:  pos.Column,
+		Msg:  "q: " + msg,
+	}, true
 }
 
 // validateSlot returns a diagnostic when sc's error slot type is

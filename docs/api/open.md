@@ -8,13 +8,18 @@ Resource acquisition with defer-on-success cleanup — the `(T, error)` bubble p
 func Open[T any](v T, err error) OpenResult[T]
 func OpenE[T any](v T, err error) OpenResultE[T]
 
-func (OpenResult[T])  Release(cleanup func(T)) T
+func (OpenResult[T])  Release(cleanup ...func(T)) T   // 0 or 1 args
 func (OpenResult[T])  NoRelease() T
-func (OpenResultE[T]) Release(cleanup func(T)) T
+func (OpenResultE[T]) Release(cleanup ...func(T)) T   // 0 or 1 args
 func (OpenResultE[T]) NoRelease() T
 ```
 
-`.Release(cleanup)` and `.NoRelease()` are both terminals — what actually returns `T`. `q.Open(v, err)` on its own returns an `OpenResult[T]` that exposes nothing else; you always chain one of the two terminals onto it. (Why a method, not an extra arg: Go's multi-return spread only fires when the multi-return call is the sole argument, so `q.Open(call(), cleanup)` won't compile. The terminal-method shape side-steps that.)
+`.Release(...)` and `.NoRelease()` are both terminals — what actually returns `T`. `q.Open(v, err)` on its own returns an `OpenResult[T]` that exposes nothing else; you always chain one of the two terminals onto it. (Why a method, not an extra arg: Go's multi-return spread only fires when the multi-return call is the sole argument, so `q.Open(call(), cleanup)` won't compile. The terminal-method shape side-steps that.)
+
+`.Release` accepts zero or one cleanup function:
+
+- `Release(cleanup)` — explicit cleanup, used for any T.
+- `Release()` — no args; the preprocessor infers the cleanup from T at compile time.
 
 ## What `q.Open` does
 
@@ -34,6 +39,33 @@ defer ((*Conn).Close)(conn)
 
 On error: bubble, no cleanup registered (nothing was acquired).
 On success: register the deferred cleanup so it fires when the enclosing function returns (whether via normal return or via a later bubble).
+
+## `.Release()` (zero args) — preprocessor infers the cleanup
+
+For the common case (a `Closer`-shaped resource or a channel), let the preprocessor figure it out:
+
+```go
+ch   := q.Open(makeChan()).Release()        // → defer close(ch)
+file := q.Open(os.Open(path)).Release()     // → defer func() { _ = file.Close() }()
+db   := q.Open(sql.Open(...)).Release()     // → defer func() { _ = db.Close() }()
+```
+
+The typecheck pass inspects the resource type T at compile time and dispatches:
+
+| T's shape                   | Generated defer                                            |
+|-----------------------------|------------------------------------------------------------|
+| channel type (`chan X`, `chan<- X`, `<-chan X`) | `defer close(v)`                       |
+| `Close() error` method      | `defer func() { _ = v.Close() }()` (close-time error discarded — pass an explicit cleanup if you need to handle it) |
+| `Close()` method (no return)| `defer v.Close()`                                          |
+| anything else               | build error — pass an explicit cleanup or `.NoRelease()`   |
+
+Auto-cleanup composes with the OpenE shape methods:
+
+```go
+file := q.OpenE(os.Open(path)).Wrap("loading config").Release()
+```
+
+If the type doesn't expose a recognised cleanup shape (no `Close`, not a channel), the preprocessor surfaces a `file:line:col: q: …` diagnostic naming the type and pointing at the two acceptable fixes (explicit cleanup function or `.NoRelease()`).
 
 ## `.NoRelease()` — opt-in "no cleanup" terminal
 

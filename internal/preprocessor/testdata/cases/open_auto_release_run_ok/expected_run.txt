@@ -1,0 +1,6 @@
+channelAutoObserved: v=7 ok1=true ok2=false
+errCloserAuto.closed=[11]
+voidCloserAuto.closed=[22]
+explicitRelease.closed=[33]
+errCloserAutoWrap.id=44 closed=[44]
+autoReleaseBubble.err=boom
