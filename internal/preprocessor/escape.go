@@ -63,30 +63,26 @@ func checkResourceEscapes(fset *token.FileSet, files []*ast.File, shapes []callS
 	var diags []Diagnostic
 	for _, file := range files {
 		path := fileName(fset, file)
-		// Top-level FuncDecls + every nested FuncLit. ast.Inspect's
-		// natural recursion would re-enter inner FuncLits when we
-		// already processed the outer FuncDecl's body, double-flagging
-		// patterns. Walk explicitly: each FuncDecl/FuncLit body is
-		// scanned exactly once.
-		var walk func(node ast.Node)
-		walk = func(node ast.Node) {
-			ast.Inspect(node, func(n ast.Node) bool {
-				switch fn := n.(type) {
-				case *ast.FuncDecl:
-					if fn.Body != nil && !hasNoEscapeCheckDirective(fn.Doc) {
-						diags = append(diags, walkFuncBody(fset, path, fn.Body, autoCloseOpens)...)
-					}
-					return false
-				case *ast.FuncLit:
-					if fn.Body != nil {
-						diags = append(diags, walkFuncBody(fset, path, fn.Body, autoCloseOpens)...)
-					}
-					return false
+		// Top-level FuncDecls + every nested FuncLit. Stopping descent
+		// at FuncDecl/FuncLit nodes keeps each function body scanned
+		// exactly once — walkFuncBody recurses internally so an
+		// inner FuncLit will be reached the next time ast.Inspect
+		// visits it as a sibling node.
+		ast.Inspect(file, func(n ast.Node) bool {
+			switch fn := n.(type) {
+			case *ast.FuncDecl:
+				if fn.Body != nil && !hasNoEscapeCheckDirective(fn.Doc) {
+					diags = append(diags, walkFuncBody(fset, path, fn.Body, autoCloseOpens)...)
 				}
-				return true
-			})
-		}
-		walk(file)
+				return false
+			case *ast.FuncLit:
+				if fn.Body != nil {
+					diags = append(diags, walkFuncBody(fset, path, fn.Body, autoCloseOpens)...)
+				}
+				return false
+			}
+			return true
+		})
 	}
 	return diags
 }
