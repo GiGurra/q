@@ -65,7 +65,10 @@ The persistent backlog for `q`. A cold-state reader can pick up here without re-
 
   Big lift: needs flow analysis (or a heavy hand: rewrite every reference into shim-method calls), needs to interop with raw resource access (sometimes you do want the underlying `*Conn`), and adds a real per-call atomic. Probably not worth it for the 90% case (functions that own their own resources) — defer until profiles or user reports show resource ownership crosses function boundaries often enough that the existing diagnostics become annoying.
 
-- **#84 — `q.Assemble[T](recipes...)` — ZIO ZLayer-style auto-derived DI at preprocess time.** Authoritative plan in [`docs/planning/assemble.md`](assemble.md): three-phase rollout (auto-derived assembly + diagnostics → AssembleAll + multi-output → resource-recipe lifetime), surface, type-resolution mechanism, fixture matrix, and resume checklist for cold-state implementers. TODO carries only the headline; assemble.md is the source of truth.
+- **#84 — `q.Assemble` follow-on phases.** Phase 1 (pure / errored / chain auto-derived DI with diagnostics, interface-input resolution, runtime nil-recipe detection) shipped — see [`docs/api/assemble.md`](../api/assemble.md). Remaining work, plan in [`docs/planning/assemble.md`](assemble.md):
+    - **Phase 1.5 — `q.AssembleCtx`** with ctx-attached options (`q.WithPar` for parallel construction, `q.Serially` for forced-sequential, `q.WithAssemblyDebug` for trace).
+    - **Phase 2 — selection & multi-output.** `q.AssembleAll[T]` (multiple legitimate providers of T → `[]T`), struct-target multi-output (`q.Assemble[App]` populates each field of `App` from a matching recipe).
+    - **Phase 3 — resource lifetime.** `(T, func(), error)`-returning resource recipes; defer-LIFO teardown integrates with q.Open's escape detection.
 
 ### Coroutines
 

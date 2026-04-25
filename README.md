@@ -270,6 +270,26 @@ description := q.Match(c,
 
 Folds to an IIFE-wrapped switch — value-returning switch as an expression, the way Scala / Rust / Swift have it. Coverage-checked when V is an enum (same rules as `q.Exhaustive`); `q.Default(...)` opts out for forward-compat scenarios.
 
+### Auto-derived dependency injection
+
+```go
+type Config struct{ DB string }
+type DB     struct{ cfg *Config }
+type Server struct{ db *DB; cfg *Config }
+
+func newConfig() *Config              { return &Config{DB: "..."} }
+func newDB(c *Config) (*DB, error)    { return &DB{cfg: c}, nil }
+func newServer(d *DB, c *Config) *Server { return &Server{db: d, cfg: c} }
+
+// List the recipes; the preprocessor reads each signature, builds the
+// dep graph, topo-sorts, and emits the inlined construction. ZIO ZLayer
+// in spirit, plain Go functions in shape. No codegen step. No runtime
+// reflection.
+server := q.Try(q.AssembleErr[*Server](newConfig, newDB, newServer))
+```
+
+When a recipe is missing or duplicated or the graph cycles, the build fails with a tree visualisation of what the resolver sees. See [`docs/api/assemble.md`](docs/api/assemble.md).
+
 ### Functional data ops
 
 ```go

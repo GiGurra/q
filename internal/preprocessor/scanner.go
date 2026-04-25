@@ -126,6 +126,9 @@ const (
 	familyAtCompileTime     // q.AtCompileTime(func() R { ... }, codec...) — comptime evaluation
 	familyAtCompileTimeCode // q.AtCompileTimeCode[R](func() string { ... }) — comptime code generation
 	familyGenerator         // q.Generator[T](func() { ... q.Yield(v) ... }) — iter.Seq[T] sugar
+	familyAssemble    // q.Assemble[T](recipes...) — auto-derived dependency injection (pure)
+	familyAssembleErr // q.AssembleErr[T](recipes...) — same, errored, returns (T, error)
+	familyAssembleE   // q.AssembleE[T](recipes...).<Method>(...) — chain variant
 )
 
 // form is the syntactic position of a recognised q.* call:
@@ -320,6 +323,34 @@ type qSubCall struct {
 	// pass; used by the rewriter when emitting `_qCt<N>_value`
 	// references for the non-inline path.
 	AtCTIndex int
+
+	// AssembleRecipes is the raw recipe argument list captured from the
+	// q.Assemble / q.AssembleErr / q.AssembleE call site. Each entry is
+	// either a function reference (top-level func / method value /
+	// function-typed expr) or an inline value expression. The typecheck
+	// pass classifies each entry against go/types and populates
+	// AssembleSteps in topo order. Unused for every other family.
+	AssembleRecipes []ast.Expr
+
+	// AssembleSteps is the topo-sorted recipe sequence the rewriter
+	// emits, populated by resolveAssemble. Each step carries the recipe
+	// expression's source-text-ready form, the input dep type keys (in
+	// signature order), the output type key, and an errored flag.
+	// Empty until typecheck has run.
+	AssembleSteps []assembleStep
+
+	// AssembleTargetTypeText is the spelling of T as resolved via
+	// go/types' qualifier (same form as EnumTypeText). Used by the
+	// rewriter to spell the IIFE's return type and the zero-value
+	// expression. When empty, the rewriter falls back to `any`.
+	AssembleTargetTypeText string
+
+	// AssembleTargetKey is the canonical typeKey of T (path-qualified
+	// form), used by the rewriter to look up T's _qDep<N> in the body
+	// emitter. Stashed at resolveAssemble time so emit doesn't have to
+	// re-derive it from the type-text spelling (which qualifies
+	// same-package types differently).
+	AssembleTargetKey string
 }
 
 // matchCase is one arm of a q.Match expression — either a
@@ -338,6 +369,71 @@ type matchCase struct {
 	IsPredicate bool // cond is bool / func()bool — emit `if cond` instead of equality compare
 	CondLazy    bool // cond is func()V or func()bool — call before use
 	ResultLazy  bool // result is func()R — call before return
+}
+
+// assembleStep is one entry in the topo-sorted recipe sequence the
+// q.Assemble family emits. Populated by resolveAssemble; consumed by
+// buildAssembleReplacement / renderAssembleE.
+//
+// For a function-reference recipe the rewriter emits
+//
+//	_qDep<N> := <CallText>(<input refs by InputKeys>)
+//
+// or, when Errored is true,
+//
+//	_qDep<N>, _qErr<N> := <CallText>(<input refs>)
+//	if _qErr<N> != nil { return *new(T), _qErr<N> }
+//
+// For an inline-value recipe (no inputs) the rewriter emits the
+// CallText verbatim:
+//
+//	_qDep<N> := <CallText>
+type assembleStep struct {
+	// RecipeIdx is the original variadic-arg index this step came
+	// from. The rewriter looks up sub.AssembleRecipes[RecipeIdx] to
+	// recover the source expression and feeds it through
+	// exprTextSubst; "unused recipe" diagnostics also reference this
+	// 1-based index.
+	RecipeIdx int
+
+	// IsValue is true when this step is an inline value (no inputs,
+	// no call). The rewriter omits the `()` and the input list.
+	IsValue bool
+
+	// Errored is true when the recipe returns (T, error). The rewriter
+	// emits the bind-and-bubble shape; otherwise a single-value bind.
+	// Always false for inline values (their type is the value's type).
+	Errored bool
+
+	// InputKeys are the *resolved* provider keys for this recipe's
+	// inputs in signature order — populated by resolveAssemble after
+	// the assignability resolution pass. For an exact-type input
+	// these equal the input's type-key; for an interface input
+	// satisfied by a concrete provider, these equal the concrete
+	// provider's outputKey. The rewriter looks each up in the per-
+	// step OutputKey map to recover the producing _qDep<N> name.
+	InputKeys []string
+
+	// OutputKey is the type key the recipe provides; used by the
+	// rewriter to derive the final-step's "is this T?" decision and
+	// by other steps' InputKeys lookups.
+	OutputKey string
+
+	// OutputIsNilable is true when the recipe's output type can hold
+	// a nil value at runtime — pointer, interface, slice, map, chan,
+	// or func. The rewriter emits a runtime nil-check on the bound
+	// _qDep<N> immediately after the recipe call (before any implicit
+	// interface conversion at downstream consumer call sites). Pure
+	// q.Assemble panics on nil; q.AssembleErr / q.AssembleE bubble a
+	// fmt.Errorf("...: %%w", q.ErrNil) so callers can errors.Is the
+	// failure against the q.ErrNil sentinel.
+	OutputIsNilable bool
+
+	// Label is the diagnostic-friendly recipe identifier
+	// ("#N (snippet)") spliced into the runtime nil-check message.
+	// Captured at resolve time because the rewriter doesn't have the
+	// AST snippet helper available at emit time.
+	Label string
 }
 
 // cleanupKind is the inferred cleanup form for q.Open(...).Release()
@@ -1112,6 +1208,11 @@ func hasQRefInSub(sub qSubCall, alias string) bool {
 			return true
 		}
 	}
+	for _, r := range sub.AssembleRecipes {
+		if hasQRef(r, alias) {
+			return true
+		}
+	}
 	return false
 }
 
@@ -1450,6 +1551,32 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 	// panic stub fires.
 	if isSelector(call.Fun, alias, "Case") || isSelector(call.Fun, alias, "Default") {
 		return qSubCall{}, false, nil
+	}
+	// q.Assemble[T](recipes...) — pure auto-derived DI. Each variadic
+	// arg is a recipe (function reference) or inline value; the
+	// preprocessor's typecheck pass classifies them and topo-sorts.
+	if typeArg, ok := isIndexedSelector(call.Fun, alias, "Assemble"); ok {
+		if len(call.Args) == 0 {
+			return qSubCall{}, false, fmt.Errorf("q.Assemble[T] requires at least one recipe argument")
+		}
+		return qSubCall{
+			Family:          familyAssemble,
+			AsType:          typeArg,
+			AssembleRecipes: append([]ast.Expr(nil), call.Args...),
+			OuterCall:       expr,
+		}, true, nil
+	}
+	// q.AssembleErr[T](recipes...) — errored variant; composes with q.Try.
+	if typeArg, ok := isIndexedSelector(call.Fun, alias, "AssembleErr"); ok {
+		if len(call.Args) == 0 {
+			return qSubCall{}, false, fmt.Errorf("q.AssembleErr[T] requires at least one recipe argument")
+		}
+		return qSubCall{
+			Family:          familyAssembleErr,
+			AsType:          typeArg,
+			AssembleRecipes: append([]ast.Expr(nil), call.Args...),
+			OuterCall:       expr,
+		}, true, nil
 	}
 	// q.Tag[T](field, key) — both args MUST be string literals so
 	// the rewriter can resolve the tag at compile time.
@@ -1838,6 +1965,25 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 				return qSubCall{}, false, fmt.Errorf("q.AsE[T] must take exactly one argument (the value to assert); got %d", len(entry.Args))
 			}
 			return qSubCall{Family: familyAsE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Args[0], AsType: typeArg, OuterCall: expr}, true, nil
+		}
+		// q.AssembleE[T] is also an IndexExpr-based entry. The recipes
+		// move to AssembleRecipes so they don't clobber MethodArgs (the
+		// chain method's args).
+		if typeArg, ok := isIndexedSelector(entry.Fun, alias, "AssembleE"); ok {
+			if !chainMethods[sel.Sel.Name] {
+				return qSubCall{}, false, fmt.Errorf("q.AssembleE chain method %q not recognised; valid: Err, ErrF, Catch, Wrap, Wrapf", sel.Sel.Name)
+			}
+			if len(entry.Args) == 0 {
+				return qSubCall{}, false, fmt.Errorf("q.AssembleE[T] requires at least one recipe argument")
+			}
+			return qSubCall{
+				Family:          familyAssembleE,
+				Method:          sel.Sel.Name,
+				MethodArgs:      call.Args,
+				AsType:          typeArg,
+				AssembleRecipes: append([]ast.Expr(nil), entry.Args...),
+				OuterCall:       expr,
+			}, true, nil
 		}
 		switch {
 		case isSelector(entry.Fun, alias, "OkE"):

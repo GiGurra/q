@@ -1,0 +1,3 @@
+success ok: true cfg: primary
+failure err: dial failed
+via Try ok: true cfg: primary

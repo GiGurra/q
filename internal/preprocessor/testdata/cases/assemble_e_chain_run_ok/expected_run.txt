@@ -1,0 +1,4 @@
+wrap ok: true cfg: primary
+wrap err: server init: dial refused
+err sentinel: true
+catch fallback cfg: fallback

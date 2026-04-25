@@ -128,6 +128,11 @@ func checkErrorSlotsWithInfo(fset *token.FileSet, pkgPath, importcfgPath string,
 					diags = append(diags, d)
 				}
 			}
+			if isAssembleFamily(sc.Family) {
+				if d, ok := resolveAssemble(fset, sc, info, pkgPath); ok {
+					diags = append(diags, d)
+				}
+			}
 		}
 	}
 
