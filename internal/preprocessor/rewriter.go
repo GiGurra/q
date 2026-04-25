@@ -337,6 +337,8 @@ func renderShape(fset *token.FileSet, src []byte, sh callShape, counter *int, al
 		case familyAssemble, familyAssembleAll, familyAssembleStruct:
 			text, _ := buildAssembleReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts, alias)
 			subTexts[i] = text
+		case familyTern:
+			subTexts[i] = buildTernReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts)
 		case familyAtCompileTime, familyAtCompileTimeCode:
 			subTexts[i] = buildAtCompileTimeReplacement(sh.Calls[i])
 		case familyGenerator:
@@ -813,6 +815,7 @@ func isInPlaceFamily(f family) bool {
 		familyFields, familyAllFields, familyTypeName, familyTag,
 		familyMatch,
 		familyAssemble, familyAssembleAll, familyAssembleStruct,
+		familyTern,
 		familyAtCompileTime, familyAtCompileTimeCode,
 		familyGenerator:
 		return true
@@ -1067,6 +1070,9 @@ func renderSubCall(fset *token.FileSet, src []byte, sh callShape, subIdx int, su
 		// (the debug-trace prelude uses fmt.Fprintf).
 		fmtUsed := assembleHasNilableStep(sub) || sub.AssembleCtxDepKey != ""
 		return "", fmtUsed, false, false, nil
+	case familyTern:
+		// q.Tern emits an IIFE in-place; no extra bind/check block.
+		return "", false, false, false, nil
 	case familyAwait:
 		text, err := renderAwait(fset, src, sh, sub, counter, alias, subs, subTexts)
 		return text, false, false, false, err

@@ -31,10 +31,10 @@ Reduce max: 9
 Reduce empty: 0
 Reduce one: 42
 Reduce concat: abc
-Unique ints: [1 2 3 4]
-Unique strs: [a b c]
-Unique empty: []
-UniqueBy ci: [Foo BAR baz]
+Distinct ints: [1 2 3 4]
+Distinct strs: [a b c]
+Distinct empty: []
+DistinctBy ci: [Foo BAR baz]
 Partition yes: [2 4]
 Partition no: [1 3 5]
 Chunk 2: [[1 2] [3 4] [5]]

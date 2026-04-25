@@ -563,14 +563,14 @@ func Reduce[T any](slice []T, fn func(T, T) T) T {
 	return acc
 }
 
-// Unique returns each unique element preserving first-occurrence
+// Distinct returns each unique element preserving first-occurrence
 // order. T must be comparable (uses a map for O(n) deduplication).
 //
 // Different from `slices.Compact`: that only collapses *adjacent*
 // equal elements, so you'd typically sort first (which mutates
-// element order). Unique is the order-preserving "Scala-style
+// element order). Distinct is the order-preserving "Scala-style
 // distinct" people usually reach for.
-func Unique[T comparable](slice []T) []T {
+func Distinct[T comparable](slice []T) []T {
 	if len(slice) == 0 {
 		return nil
 	}
@@ -586,17 +586,17 @@ func Unique[T comparable](slice []T) []T {
 	return out
 }
 
-// UniqueBy returns each element whose key (computed via fn) is seen
-// first, preserving input order. Useful when T isn't comparable, or
-// when you want dedup by some derived attribute (case-insensitive
-// strings, just one field of a struct, etc.).
+// DistinctBy returns each element whose key (computed via fn) is
+// seen first, preserving input order. Useful when T isn't
+// comparable, or when you want dedup by some derived attribute
+// (case-insensitive strings, just one field of a struct, etc.).
 //
-//	emails := q.UniqueBy(rawEmails, strings.ToLower) // case-insensitive dedup
-//	users  := q.UniqueBy(users,  func(u User) int { return u.ID })
+//	emails := q.DistinctBy(rawEmails, strings.ToLower) // case-insensitive dedup
+//	users  := q.DistinctBy(users,  func(u User) int { return u.ID })
 //
 // The key fn runs once per input element. Only the first element
 // per key is kept.
-func UniqueBy[T any, K comparable](slice []T, fn func(T) K) []T {
+func DistinctBy[T any, K comparable](slice []T, fn func(T) K) []T {
 	if len(slice) == 0 {
 		return nil
 	}

@@ -1,5 +1,5 @@
 // Fixture: q.Map / q.FlatMap / q.Filter / q.GroupBy / q.Exists /
-// q.ForAll / q.Find / q.Fold / q.Reduce / q.Unique / q.UniqueBy / q.Partition /
+// q.ForAll / q.Find / q.Fold / q.Reduce / q.Distinct / q.DistinctBy / q.Partition /
 // q.Chunk / q.Count / q.Take / q.Drop and their …Err variants. All
 // pure runtime helpers — no preprocessor rewriting expected. The
 // fixture also exercises composition with q.Try / q.TryE / q.Ok /
@@ -176,13 +176,13 @@ func main() {
 	joined := q.Reduce([]string{"a", "b", "c"}, func(a, b string) string { return a + b })
 	fmt.Println("Reduce concat:", joined)
 
-	// Unique
-	fmt.Println("Unique ints:", q.Unique([]int{1, 2, 1, 3, 2, 4, 1}))
-	fmt.Println("Unique strs:", q.Unique([]string{"a", "b", "a", "c", "b"}))
-	fmt.Println("Unique empty:", q.Unique([]int{}))
+	// Distinct
+	fmt.Println("Distinct ints:", q.Distinct([]int{1, 2, 1, 3, 2, 4, 1}))
+	fmt.Println("Distinct strs:", q.Distinct([]string{"a", "b", "a", "c", "b"}))
+	fmt.Println("Distinct empty:", q.Distinct([]int{}))
 
-	// UniqueBy — case-insensitive dedup keeps first occurrence of each key.
-	fmt.Println("UniqueBy ci:", q.UniqueBy([]string{"Foo", "BAR", "foo", "bar", "baz"}, strings.ToLower))
+	// DistinctBy — case-insensitive dedup keeps first occurrence of each key.
+	fmt.Println("DistinctBy ci:", q.DistinctBy([]string{"Foo", "BAR", "foo", "bar", "baz"}, strings.ToLower))
 
 	// Partition
 	yesP, noP := q.Partition([]int{1, 2, 3, 4, 5}, func(n int) bool { return n%2 == 0 })

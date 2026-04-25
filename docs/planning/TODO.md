@@ -23,14 +23,6 @@ The persistent backlog for `q`. A cold-state reader can pick up here without re-
 
   **Why now-ish vs much later:** sum types are the headline rejected proposal. Even a runtime-boxed version with exhaustiveness checking would be high-impact for users.
 
-- **#76 — Conditional expression `q.Ternary`.** Two shapes considered, only the thunked one is acceptable.
-
-  **Eager form (rejected):** `q.Ternary(cond, a, b)` — both `a` and `b` evaluate as Go arguments before the call. The rewriter would have to lazily drop the unchosen arg, which silently changes the semantics from what plain-Go interpretation would suggest. Violates the principle that the rewrite is consistent with what the source-as-Go would mean.
-
-  **Thunked form (accepted):** `q.Ternary(cond, func() T { return a }, func() T { return b })` — rewrites to `if cond { v = arg1() } else { v = arg2() }`. Verbose but correct: only one arg runs.
-
-  Tradeoff: thunks are syntactic noise. Probably skip until a use case justifies it.
-
 - **#78 — Embed `rewire` and `proven` into q's toolexec dispatcher.** Right now a project that wants q + proven + rewire has to run them as a chain or pick one. q's `cmd/q` could become an umbrella dispatcher that detects which patterns are present in each compiled package and routes to the appropriate rewriter pass.
 
   **Surface:**

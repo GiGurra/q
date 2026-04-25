@@ -57,6 +57,7 @@ nav:
     - q.GenStringer / GenEnumJSON (method generators): api/gen.md
     - q.Fields / TypeName / Tag (compile-time reflection): api/reflection.md
     - q.Match / Case / Default (value-returning switch): api/match.md
+    - q.Tern (conditional expression):  api/tern.md
     - q.F / q.Ferr / q.Fln (string interpolation): api/format.md
     - q.SQL / q.PgSQL / q.NamedSQL (injection-safe SQL): api/sql.md
     - q.Upper / Lower / Snake / Kebab / Camel / Pascal / Title (compile-time string case): api/string_case.md

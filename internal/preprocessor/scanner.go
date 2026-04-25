@@ -129,6 +129,7 @@ const (
 	familyAssemble       // q.Assemble[T](recipes...) (T, error) — auto-derived DI
 	familyAssembleAll    // q.AssembleAll[T](recipes...) ([]T, error) — multi-provider aggregation
 	familyAssembleStruct // q.AssembleStruct[T](recipes...) (T, error) — field-decomposed multi-output
+	familyTern           // q.Tern[T](cond, ifTrue, ifFalse) T — conditional expression
 )
 
 // form is the syntactic position of a recognised q.* call:
@@ -381,6 +382,19 @@ type qSubCall struct {
 	// OutputKey -> _qDep<N> map.
 	AssembleStructFieldNames []string
 	AssembleStructFieldKeys  []string
+
+	// TernCond / TernT are the two q.Tern args captured at scan time.
+	// TernResultTypeText is T's spelling under the q.Tern call's
+	// package qualifier (populated by resolveTern). All zero for
+	// non-Tern families.
+	//
+	// Lazy semantics for TernT come from source-splicing rather than
+	// a runtime func() T — the rewriter places TernT's source span
+	// inside the IIFE's true-branch only, so its expression is only
+	// evaluated when cond is true.
+	TernCond           ast.Expr
+	TernT              ast.Expr
+	TernResultTypeText string
 }
 
 // matchCase is one arm of a q.Match expression — either a
@@ -622,8 +636,8 @@ var qRuntimeHelpers = map[string]bool{
 	"Reduce":          true,
 	"Fold":            true,
 	"FoldErr":         true,
-	"Unique":          true,
-	"UniqueBy":        true,
+	"Distinct":        true,
+	"DistinctBy":      true,
 	"Partition":       true,
 	"Chunk":           true,
 	"Count":           true,
@@ -1604,6 +1618,21 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 			AsType:          typeArg,
 			AssembleRecipes: append([]ast.Expr(nil), call.Args...),
 			OuterCall:       expr,
+		}, true, nil
+	}
+	// q.Tern[T](cond, t) — conditional expression sugar. cond is a
+	// plain bool, t is a T value; the rewriter splices their source
+	// text into an IIFE so t is only evaluated when cond is true.
+	if typeArg, ok := isIndexedSelector(call.Fun, alias, "Tern"); ok {
+		if len(call.Args) != 2 {
+			return qSubCall{}, false, fmt.Errorf("q.Tern[T] takes exactly 2 arguments (cond, t); got %d", len(call.Args))
+		}
+		return qSubCall{
+			Family:    familyTern,
+			AsType:    typeArg,
+			TernCond:  call.Args[0],
+			TernT:     call.Args[1],
+			OuterCall: expr,
 		}, true, nil
 	}
 	// q.AssembleStruct[T](recipes...) — field-decomposed multi-output.

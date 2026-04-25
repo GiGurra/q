@@ -1,0 +1,16 @@
+a: 1
+b: 0
+trueCalls: 1
+falseCalls: 0
+falseCalls after 100 false-loops: 0
+nil-user display empty: true
+name on false: true
+lookups (false path): 0
+name on true: named
+lookups (true path): 1
+string zero: true
+int zero: true
+bool zero: true
+ptr zero: true
+slice zero: true
+condCalls: 1

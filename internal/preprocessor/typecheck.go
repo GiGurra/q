@@ -133,6 +133,11 @@ func checkErrorSlotsWithInfo(fset *token.FileSet, pkgPath, importcfgPath string,
 					diags = append(diags, d)
 				}
 			}
+			if sc.Family == familyTern {
+				if d, ok := resolveTern(fset, sc, info, pkgPath); ok {
+					diags = append(diags, d)
+				}
+			}
 		}
 	}
 

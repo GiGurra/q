@@ -270,6 +270,19 @@ description := q.Match(c,
 
 Folds to an IIFE-wrapped switch — value-returning switch as an expression, the way Scala / Rust / Swift have it. Coverage-checked when V is an enum (same rules as `q.Exhaustive`); `q.Default(...)` opts out for forward-compat scenarios.
 
+### Conditional expression
+
+```go
+display := q.Tern[string](user != nil, user.Name)
+// → "" when user is nil; user.Name when not — and user.Name is
+//   never evaluated when user is nil (no nil-deref panic).
+
+v := q.Tern[*Conn](missing, slowLookup(key))
+// → slowLookup(key) only runs when `missing` is true
+```
+
+`q.Tern[T](cond, t)` returns `t` when `cond` is true, otherwise `T`'s zero value. The preprocessor splices `t`'s source span into the chosen branch of an IIFE — so `t` is only evaluated on the true path despite Go's eager arg-eval semantics. Lazy by source-splicing, not by func-thunks.
+
 ### Auto-derived dependency injection
 
 ```go
@@ -338,7 +351,7 @@ func findAdmin(users []User) (User, error) {
 }
 ```
 
-Functional data ops over slices: `Map`, `FlatMap`, `Filter`, `GroupBy`, `Exists`, `ForAll`, `Find`, `Fold`, `Reduce`, `Unique`, `UniqueBy`, `Partition`, `Chunk`, `Count`, `Take`, `Drop`. Each fallible op ships in two flavours — bare and `…Err` returning `(result, error)` — designed to flow through `q.Try` / `q.TryE` for the bubble path. Pure runtime helpers; no `…E` chain flavour because `q.TryE(q.MapErr(…)).Wrap(…)` already produces that shape. Iterator (`iter.Seq`) variants are deferred to a follow-up wave. Inspiration: Scala collections and [samber/lo](https://github.com/samber/lo).
+Functional data ops over slices: `Map`, `FlatMap`, `Filter`, `GroupBy`, `Exists`, `ForAll`, `Find`, `Fold`, `Reduce`, `Distinct`, `DistinctBy`, `Partition`, `Chunk`, `Count`, `Take`, `Drop`. Each fallible op ships in two flavours — bare and `…Err` returning `(result, error)` — designed to flow through `q.Try` / `q.TryE` for the bubble path. Pure runtime helpers; no `…E` chain flavour because `q.TryE(q.MapErr(…)).Wrap(…)` already produces that shape. Iterator (`iter.Seq`) variants are deferred to a follow-up wave. Inspiration: Scala collections and [samber/lo](https://github.com/samber/lo).
 
 ### Parallel data ops
 

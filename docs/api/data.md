@@ -62,8 +62,8 @@ func FoldErr[T, R any](slice []T, init R, fn func(R, T) (R, error)) (R, error)
 func Reduce[T any](slice []T, fn func(T, T) T) T                          // no init; zero on empty
 
 // Set / shape
-func Unique[T comparable](slice []T) []T                                // first-occurrence preserving
-func UniqueBy[T any, K comparable](slice []T, fn func(T) K) []T         // dedup by derived key
+func Distinct[T comparable](slice []T) []T                              // first-occurrence preserving
+func DistinctBy[T any, K comparable](slice []T, fn func(T) K) []T       // dedup by derived key
 func Partition[T any](slice []T, pred func(T) bool) ([]T, []T) // (yes, no)
 func Chunk[T any](slice []T, n int) [][]T                      // panics if n <= 0
 func Count[T any](slice []T, pred func(T) bool) int            // walks all (no short-circuit)
