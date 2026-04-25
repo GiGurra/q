@@ -219,6 +219,22 @@ q.Fln("processing {len(items)} items")        // → fmt.Fprintln(q.DebugWriter,
 
 `{{` / `}}` escape literal braces. The format must be a Go string literal — dynamic formats are rejected at scan time. Inside `{…}`, anything that parses as a Go expression goes (selectors, function calls, arithmetic, even nested string literals). Tradeoff: identifiers inside the literal aren't IDE-visible — go-to-definition / rename don't see them.
 
+### Value-returning match expression
+
+```go
+type Color int
+const (Red Color = iota; Green; Blue)
+
+description := q.Match(c,
+    q.Case(Red,   "warm"),
+    q.Case(Green, "natural"),
+    q.Case(Blue,  "cool"),
+    // missing Blue → build fails: "missing case(s) for: Blue"
+)
+```
+
+Folds to an IIFE-wrapped switch — value-returning switch as an expression, the way Scala / Rust / Swift have it. Coverage-checked when V is an enum (same rules as `q.Exhaustive`); `q.Default(...)` opts out for forward-compat scenarios.
+
 ### Compile-time reflection
 
 ```go

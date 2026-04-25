@@ -122,6 +122,7 @@ const (
 	familyAllFields // q.AllFields[T]() — every field name of struct T
 	familyTypeName  // q.TypeName[T]() — defined type name as string
 	familyTag       // q.Tag[T](field, key) — struct tag value
+	familyMatch     // q.Match(v, q.Case(...), q.Default(...)) — value-returning switch
 )
 
 // form is the syntactic position of a recognised q.* call:
@@ -279,6 +280,20 @@ type qSubCall struct {
 	// pass; the rewriter quotes it as a Go string literal at the
 	// call site.
 	ResolvedString string
+
+	// MatchCases is the list of arms for q.Match. Populated at
+	// scan time by walking the q.Match call's variadic arguments.
+	// Each arm carries the value expression (nil for default arms),
+	// the result expression, and an IsDefault marker.
+	MatchCases []matchCase
+}
+
+// matchCase is one arm of a q.Match expression — either a
+// `q.Case(value, result)` or a `q.Default(result)`.
+type matchCase struct {
+	ValueExpr  ast.Expr // nil for default arm
+	ResultExpr ast.Expr
+	IsDefault  bool
 }
 
 // cleanupKind is the inferred cleanup form for q.Open(...).Release()
@@ -1155,6 +1170,28 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 		}
 		return qSubCall{Family: familyTypeName, AsType: typeArg, OuterCall: expr}, true, nil
 	}
+	// q.Match(value, q.Case(...), q.Default(...)) — value-returning
+	// switch. The first arg is the match value; remaining args are
+	// q.Case / q.Default calls. The scanner extracts each arm's
+	// value/result expressions onto MatchCases; the rewriter emits
+	// the IIFE-wrapped switch.
+	if isSelector(call.Fun, alias, "Match") {
+		if len(call.Args) < 2 {
+			return qSubCall{}, false, fmt.Errorf("q.Match takes a value plus at least one case (q.Case or q.Default); got %d args", len(call.Args))
+		}
+		cases, cerr := parseMatchArms(call.Args[1:], alias)
+		if cerr != nil {
+			return qSubCall{}, false, cerr
+		}
+		return qSubCall{Family: familyMatch, InnerExpr: call.Args[0], MatchCases: cases, OuterCall: expr}, true, nil
+	}
+	// q.Case / q.Default at the regular classifier path: silently
+	// no-match. They're only meaningful as q.Match's argument, where
+	// the q.Match scanner extracts them. Anywhere else the runtime
+	// panic stub fires.
+	if isSelector(call.Fun, alias, "Case") || isSelector(call.Fun, alias, "Default") {
+		return qSubCall{}, false, nil
+	}
 	// q.Tag[T](field, key) — both args MUST be string literals so
 	// the rewriter can resolve the tag at compile time.
 	if typeArg, ok := isIndexedSelector(call.Fun, alias, "Tag"); ok {
@@ -1887,6 +1924,48 @@ func matchExhaustiveSwitch(s *ast.SwitchStmt, alias string, fnType *ast.FuncType
 		Calls:             []qSubCall{{Family: familyExhaustive, InnerExpr: call.Args[0], OuterCall: call}},
 		EnclosingFuncType: fnType,
 	}, true, nil
+}
+
+// parseMatchArms walks q.Match's tail arguments (each expected to be
+// a q.Case or q.Default call) and extracts the (value, result,
+// isDefault) tuple per arm. Returns an error when an argument
+// doesn't match either expected shape; that becomes a diagnostic.
+//
+// At most one q.Default is allowed; further defaults are rejected.
+func parseMatchArms(args []ast.Expr, alias string) ([]matchCase, error) {
+	cases := make([]matchCase, 0, len(args))
+	defaultSeen := false
+	for i, a := range args {
+		call, ok := a.(*ast.CallExpr)
+		if !ok {
+			return nil, fmt.Errorf("q.Match argument %d is not a q.Case or q.Default call", i+1)
+		}
+		switch {
+		case isSelector(call.Fun, alias, "Case"):
+			if len(call.Args) != 2 {
+				return nil, fmt.Errorf("q.Case must take exactly two arguments (value, result); got %d", len(call.Args))
+			}
+			cases = append(cases, matchCase{
+				ValueExpr:  call.Args[0],
+				ResultExpr: call.Args[1],
+			})
+		case isSelector(call.Fun, alias, "Default"):
+			if defaultSeen {
+				return nil, fmt.Errorf("q.Match has more than one q.Default arm; at most one is allowed")
+			}
+			if len(call.Args) != 1 {
+				return nil, fmt.Errorf("q.Default must take exactly one argument (the default result); got %d", len(call.Args))
+			}
+			cases = append(cases, matchCase{
+				ResultExpr: call.Args[0],
+				IsDefault:  true,
+			})
+			defaultSeen = true
+		default:
+			return nil, fmt.Errorf("q.Match argument %d is not a q.Case or q.Default call", i+1)
+		}
+	}
+	return cases, nil
 }
 
 // stringCaseFamilies pairs the q-aliased name with its scanner family

@@ -108,6 +108,51 @@ func buildEnumOrdinalReplacement(fset *token.FileSet, src []byte, sub qSubCall, 
 		t, strings.Join(cases, "; "), argText)
 }
 
+// buildMatchReplacement emits an IIFE-wrapped switch for q.Match.
+// Shape:
+//
+//	(func() R {
+//	    switch <value> {
+//	    case <val1>: return <result1>
+//	    case <val2>: return <result2>
+//	    default:     return <defaultResult>   // when q.Default is present
+//	    }
+//	    var _zero R; return _zero             // when no q.Default
+//	}())
+//
+// V's type text comes from sub.EnumTypeText (populated by the
+// typecheck pass via go/types). R's type text comes from
+// sub.ResolvedString (the type of the first arm's result). When
+// either is missing — the typecheck pass couldn't resolve — we fall
+// back to `any` and let the Go compiler complain at the call site.
+func buildMatchReplacement(fset *token.FileSet, src []byte, sub qSubCall, subs []qSubCall, subTexts []string) string {
+	valueText := exprTextSubst(fset, src, sub.InnerExpr, subs, subTexts)
+	resultType := sub.ResolvedString
+	if resultType == "" {
+		resultType = "any"
+	}
+	var caseLines []string
+	var defaultText string
+	hasDefault := false
+	for _, mc := range sub.MatchCases {
+		if mc.IsDefault {
+			defaultText = exprTextSubst(fset, src, mc.ResultExpr, subs, subTexts)
+			hasDefault = true
+			continue
+		}
+		valExpr := exprTextSubst(fset, src, mc.ValueExpr, subs, subTexts)
+		resExpr := exprTextSubst(fset, src, mc.ResultExpr, subs, subTexts)
+		caseLines = append(caseLines, fmt.Sprintf("case %s: return %s", valExpr, resExpr))
+	}
+	cases := joinWith(caseLines, "; ")
+	if hasDefault {
+		return fmt.Sprintf("(func() %s { switch %s { %s; default: return %s } }())",
+			resultType, valueText, cases, defaultText)
+	}
+	return fmt.Sprintf("(func() %s { switch %s { %s }; var _zero %s; return _zero }())",
+		resultType, valueText, cases, resultType)
+}
+
 // buildFieldsReplacement emits a literal `[]string{"a", "b", "c"}`
 // expression for q.Fields / q.AllFields. The names come from the
 // typecheck pass's resolveReflection.

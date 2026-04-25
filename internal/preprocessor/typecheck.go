@@ -124,6 +124,11 @@ func checkErrorSlots(fset *token.FileSet, pkgPath, importcfgPath string, files [
 					diags = append(diags, d)
 				}
 			}
+			if sc.Family == familyMatch {
+				if d, ok := resolveMatch(fset, sc, info, pkgPath); ok {
+					diags = append(diags, d)
+				}
+			}
 		}
 	}
 	return diags
@@ -429,6 +434,117 @@ func resolveEnum(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPath st
 		sc.EnumUnderlyingKind = basic.Name()
 	}
 	return Diagnostic{}, false
+}
+
+// resolveMatch captures the value/result type texts (for the IIFE
+// the rewriter emits) and, when the value type is an enum,
+// validates that every constant has a case (mirroring
+// validateExhaustive). Returns a diagnostic on missing-case
+// violations; type-text resolution itself never produces a
+// diagnostic — when info isn't enough to resolve, the rewriter
+// falls back to `any`.
+func resolveMatch(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPath string) (Diagnostic, bool) {
+	if sc.InnerExpr == nil {
+		return Diagnostic{}, false
+	}
+	qualifier := func(p *types.Package) string {
+		if p == nil || p.Path() == pkgPath {
+			// Same-package types: emit unqualified. The
+			// rewriter's output sits in the same package as the
+			// user code, so `Coords` resolves correctly without
+			// the `main.` (or pkg.) prefix.
+			return ""
+		}
+		return p.Name()
+	}
+	if tv, ok := info.Types[sc.InnerExpr]; ok && tv.Type != nil {
+		sc.EnumTypeText = types.TypeString(tv.Type, qualifier)
+	}
+	// Result type from the first non-default arm's result expr,
+	// or the default arm if no value arms exist (rare — q.Match
+	// requires at least one arm).
+	var resultExpr ast.Expr
+	for _, mc := range sc.MatchCases {
+		if !mc.IsDefault {
+			resultExpr = mc.ResultExpr
+			break
+		}
+	}
+	if resultExpr == nil {
+		for _, mc := range sc.MatchCases {
+			if mc.IsDefault {
+				resultExpr = mc.ResultExpr
+				break
+			}
+		}
+	}
+	if resultExpr != nil {
+		if tv, ok := info.Types[resultExpr]; ok && tv.Type != nil {
+			sc.ResolvedString = types.TypeString(tv.Type, qualifier)
+		}
+	}
+
+	// Coverage check: only when the value type is an enum (defined
+	// named type with constants) AND no q.Default arm is present.
+	tv, ok := info.Types[sc.InnerExpr]
+	if !ok || tv.Type == nil {
+		return Diagnostic{}, false
+	}
+	named, ok := tv.Type.(*types.Named)
+	if !ok {
+		return Diagnostic{}, false
+	}
+	declPkg := named.Obj().Pkg()
+	if declPkg == nil || declPkg.Path() != pkgPath {
+		return Diagnostic{}, false
+	}
+	scope := declPkg.Scope()
+	declared := map[string]bool{}
+	for _, name := range scope.Names() {
+		obj := scope.Lookup(name)
+		c, isConst := obj.(*types.Const)
+		if !isConst {
+			continue
+		}
+		if !types.Identical(c.Type(), named) {
+			continue
+		}
+		declared[name] = true
+	}
+	if len(declared) == 0 {
+		return Diagnostic{}, false
+	}
+	hasDefault := false
+	covered := map[string]bool{}
+	for _, mc := range sc.MatchCases {
+		if mc.IsDefault {
+			hasDefault = true
+			continue
+		}
+		if name, ok := exprAsConstObjName(mc.ValueExpr, info); ok && declared[name] {
+			covered[name] = true
+		}
+	}
+	if hasDefault {
+		return Diagnostic{}, false
+	}
+	var missing []string
+	for name := range declared {
+		if !covered[name] {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) == 0 {
+		return Diagnostic{}, false
+	}
+	sort.Strings(missing)
+	pos := fset.Position(sc.OuterCall.Pos())
+	return Diagnostic{
+		File: pos.Filename,
+		Line: pos.Line,
+		Col:  pos.Column,
+		Msg:  fmt.Sprintf("q: q.Match on %s is missing case(s) for: %s. Add the missing case(s), or add a q.Default(...) arm.", named.Obj().Name(), strings.Join(missing, ", ")),
+	}, true
 }
 
 // isReflectionFamily reports whether sc's family is one of the

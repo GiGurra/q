@@ -312,6 +312,8 @@ func renderShape(fset *token.FileSet, src []byte, sh callShape, counter *int, al
 			subTexts[i] = buildFieldsReplacement(sh.Calls[i])
 		case familyTypeName, familyTag:
 			subTexts[i] = strconv.Quote(sh.Calls[i].ResolvedString)
+		case familyMatch:
+			subTexts[i] = buildMatchReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts)
 		}
 	}
 
@@ -697,7 +699,8 @@ func isInPlaceFamily(f family) bool {
 		familyUpper, familyLower, familySnake, familyKebab,
 		familyCamel, familyPascal, familyTitle,
 		familyGenStringer, familyGenEnumJSONStrict, familyGenEnumJSONLax,
-		familyFields, familyAllFields, familyTypeName, familyTag:
+		familyFields, familyAllFields, familyTypeName, familyTag,
+		familyMatch:
 		return true
 	}
 	return false
@@ -936,6 +939,9 @@ func renderSubCall(fset *token.FileSet, src []byte, sh callShape, subIdx int, su
 		return "", false, false, false, nil
 	case familyFields, familyAllFields, familyTypeName, familyTag:
 		// All fold to literals; no imports.
+		return "", false, false, false, nil
+	case familyMatch:
+		// IIFE switch — no imports needed.
 		return "", false, false, false, nil
 	case familyAwait:
 		text, err := renderAwait(fset, src, sh, sub, counter, alias, subs, subTexts)

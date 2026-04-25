@@ -1,0 +1,9 @@
+warm
+natural
+cool
+red-only
+anything else
+ok
+unknown
+{0 -1}
+{0 0}

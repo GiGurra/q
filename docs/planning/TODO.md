@@ -69,20 +69,27 @@ The features below all fit q's model: parse as valid Go, rewrite at compile time
 
   **Tradeoff:** the IDE doesn't see `name` inside `q.F("hi {name}")` as a referenced identifier — go-to-def, rename, and unused-var detection don't apply to identifiers that exist only inside the literal. This is a real DX hit. Mitigation: emit a `var _ = name` companion expression alongside the rewrite? Probably not — clutters the rewritten file. Document it as the cost of admission.
 
-- [ ] **#70 — `match` expression.** `q.Match[R](x, q.Case(…), q.Case(…))` rewrites to a switch returning a value. Pairs especially well with type-assertion dispatch.
+- [x] **#70 — `match` expression.** Shipped — see Done ledger.
 
-  **Surface:**
-  - `q.Match[R any, V any](v V, cases …MatchCase[V, R]) R` — switch by equality on V, exhaustive-by-default (default branch zero-values R if no case matches; opt in to panic via `q.MatchExhaustive`)
-  - `q.Case[V, R](v V, result R) MatchCase[V, R]` / `q.CaseFn[V, R](v V, fn func() R)`
-  - `q.MatchType[R, X any](x X, cases …TypeMatchCase[R]) R` — type-switch dispatch
-  - `q.OnType[T any, R any](fn func(T) R) TypeMatchCase[R]` — case for type T
+  **Surface (final design):**
+  ```go
+  // q.Match folds to an IIFE switch returning R. V must be comparable
+  // (Go switch requirement). When V is an enum type and no q.Default
+  // is supplied, the typecheck pass enforces coverage.
+  func Match[V comparable, R any](value V, cases ...MatchCase[V, R]) R
 
-  **Go-validity:** generic function calls, all parsed normally. `R` and `V` are explicit type args where inference fails.
+  // q.Case constructs one case arm. Same Go-syntax shape used twice
+  // for value-based and default arms.
+  func Case[V, R any](v V, r R) MatchCase[V, R]
+  func Default[V comparable, R any](r R) MatchCase[V, R]   // sentinel for default arm
+  ```
 
   **Rewriter sketch:**
-  - Recognise the `q.Match` outer call. Extract each inner `q.Case` / `q.OnType` from the variadic argument list.
-  - Emit a `switch` (or `switch x := x.(type)` for the type variant) and, per case, the corresponding body. The match value is captured in a `_qMatchN` temp so it's evaluated once.
-  - Exhaustiveness: opt-in via `q.MatchExhaustive` — the rewriter compares the matched type to known enum values (when V is a `q.GenEnum`-decorated type) and diagnoses missing cases.
+  - Scanner: recognise `q.Match` outer call. Walk `Args[1:]` for inner `q.Case` / `q.Default` calls, extract the value + result expressions per case onto the qSubCall.
+  - Typecheck: when V is a `*types.Named` with constants and no q.Default arm exists, validate all constants are covered (reuses the q.Exhaustive coverage logic).
+  - Rewriter: emit `(func(_v V) R { switch _v { case <vN>: return <rN> ... }; var zero R; return zero }(value))`. Default arm replaces `var zero R; return zero` with `return <defaultExpr>`.
+
+  **Fixture targets:** value-based int / string switching, exhaustiveness over enums, q.Default arm path, composition with q.Try inside case results.
 
 - [x] **#71 — Compile-time reflection.** Shipped — see Done ledger.
 
@@ -248,6 +255,8 @@ The features below all fit q's model: parse as valid Go, rewrite at compile time
 ## Done
 
 A short ledger of what's shipped — newest first. Look at `git log` for the full story.
+
+- **#70 — q.Match / q.Case / q.Default (value-returning switch).** Rewrites to an IIFE-wrapped switch in expression position. The typecheck pass populates `EnumTypeText` (V's type) and `ResolvedString` (R's type) via `types.TypeString` with a same-package-unqualified qualifier, so the IIFE compiles cleanly. When V is an enum (defined named type with declared constants in the package) AND no `q.Default` arm is present, coverage is enforced (mirrors `q.Exhaustive`). The scanner's `parseMatchArms` walks q.Match's tail args; each must be a q.Case or q.Default call. q.Case / q.Default classify as ok=false at the regular path (they have no meaning standalone — runtime panic stub fires if reached). Fixtures: `match_run_ok` (enum + non-enum + struct results + Default arm), `match_missing_rejected` (negative coverage). Result-type spelling handles same-package types unqualified (Coords vs main.Coords) so the rewritten IIFE compiles without surprise.
 
 - **#71 — Compile-time reflection (q.Fields / q.AllFields / q.TypeName / q.Tag).** Each call site folds to a literal at compile time. Fields / AllFields list a struct's exported / all field names; TypeName produces the defined-type name as a string; Tag looks up a struct-tag value by field+key (both literal args). Pointer indirection follows for the struct-shaped helpers. Tag uses an embedded `reflect.StructTag.Get`-equivalent parser inside `typecheck.go` (`reflectStructTag`) so the rewriter doesn't pull `reflect` as a dep. Field-not-found and non-struct-T surface diagnostics. Cross-package T works fine (the result is just a literal). Fixture `reflection_run_ok` covers Fields/AllFields/Tag round-trip + composition with `q.PgSQL` to build a SELECT statement from struct metadata.
 
