@@ -95,6 +95,12 @@ const (
 	familyDrainCtxE    // chain variant
 	familyDrainAllCtx  // q.DrainAllCtx(ctx, chans...)
 	familyDrainAllCtxE // chain variant
+	familyEnumValues  // q.EnumValues[T]() — literal []T of all constants of T
+	familyEnumNames   // q.EnumNames[T]() — literal []string of constant names
+	familyEnumName    // q.EnumName[T](v) — switch on value, return name
+	familyEnumParse   // q.EnumParse[T](s) (T, error) — switch on string, return value
+	familyEnumValid   // q.EnumValid[T](v) bool — membership check
+	familyEnumOrdinal // q.EnumOrdinal[T](v) int — declaration-order index
 )
 
 // form is the syntactic position of a recognised q.* call:
@@ -206,6 +212,24 @@ type qSubCall struct {
 	// valid, the rewriter appends `...` to the raw-helper call it
 	// emits so the variadic spread survives the rewrite.
 	EntryEllipsis token.Pos
+
+	// EnumConsts is the list of constant identifier names declared
+	// with the enum type T (carried in AsType) in T's declaring
+	// package, in source declaration order. Populated by the
+	// typecheck pass for the q.Enum* families; absent or nil for
+	// every other family. The rewriter splices these into the
+	// generated literal slice / switch.
+	EnumConsts []string
+
+	// EnumTypeText is the text of T as it should appear in the
+	// generated code — usually the AsType expression printed via the
+	// FileSet (e.g. "Color"). Populated by the typecheck pass. The
+	// rewriter uses it to spell the IIFE param type and the slice
+	// element type. For same-package T this is just the type name;
+	// for cross-package T the typecheck pass refuses with a
+	// diagnostic (the rewriter doesn't yet emit qualified
+	// identifiers for enum lookups).
+	EnumTypeText string
 }
 
 // cleanupKind is the inferred cleanup form for q.Open(...).Release()
@@ -721,6 +745,9 @@ func hasQRefInSub(sub qSubCall, alias string) bool {
 // rooted at the local q-alias identifier. Descent stops at FuncLits
 // — those belong to a nested scope and are scanned separately.
 func hasQRef(e ast.Expr, alias string) bool {
+	if e == nil {
+		return false
+	}
 	found := false
 	ast.Inspect(e, func(n ast.Node) bool {
 		if found {
@@ -876,6 +903,46 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 			return qSubCall{}, false, fmt.Errorf("q.As[T] must take exactly one argument (the value to assert); got %d", len(call.Args))
 		}
 		return qSubCall{Family: familyAs, InnerExpr: call.Args[0], AsType: typeArg, OuterCall: expr}, true, nil
+	}
+	// q.EnumValues[T]() / q.EnumNames[T]() — zero-arg, constant-folded.
+	if typeArg, ok := isIndexedSelector(call.Fun, alias, "EnumValues"); ok {
+		if len(call.Args) != 0 {
+			return qSubCall{}, false, fmt.Errorf("q.EnumValues[T] takes no arguments; got %d", len(call.Args))
+		}
+		return qSubCall{Family: familyEnumValues, AsType: typeArg, OuterCall: expr}, true, nil
+	}
+	if typeArg, ok := isIndexedSelector(call.Fun, alias, "EnumNames"); ok {
+		if len(call.Args) != 0 {
+			return qSubCall{}, false, fmt.Errorf("q.EnumNames[T] takes no arguments; got %d", len(call.Args))
+		}
+		return qSubCall{Family: familyEnumNames, AsType: typeArg, OuterCall: expr}, true, nil
+	}
+	// q.EnumName[T](v) / q.EnumValid[T](v) / q.EnumOrdinal[T](v) /
+	// q.EnumParse[T](s) — single arg (value or name), in-place
+	// rewrite to a switch expression.
+	if typeArg, ok := isIndexedSelector(call.Fun, alias, "EnumName"); ok {
+		if len(call.Args) != 1 {
+			return qSubCall{}, false, fmt.Errorf("q.EnumName[T] must take exactly one argument (a value of type T); got %d", len(call.Args))
+		}
+		return qSubCall{Family: familyEnumName, InnerExpr: call.Args[0], AsType: typeArg, OuterCall: expr}, true, nil
+	}
+	if typeArg, ok := isIndexedSelector(call.Fun, alias, "EnumParse"); ok {
+		if len(call.Args) != 1 {
+			return qSubCall{}, false, fmt.Errorf("q.EnumParse[T] must take exactly one argument (the name string); got %d", len(call.Args))
+		}
+		return qSubCall{Family: familyEnumParse, InnerExpr: call.Args[0], AsType: typeArg, OuterCall: expr}, true, nil
+	}
+	if typeArg, ok := isIndexedSelector(call.Fun, alias, "EnumValid"); ok {
+		if len(call.Args) != 1 {
+			return qSubCall{}, false, fmt.Errorf("q.EnumValid[T] must take exactly one argument (a value of type T); got %d", len(call.Args))
+		}
+		return qSubCall{Family: familyEnumValid, InnerExpr: call.Args[0], AsType: typeArg, OuterCall: expr}, true, nil
+	}
+	if typeArg, ok := isIndexedSelector(call.Fun, alias, "EnumOrdinal"); ok {
+		if len(call.Args) != 1 {
+			return qSubCall{}, false, fmt.Errorf("q.EnumOrdinal[T] must take exactly one argument (a value of type T); got %d", len(call.Args))
+		}
+		return qSubCall{Family: familyEnumOrdinal, InnerExpr: call.Args[0], AsType: typeArg, OuterCall: expr}, true, nil
 	}
 	// Bare q.CheckCtx — ctx.Err() checkpoint. Statement-only (discard).
 	if isSelector(call.Fun, alias, "CheckCtx") {

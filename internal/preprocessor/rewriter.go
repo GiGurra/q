@@ -249,6 +249,18 @@ func renderShape(fset *token.FileSet, src []byte, sh callShape, counter *int, al
 			subTexts[i] = buildFileLineReplacement(fset, sh.Calls[i])
 		case familyExpr:
 			subTexts[i] = buildExprReplacement(fset, src, sh.Calls[i])
+		case familyEnumValues:
+			subTexts[i] = buildEnumValuesReplacement(sh.Calls[i])
+		case familyEnumNames:
+			subTexts[i] = buildEnumNamesReplacement(sh.Calls[i])
+		case familyEnumName:
+			subTexts[i] = buildEnumNameReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts)
+		case familyEnumParse:
+			subTexts[i] = buildEnumParseReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts, alias)
+		case familyEnumValid:
+			subTexts[i] = buildEnumValidReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts)
+		case familyEnumOrdinal:
+			subTexts[i] = buildEnumOrdinalReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts)
 		}
 	}
 
@@ -625,7 +637,9 @@ func isInPlaceFamily(f family) bool {
 	switch f {
 	case familyDebugPrintln, familyDebugSlogAttr,
 		familySlogAttr, familySlogFile, familySlogLine, familySlogFileLine,
-		familyFile, familyLine, familyFileLine, familyExpr:
+		familyFile, familyLine, familyFileLine, familyExpr,
+		familyEnumValues, familyEnumNames, familyEnumName,
+		familyEnumParse, familyEnumValid, familyEnumOrdinal:
 		return true
 	}
 	return false
@@ -819,12 +833,19 @@ func renderSubCall(fset *token.FileSet, src []byte, sh callShape, subIdx int, su
 		return text, fmtUsed, errorsUsed, false, err
 	case familyDebugPrintln, familyDebugSlogAttr,
 		familySlogAttr, familySlogFile, familySlogLine, familySlogFileLine,
-		familyFile, familyLine, familyFileLine, familyExpr:
+		familyFile, familyLine, familyFileLine, familyExpr,
+		familyEnumValues, familyEnumNames, familyEnumName,
+		familyEnumValid, familyEnumOrdinal:
 		// In-place expression transforms — the replacement text
 		// lives in subTexts[subIdx] and is applied when
 		// substituteSpans rebuilds the final stmt. No bind/check
 		// block to emit here.
 		return "", false, false, false, nil
+	case familyEnumParse:
+		// Same as the other in-place families, but the rewritten
+		// expression contains `fmt.Errorf(...)` for the unknown-name
+		// branch, so we flip fmtUsed to trigger the import injection.
+		return "", true, false, false, nil
 	case familyAwait:
 		text, err := renderAwait(fset, src, sh, sub, counter, alias, subs, subTexts)
 		return text, false, false, false, err

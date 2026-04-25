@@ -1,0 +1,26 @@
+colors: [Red Green Blue]
+colors.len: 3
+colorNames: [Red Green Blue]
+colorInts: [0 1 2]
+statusVals: [pending done failed]
+statusNames: [Pending Done Failed]
+name(Red): "Red"
+name(Green): "Green"
+name(Blue): "Blue"
+name(unknown): ""
+status.name(Done): "Done"
+parse(Green): 1 true <nil>
+parse(Yellow).err: "Yellow": q: unknown enum value
+parse(Yellow).is: true
+status.parse(Done): done true <nil>
+valid(Red): true
+valid(99): false
+status.valid(Done): true
+status.valid(unknown): false
+ord(Red): 0
+ord(Green): 1
+ord(Blue): 2
+ord(99): -1
+descs: [Red=0 Green=1 Blue=2]
+color.String(): Red
+status.String(): Failed

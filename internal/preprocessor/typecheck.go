@@ -44,6 +44,7 @@ import (
 	"go/types"
 	"io"
 	"os"
+	"sort"
 	"strings"
 )
 
@@ -105,9 +106,147 @@ func checkErrorSlots(fset *token.FileSet, pkgPath, importcfgPath string, files [
 					diags = append(diags, d)
 				}
 			}
+			if isEnumFamily(sc.Family) {
+				if d, ok := resolveEnum(fset, sc, info, pkgPath); ok {
+					diags = append(diags, d)
+				}
+			}
 		}
 	}
 	return diags
+}
+
+// isEnumFamily reports whether sc's family is one of the q.Enum*
+// helpers whose rewriter output depends on the constant set of T.
+func isEnumFamily(f family) bool {
+	switch f {
+	case familyEnumValues, familyEnumNames, familyEnumName,
+		familyEnumParse, familyEnumValid, familyEnumOrdinal:
+		return true
+	}
+	return false
+}
+
+// resolveEnum populates sc.EnumConsts and sc.EnumTypeText by
+// looking up the type-arg T (carried in sc.AsType) in the type
+// info, then walking T's declaring package for *types.Const objects
+// whose type is identical to T. Names are returned in source
+// declaration order. The type text is the printed form of sc.AsType.
+//
+// Restrictions / diagnostic cases:
+//
+//   - T must resolve to a *types.Named whose declaring package is the
+//     same as the user's compilation unit. Cross-package T (e.g.
+//     `q.EnumName[other.Color](v)`) is rejected with a diagnostic
+//     because the rewriter writes unqualified constant names.
+//   - At least one *types.Const of T must exist in the package.
+//     Otherwise the helper has nothing to rewrite to (and the user
+//     almost certainly has a bug — calling EnumValues[T] without
+//     declaring any constants of T).
+//
+// On either failure resolveEnum returns a diagnostic; the build is
+// aborted by the caller.
+func resolveEnum(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPath string) (Diagnostic, bool) {
+	if sc.AsType == nil {
+		return Diagnostic{}, false
+	}
+	tv, ok := info.Types[sc.AsType]
+	if !ok || tv.Type == nil {
+		// Type info missing — skip. The rewriter will reach this
+		// site with EnumConsts empty and surface a clear error
+		// from the panicUnrewritten body.
+		return Diagnostic{}, false
+	}
+	named, ok := tv.Type.(*types.Named)
+	if !ok {
+		pos := fset.Position(sc.OuterCall.Pos())
+		return Diagnostic{
+			File: pos.Filename,
+			Line: pos.Line,
+			Col:  pos.Column,
+			Msg:  fmt.Sprintf("q: %s requires a named type as the type parameter (e.g. `q.EnumName[Color](v)` where Color is a defined type); got %s", enumFamilyLabel(sc.Family), tv.Type.String()),
+		}, true
+	}
+	declPkg := named.Obj().Pkg()
+	if declPkg == nil {
+		pos := fset.Position(sc.OuterCall.Pos())
+		return Diagnostic{
+			File: pos.Filename,
+			Line: pos.Line,
+			Col:  pos.Column,
+			Msg:  fmt.Sprintf("q: %s on built-in type %s is not supported; declare a defined type instead", enumFamilyLabel(sc.Family), named.String()),
+		}, true
+	}
+	if declPkg.Path() != pkgPath {
+		pos := fset.Position(sc.OuterCall.Pos())
+		return Diagnostic{
+			File: pos.Filename,
+			Line: pos.Line,
+			Col:  pos.Column,
+			Msg:  fmt.Sprintf("q: %s on cross-package type %s is not supported (the rewriter currently writes unqualified constant names). Declare a thin wrapper in this package, e.g. `func MyName(v %s) string { return q.EnumName[%s](v) }`", enumFamilyLabel(sc.Family), named.String(), named.Obj().Name(), named.Obj().Name()),
+		}, true
+	}
+
+	scope := declPkg.Scope()
+	type entry struct {
+		name string
+		pos  token.Position
+	}
+	var entries []entry
+	for _, name := range scope.Names() {
+		obj := scope.Lookup(name)
+		c, ok := obj.(*types.Const)
+		if !ok {
+			continue
+		}
+		if !types.Identical(c.Type(), named) {
+			continue
+		}
+		entries = append(entries, entry{name: c.Name(), pos: fset.Position(c.Pos())})
+	}
+	if len(entries) == 0 {
+		pos := fset.Position(sc.OuterCall.Pos())
+		return Diagnostic{
+			File: pos.Filename,
+			Line: pos.Line,
+			Col:  pos.Column,
+			Msg:  fmt.Sprintf("q: %s found no constants of type %s in package %s. Declare at least one `const ... %s = ...` first", enumFamilyLabel(sc.Family), named.Obj().Name(), declPkg.Name(), named.Obj().Name()),
+		}, true
+	}
+	sort.SliceStable(entries, func(i, j int) bool {
+		if entries[i].pos.Filename != entries[j].pos.Filename {
+			return entries[i].pos.Filename < entries[j].pos.Filename
+		}
+		return entries[i].pos.Offset < entries[j].pos.Offset
+	})
+
+	names := make([]string, len(entries))
+	for i, e := range entries {
+		names[i] = e.name
+	}
+	sc.EnumConsts = names
+	sc.EnumTypeText = named.Obj().Name()
+	return Diagnostic{}, false
+}
+
+// enumFamilyLabel is the user-facing name for an enum family in
+// diagnostic messages.
+func enumFamilyLabel(f family) string {
+	switch f {
+	case familyEnumValues:
+		return "q.EnumValues"
+	case familyEnumNames:
+		return "q.EnumNames"
+	case familyEnumName:
+		return "q.EnumName"
+	case familyEnumParse:
+		return "q.EnumParse"
+	case familyEnumValid:
+		return "q.EnumValid"
+	case familyEnumOrdinal:
+		return "q.EnumOrdinal"
+	}
+	return "q.Enum*"
 }
 
 // inferAutoCleanup populates sc.AutoCleanup with the cleanup form

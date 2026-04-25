@@ -21,6 +21,186 @@ _(All of #21–#30 and #32 shipped — see the Done ledger. Open list is now emp
 - ~~**#29 — `q.TryCatch`**~~ — **removed after shipping**. The `.Catch(handler func(any))` handler has no return path, so panics caught by the block can't flow into the enclosing function's error return. `q.Recover` / `q.RecoverE` already cover the useful cases (function-boundary panic→error with full chain vocabulary). Block-scoped try/catch was pure satire and not worth the surface.
 - ~~**#31 — `q.Must` / `q.MustE`**~~ — removed. Panicking is the opposite of what q exists to enable; the library's pitch is IDE-friendly explicit error forwarding, not abort. Callers who need "fail loudly at startup" already have `if err != nil { panic(err) }`. Not tracked for future implementation.
 
+### Next up — rejected-Go-proposal expansion
+
+The features below all fit q's model: parse as valid Go, rewrite at compile time, zero runtime overhead, IDE-native. Numbered in the order they came up; pick #68 (enums) first, then #69 (string interpolation), then the rest in any order. Each entry specs the surface, the Go-validity check, the rewriter sketch, and any tradeoffs we already worked through.
+
+- [ ] **#68 — Enums (a serious attempt to make Go enums useful).** Go's `const X = iota` pattern is the de facto enum, but it ships with nothing — no String, no Parse, no list-all, no validity check, no JSON. The plan is to keep the existing declaration shape (so the user's source still reads as plain Go) and layer compile-time helpers + opt-in method synthesis on top.
+
+  **Helper surface (call-site rewrite, cheapest first):**
+  - `q.EnumValues[T]() []T` → literal slice of all const values of type T in declaration order
+  - `q.EnumNames[T]() []string` → literal slice of identifier names
+  - `q.EnumName[T](v T) string` → switch on value, return name; `""` for unknown
+  - `q.EnumParse[T](s string) (T, error)` → switch on string, return value; sentinel error (`q.ErrEnumUnknown`) for unknown
+  - `q.EnumValid[T](v T) bool` → membership check
+  - `q.EnumOrdinal[T](v T) int` → 0-based position in declaration order
+
+  **Directive surface (synthesize a method file, opt in):**
+  - `var _ = q.GenStringer[T]()` → companion file with `func (T) String() string` using `EnumName` switch shape
+  - `var _ = q.GenEnumJSON[T]()` → companion file with `MarshalText` / `UnmarshalText`
+  - `var _ = q.GenEnum[T]()` → all of the above
+
+  **Go-validity:** every form is a function call (helpers) or a `var _ = …` declaration (directives). No new syntax. The earlier `const Red = q.EnumValue[Color]()` form was rejected because Go forbids function calls in const initializers.
+
+  **Rewriter sketch:**
+  - Scanner: recognise `q.EnumX[T](…)` families. Capture T from the `IndexExpr.Index`.
+  - Types pass: resolve T to a `*types.Named` in the importer-resolved package, walk its `*types.Package.Scope()` for `*types.Const` decls whose `Type()` matches T (in declaration source order — fall back to FileSet position sort).
+  - For helpers: emit a literal slice / switch expression spliced at the call site. No bubble path; these are pure value rewrites.
+  - For directives (`q.GenX`): add a file-synthesis pass alongside the existing per-package rewrite. Writes `_q_enum_<TypeName>.go` to `$TMPDIR` and appends to the compile argv (same primitive as `runtimestub.go`'s `writeTempGoFile`).
+  - Detect collisions: if T already has a `String()` method, the GenStringer directive emits a diagnostic instead of generating (compiler would reject duplicate method anyway, but we want the message to point at the directive).
+
+  **Bitset/flag variant (later wave):** `q.EnumFlagsString[T](v T) string` returns `"Read|Write"`; `q.EnumFlagsParse[T](s string) (T, error)` reverses. Detect via opt-in `var _ = q.GenFlags[T]()` rather than guessing from values.
+
+- [ ] **#69 — String interpolation `q.F`.** `q.F("hi {name}, age {age+1}")` rewrites to `fmt.Sprintf("hi %v, age %v", name, age+1)`. The string parses as plain Go (it's just an opaque literal), so IDE doesn't choke on the placeholders.
+
+  **Surface:**
+  - `q.F(format string, …) string` — base form, returns the formatted string
+  - `q.Ferr(format string, …) error` — `errors.New(q.F(…))`-style shortcut
+  - `q.Fln(format string, …)` — println to stderr, debug-shaped (similar to `q.DebugPrintln`)
+
+  **Go-validity:** the input is a Go string literal. Variadic `…` is unused at the source level — present in the signature so any args after the format string also work for callers who want explicit positional, but the `{expr}` form is the primary path.
+
+  **Rewriter sketch:**
+  - Scanner: recognise `q.F(…)` family. The format-string argument must be a `*ast.BasicLit` of kind `STRING` (rejected diagnostic if dynamic).
+  - Format parser: walk the literal text, find `{…}` segments, parse each segment as a Go expression via `parser.ParseExpr`. Brace-escape via `{{` / `}}` mirroring `text/template`. Reject unbalanced braces.
+  - Emit: replace each `{expr}` in the literal with `%v`, build a positional `fmt.Sprintf(rewrittenFormat, expr1, expr2, …)`. Inject `fmt` import via existing `ensureImport`.
+
+  **Tradeoff:** the IDE doesn't see `name` inside `q.F("hi {name}")` as a referenced identifier — go-to-def, rename, and unused-var detection don't apply to identifiers that exist only inside the literal. This is a real DX hit. Mitigation: emit a `var _ = name` companion expression alongside the rewrite? Probably not — clutters the rewritten file. Document it as the cost of admission.
+
+- [ ] **#70 — `match` expression.** `q.Match[R](x, q.Case(…), q.Case(…))` rewrites to a switch returning a value. Pairs especially well with type-assertion dispatch.
+
+  **Surface:**
+  - `q.Match[R any, V any](v V, cases …MatchCase[V, R]) R` — switch by equality on V, exhaustive-by-default (default branch zero-values R if no case matches; opt in to panic via `q.MatchExhaustive`)
+  - `q.Case[V, R](v V, result R) MatchCase[V, R]` / `q.CaseFn[V, R](v V, fn func() R)`
+  - `q.MatchType[R, X any](x X, cases …TypeMatchCase[R]) R` — type-switch dispatch
+  - `q.OnType[T any, R any](fn func(T) R) TypeMatchCase[R]` — case for type T
+
+  **Go-validity:** generic function calls, all parsed normally. `R` and `V` are explicit type args where inference fails.
+
+  **Rewriter sketch:**
+  - Recognise the `q.Match` outer call. Extract each inner `q.Case` / `q.OnType` from the variadic argument list.
+  - Emit a `switch` (or `switch x := x.(type)` for the type variant) and, per case, the corresponding body. The match value is captured in a `_qMatchN` temp so it's evaluated once.
+  - Exhaustiveness: opt-in via `q.MatchExhaustive` — the rewriter compares the matched type to known enum values (when V is a `q.GenEnum`-decorated type) and diagnoses missing cases.
+
+- [ ] **#71 — Compile-time reflection.** Replace runtime `reflect` for the common "give me the field names / type name / struct tag" cases. All return values are folded to literals at the call site.
+
+  **Surface:**
+  - `q.Fields[T]() []string` → literal slice of exported field names (or all, with `q.AllFields[T]`)
+  - `q.TypeName[T]() string` → e.g. `"main.User"` or `"github.com/x/y.User"` (qualified)
+  - `q.Tag[T](field, key string) string` → struct tag value at compile time, e.g. `q.Tag[User]("Name", "json")` → `"name,omitempty"`
+  - `q.Methods[T]() []string` → literal slice of method names defined on T
+  - `q.Size[T]() uintptr` → `unsafe.Sizeof((*T)(nil))`-equivalent, but constant-folded
+
+  **Go-validity:** generic calls. The first arg of `q.Tag` is a string literal — diagnose if dynamic.
+
+  **Use case:** zero-cost JSON / CSV / SQL row mappers without `reflect`. The downstream user writes a tiny per-type marshaller that uses these constants for column names and tags; with q, the marshaller compiles to a direct field-access table without runtime introspection.
+
+  **Rewriter sketch:** types pass resolves T, walks its method set / fields, splices a literal `[]string{"a","b","c"}` or `"foo"` at the call site. Inject `unsafe` import for `Size`.
+
+- [ ] **#72 — Named arguments via `q.Call` + `q.Named`.** Proposal #12854 (default arguments) and #29137 (named args) were both rejected. q can offer a workable shape for the named-args half.
+
+  **Surface:**
+  - `q.Call(fn, q.Named("timeout", 5*time.Second), q.Named("retries", 3))` — rewrites to a positional call with name → param-position mapping resolved by the rewriter. Arguments not named default to the param's zero value.
+  - Default values via signature annotation: not feasible without new syntax. Skip.
+
+  **Go-validity:** `q.Call` is a function call. The first arg is the callee (any func value), subsequent args are `q.Named(name, value)` results. The runtime stub for `q.Call` panics if reached (rewriter must transform it).
+
+  **Rewriter sketch:** types pass resolves the callee's parameter names from `*types.Signature`. For each `q.Named(name, value)` arg, look up the position. Emit `fn(positional1, positional2, …)`.
+
+  **Tradeoff:** doesn't extend to method values where the name is dynamic, doesn't help with overloading. Diagnostics for: name not found in signature, duplicate name, name on a callee whose params are unnamed.
+
+- [ ] **#73 — Compile-time string ops `q.Snake` / `q.Upper` / `q.Lower` / `q.Camel` / `q.Kebab`.** All take `string` literals, all fold to a `string` literal at the call site. Useful for codegen-adjacent helpers (column names, URL paths, env var keys) without runtime cost.
+
+  **Go-validity:** function call with string literal arg. Reject dynamic args at scan time.
+
+  **Rewriter sketch:** AST literal extraction → string transform → emit `*ast.BasicLit` with the new value.
+
+- [ ] **#74 — Sum types via `q.OneOf` / `q.Switch`.** Discriminated unions, the most-rejected of all rejected proposals.
+
+  **Surface:**
+  - `type Result q.OneOf2[Success, Failure]` — alias to a real generic struct that holds an `any` value + a small tag int
+  - `q.MakeOneOf[Success, Result]("Success", success)` constructor (or per-arm sugar like `q.As1[Success, Result](v)`)
+  - `q.Switch[R, U any](u U, arm1, arm2…) R` — exhaustive type-tagged dispatch; rewriter checks the union has exactly N arms and N cases passed
+
+  **Go-validity:** all generic calls / generic type aliases. `q.OneOf2` is a real type with stub methods; the value lives at runtime as `any` + tag.
+
+  **Tradeoff:** runtime cost is one `any` box (interface conversion). To avoid it for primitive variants, the rewriter could specialise `q.OneOf2[int, string]` to a struct-with-discriminator at compile time. Big lift; defer the optimisation.
+
+  **Why now-ish vs much later:** sum types are the headline rejected proposal. Even a runtime-boxed version with exhaustiveness checking would be high-impact for users.
+
+- [ ] **#75 — Phantom types / brands `q.Tagged[Underlying, Tag]`.** Compile-time distinct types over the same underlying type, no runtime cost.
+
+  **Surface:**
+  - `type UserID = q.Tagged[int, struct{ _userID }]` — `q.Tagged[U, T]` is a generic struct or alias chosen so the underlying ops still work
+  - `q.UnTag[U, T any](v Tagged[U, T]) U` — unwrap
+  - `q.MkTag[U, T any](v U) Tagged[U, T]` — wrap
+
+  **Tradeoff:** without operator support, you can't write `userID + 1` directly. The rewriter could rewrite `q.MkTag[int, T](q.UnTag(x) + 1)` automatically for arithmetic, but it's clunky. Maybe just expose the unwrap/wrap and accept the verbosity.
+
+- [ ] **#76 — Conditional expression `q.Ternary`.** Two shapes considered, only the thunked one is acceptable.
+
+  **Eager form (rejected):** `q.Ternary(cond, a, b)` — both `a` and `b` evaluate as Go arguments before the call. The rewriter would have to lazily drop the unchosen arg, which silently changes the semantics from what plain-Go interpretation would suggest. Violates the principle that the rewrite is consistent with what the source-as-Go would mean.
+
+  **Thunked form (accepted):** `q.Ternary(cond, func() T { return a }, func() T { return b })` — rewrites to `if cond { v = arg1() } else { v = arg2() }`. Verbose but correct: only one arg runs.
+
+  Tradeoff: thunks are syntactic noise. Probably skip until a use case justifies it.
+
+- [ ] **#77 — Injection-safe SQL via `q.SQL`.** A specialised cousin of `q.F` (#69): same `{name}` interpolation surface, but rewrites to placeholder-style parameterised SQL — never inlines user values into the query string. The point is to make the safe form as ergonomic as f-string-style concatenation, so devs reach for it by reflex.
+
+  **Surface:**
+  ```go
+  s := q.SQL("SELECT * FROM users WHERE id = {id} AND status = {status}")
+  // s.Query → "SELECT * FROM users WHERE id = ? AND status = ?"
+  // s.Args  → []any{id, status}
+  db.QueryRowContext(ctx, s.Query, s.Args...)
+  ```
+
+  Dialect variants (same template parsing, different placeholder generator):
+  - `q.SQL("…")` — `?` placeholders (default; SQLite, MySQL, database/sql with normalisation)
+  - `q.PgSQL("…")` — `$1`, `$2`, … (lib/pq, pgx)
+  - `q.NamedSQL("…")` — `:id`, `:status`, … (sqlx, named-param drivers)
+
+  Returns a `q.SQLQuery` struct (real type, not a panic stub on the value side):
+  ```go
+  type SQLQuery struct {
+      Query string
+      Args  []any
+  }
+  ```
+
+  **Go-validity:** function call with a string literal arg. The struct return is a valid Go type at all times.
+
+  **Rewriter sketch:**
+  - Reuses #69's format-literal parser. Each `{expr}` becomes a placeholder (numbered for `PgSQL`, kept positional for `SQL`, or named for `NamedSQL`); the inner expression is appended to a `[]any{…}` literal.
+  - Emits `q.SQLQuery{Query: "rewritten", Args: []any{e1, e2, …}}` at the call site.
+  - Brace-escape `{{`/`}}` like `q.F`. Reject dynamic format strings — that defeats the whole point (an attacker-influenced format would let `;DROP TABLE` slip in).
+
+  **Tradeoff vs. raw `fmt.Sprintf` approach:** the rewriter physically cannot put user values into the query string — even if the developer mis-types, the output is still parameterised. This is the safety guarantee the helper exists to provide.
+
+  **Stretch:** a `q.SQLIn(values)` placeholder for `IN (…)` lists (expands to `?, ?, ?` matching `len(values)` and appends each to Args). Bare `{values}` for a slice would be ambiguous (one placeholder vs N), so an explicit helper is clearer.
+
+- [ ] **#78 — Embed `rewire` and `proven` into q's toolexec dispatcher.** Right now a project that wants q + proven + rewire has to run them as a chain or pick one. q's `cmd/q` could become an umbrella dispatcher that detects which patterns are present in each compiled package and routes to the appropriate rewriter pass.
+
+  **Surface:**
+  - Single `-toolexec=q` enables Try/NotNil/etc. (q), `proven.True(…)` assertions (proven), and `rewire.Mock(…)` / `rewire.Stub(…)` mocks (rewire).
+  - Each child preprocessor's pass runs on per-package compiles where its patterns are detected.
+  - q's existing pkg/q stub injection + runtime injection stays. Proven and rewire likely have similar package-dispatch patterns we can compose with.
+
+  **Mechanism options:**
+  1. **Vendor** the rewire / proven repos into `internal/preprocessors/{rewire,proven}/`. Pin to a specific commit, copy on update. Pro: hermetic, no cross-repo coordination at build time. Con: drift; we miss upstream fixes until we re-vendor.
+  2. **Import as Go modules.** Easiest if their internals are exported in a stable API. Likely they're not — `internal/preprocessor/...` packages aren't reachable from outside their modules. Would need upstream cooperation (move the pass entry point to a non-internal package, or add a thin API).
+  3. **Shell out to their binaries.** q's process dispatches to `proven` and `rewire` binaries on PATH. Minimal coupling but requires them installed. Worst option.
+
+  **Lean:** option 1 (vendor) for rewire and proven both. We own all three repos, so vendoring is a coordination cost we can absorb cheaply. Pin via go.mod replace directives during dev, switch to copies on stable release.
+
+  **Order of work:**
+  1. Audit rewire and proven for the entry-point shape (pass `(toolArgs, sources) → (newArgs, diagnostics)`).
+  2. If rewire/proven's pass is roughly the `Plan/Diagnostic` shape q already uses, write an adapter; otherwise propose API changes upstream first.
+  3. Vendor + add a dispatcher in `compile.go` that runs all three passes per user-package compile (q first, then proven assertions, then rewire mocks — order matters since later passes see earlier passes' rewrites).
+  4. New e2e fixture combining all three: a function that uses `q.Try`, `proven.True`, and `rewire.Mock` in the same body.
+
+  **Open question:** does running multiple toolexec passes on the same compile produce correct results, or does pass N+1 trip on temp paths from pass N? Likely fine since each pass writes its own tempdir and the final argv just lists them all, but worth a smoke test before going deeper.
+
 ### Future / parking lot
 
 - [ ] **#11 — `q.<X>` for is-nil-as-failure / comma-ok / etc.** Umbrella ticket — superseded by #20, #24. Keep open as the catch-all for any additional bubble triggers that surface later (e.g. `q.IfNil(x)` for error-less nil checks that don't want to spell `q.NotNilE(…).Err(ErrSomething)`).
