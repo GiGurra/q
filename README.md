@@ -219,6 +219,22 @@ q.Fln("processing {len(items)} items")        // → fmt.Fprintln(q.DebugWriter,
 
 `{{` / `}}` escape literal braces. The format must be a Go string literal — dynamic formats are rejected at scan time. Inside `{…}`, anything that parses as a Go expression goes (selectors, function calls, arithmetic, even nested string literals). Tradeoff: identifiers inside the literal aren't IDE-visible — go-to-definition / rename don't see them.
 
+### Compile-time reflection
+
+```go
+type User struct {
+    ID    int    `json:"id"   db:"user_id"`
+    Name  string `json:"name" db:"full_name"`
+}
+
+q.Fields[User]()                 // []string{"ID", "Name"}
+q.TypeName[User]()               // "User"
+q.Tag[User]("Name", "json")      // "name"
+q.Tag[User]("Name", "db")        // "full_name"
+```
+
+Each call folds to a literal at compile time. Useful for codegen-free JSON / CSV / SQL row mappers, schema-derived helpers, and other small cases where pulling in `reflect` is overkill. `q.Tag`'s field+key args must be string literals; field name validated at compile time.
+
 ### Compile-time string-case transforms
 
 ```go

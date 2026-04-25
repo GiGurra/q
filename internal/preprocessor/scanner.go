@@ -118,6 +118,10 @@ const (
 	familyGenStringer       // var _ = q.GenStringer[T]() — synthesize String() method
 	familyGenEnumJSONStrict // var _ = q.GenEnumJSONStrict[T]() — name-based JSON, errors on unknown
 	familyGenEnumJSONLax    // var _ = q.GenEnumJSONLax[T]() — passthrough JSON, preserves unknown
+	familyFields    // q.Fields[T]() — exported field names of struct T
+	familyAllFields // q.AllFields[T]() — every field name of struct T
+	familyTypeName  // q.TypeName[T]() — defined type name as string
+	familyTag       // q.Tag[T](field, key) — struct tag value
 )
 
 // form is the syntactic position of a recognised q.* call:
@@ -262,6 +266,19 @@ type qSubCall struct {
 	// basic type (which the Gen* directives reject with a
 	// diagnostic).
 	EnumUnderlyingKind string
+
+	// StructFields is the resolved field-name list for the q.Fields
+	// / q.AllFields families. Populated by the typecheck pass
+	// (resolveStructReflection). The rewriter splices these into a
+	// `[]string{...}` literal.
+	StructFields []string
+
+	// ResolvedString carries pre-computed string output for any
+	// reflection family that resolves to a single string at
+	// compile time (q.TypeName, q.Tag). Populated by the typecheck
+	// pass; the rewriter quotes it as a Go string literal at the
+	// call site.
+	ResolvedString string
 }
 
 // cleanupKind is the inferred cleanup form for q.Open(...).Release()
@@ -1117,6 +1134,40 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 			return qSubCall{}, false, fmt.Errorf("q.EnumOrdinal[T] must take exactly one argument (a value of type T); got %d", len(call.Args))
 		}
 		return qSubCall{Family: familyEnumOrdinal, InnerExpr: call.Args[0], AsType: typeArg, OuterCall: expr}, true, nil
+	}
+	// q.Fields[T]() / q.AllFields[T]() — zero-arg, struct-only.
+	if typeArg, ok := isIndexedSelector(call.Fun, alias, "Fields"); ok {
+		if len(call.Args) != 0 {
+			return qSubCall{}, false, fmt.Errorf("q.Fields[T] takes no arguments; got %d", len(call.Args))
+		}
+		return qSubCall{Family: familyFields, AsType: typeArg, OuterCall: expr}, true, nil
+	}
+	if typeArg, ok := isIndexedSelector(call.Fun, alias, "AllFields"); ok {
+		if len(call.Args) != 0 {
+			return qSubCall{}, false, fmt.Errorf("q.AllFields[T] takes no arguments; got %d", len(call.Args))
+		}
+		return qSubCall{Family: familyAllFields, AsType: typeArg, OuterCall: expr}, true, nil
+	}
+	// q.TypeName[T]() — zero-arg.
+	if typeArg, ok := isIndexedSelector(call.Fun, alias, "TypeName"); ok {
+		if len(call.Args) != 0 {
+			return qSubCall{}, false, fmt.Errorf("q.TypeName[T] takes no arguments; got %d", len(call.Args))
+		}
+		return qSubCall{Family: familyTypeName, AsType: typeArg, OuterCall: expr}, true, nil
+	}
+	// q.Tag[T](field, key) — both args MUST be string literals so
+	// the rewriter can resolve the tag at compile time.
+	if typeArg, ok := isIndexedSelector(call.Fun, alias, "Tag"); ok {
+		if len(call.Args) != 2 {
+			return qSubCall{}, false, fmt.Errorf("q.Tag[T] takes exactly two arguments (field, key string literals); got %d", len(call.Args))
+		}
+		for i, label := range []string{"field", "key"} {
+			lit, ok := call.Args[i].(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				return qSubCall{}, false, fmt.Errorf("q.Tag[T]'s %s argument must be a Go string literal", label)
+			}
+		}
+		return qSubCall{Family: familyTag, AsType: typeArg, OkArgs: call.Args, OuterCall: expr}, true, nil
 	}
 	// q.F / q.Ferr / q.Fln — compile-time string interpolation. Each
 	// takes a single string-literal format with `{expr}` placeholders.

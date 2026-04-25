@@ -108,6 +108,20 @@ func buildEnumOrdinalReplacement(fset *token.FileSet, src []byte, sub qSubCall, 
 		t, strings.Join(cases, "; "), argText)
 }
 
+// buildFieldsReplacement emits a literal `[]string{"a", "b", "c"}`
+// expression for q.Fields / q.AllFields. The names come from the
+// typecheck pass's resolveReflection.
+func buildFieldsReplacement(sub qSubCall) string {
+	if len(sub.StructFields) == 0 {
+		return "[]string(nil)"
+	}
+	parts := make([]string, len(sub.StructFields))
+	for i, n := range sub.StructFields {
+		parts[i] = strconv.Quote(n)
+	}
+	return "[]string{" + strings.Join(parts, ", ") + "}"
+}
+
 // enumTypeText returns the type-text the rewriter should splice into
 // the generated literal / IIFE param. Falls back to "any" only when
 // the typecheck pass couldn't resolve T — which already produced a

@@ -308,6 +308,10 @@ func renderShape(fset *token.FileSet, src []byte, sh callShape, counter *int, al
 			// value. The companion file-synthesis pass reads the
 			// directive separately to generate methods.
 			subTexts[i] = alias + ".GenMarker{}"
+		case familyFields, familyAllFields:
+			subTexts[i] = buildFieldsReplacement(sh.Calls[i])
+		case familyTypeName, familyTag:
+			subTexts[i] = strconv.Quote(sh.Calls[i].ResolvedString)
 		}
 	}
 
@@ -692,7 +696,8 @@ func isInPlaceFamily(f family) bool {
 		familyExhaustive,
 		familyUpper, familyLower, familySnake, familyKebab,
 		familyCamel, familyPascal, familyTitle,
-		familyGenStringer, familyGenEnumJSONStrict, familyGenEnumJSONLax:
+		familyGenStringer, familyGenEnumJSONStrict, familyGenEnumJSONLax,
+		familyFields, familyAllFields, familyTypeName, familyTag:
 		return true
 	}
 	return false
@@ -928,6 +933,9 @@ func renderSubCall(fset *token.FileSet, src []byte, sh callShape, subIdx int, su
 	case familyGenStringer, familyGenEnumJSONStrict, familyGenEnumJSONLax:
 		// Directive call → no-op marker. No imports needed
 		// (q.GenMarker references pkg/q which is already imported).
+		return "", false, false, false, nil
+	case familyFields, familyAllFields, familyTypeName, familyTag:
+		// All fold to literals; no imports.
 		return "", false, false, false, nil
 	case familyAwait:
 		text, err := renderAwait(fset, src, sh, sub, counter, alias, subs, subTexts)

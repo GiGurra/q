@@ -45,6 +45,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -115,6 +116,11 @@ func checkErrorSlots(fset *token.FileSet, pkgPath, importcfgPath string, files [
 			}
 			if sc.Family == familyExhaustive {
 				if d, ok := validateExhaustive(fset, &shapes[i], sc, info, pkgPath); ok {
+					diags = append(diags, d)
+				}
+			}
+			if isReflectionFamily(sc.Family) {
+				if d, ok := resolveReflection(fset, sc, info); ok {
 					diags = append(diags, d)
 				}
 			}
@@ -423,6 +429,203 @@ func resolveEnum(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPath st
 		sc.EnumUnderlyingKind = basic.Name()
 	}
 	return Diagnostic{}, false
+}
+
+// isReflectionFamily reports whether sc's family is one of the
+// q.Fields / q.AllFields / q.TypeName / q.Tag compile-time-reflection
+// helpers.
+func isReflectionFamily(f family) bool {
+	switch f {
+	case familyFields, familyAllFields, familyTypeName, familyTag:
+		return true
+	}
+	return false
+}
+
+// resolveReflection populates sc.StructFields and/or sc.ResolvedString
+// for the reflection family by inspecting T (sc.AsType) via the
+// types.Info. Returns a diagnostic on error (T isn't a struct for
+// the field-listing forms, the named field doesn't exist for q.Tag,
+// etc.).
+func resolveReflection(fset *token.FileSet, sc *qSubCall, info *types.Info) (Diagnostic, bool) {
+	if sc.AsType == nil {
+		return Diagnostic{}, false
+	}
+	tv, ok := info.Types[sc.AsType]
+	if !ok || tv.Type == nil {
+		// Type info missing — skip; the panicUnrewritten body
+		// will surface a runtime error if reached.
+		return Diagnostic{}, false
+	}
+
+	if sc.Family == familyTypeName {
+		sc.ResolvedString = formatTypeName(tv.Type)
+		return Diagnostic{}, false
+	}
+
+	// Fields / AllFields / Tag all need T's underlying struct.
+	st := dereferenceToStruct(tv.Type)
+	if st == nil {
+		pos := fset.Position(sc.OuterCall.Pos())
+		return Diagnostic{
+			File: pos.Filename,
+			Line: pos.Line,
+			Col:  pos.Column,
+			Msg:  fmt.Sprintf("q: %s requires a struct type (or pointer to struct) as the type parameter; got %s", reflectionFamilyLabel(sc.Family), tv.Type.String()),
+		}, true
+	}
+
+	switch sc.Family {
+	case familyFields, familyAllFields:
+		var names []string
+		for i := 0; i < st.NumFields(); i++ {
+			f := st.Field(i)
+			if sc.Family == familyFields && !f.Exported() {
+				continue
+			}
+			names = append(names, f.Name())
+		}
+		sc.StructFields = names
+
+	case familyTag:
+		// OkArgs[0] is the field name, OkArgs[1] is the tag key —
+		// both validated as string literals at scan time.
+		if len(sc.OkArgs) != 2 {
+			return Diagnostic{}, false
+		}
+		fieldLit, ok1 := sc.OkArgs[0].(*ast.BasicLit)
+		keyLit, ok2 := sc.OkArgs[1].(*ast.BasicLit)
+		if !ok1 || !ok2 {
+			return Diagnostic{}, false
+		}
+		fieldName, err1 := strconv.Unquote(fieldLit.Value)
+		key, err2 := strconv.Unquote(keyLit.Value)
+		if err1 != nil || err2 != nil {
+			return Diagnostic{}, false
+		}
+		// Find the field on the struct.
+		var tag string
+		found := false
+		for i := 0; i < st.NumFields(); i++ {
+			f := st.Field(i)
+			if f.Name() == fieldName {
+				tag = st.Tag(i)
+				found = true
+				break
+			}
+		}
+		if !found {
+			pos := fset.Position(sc.OuterCall.Pos())
+			return Diagnostic{
+				File: pos.Filename,
+				Line: pos.Line,
+				Col:  pos.Column,
+				Msg:  fmt.Sprintf("q: q.Tag[%s]: field %q not found on the struct", tv.Type.String(), fieldName),
+			}, true
+		}
+		sc.ResolvedString = reflectStructTag(tag).Get(key)
+	}
+	return Diagnostic{}, false
+}
+
+// dereferenceToStruct unwraps a pointer to its element type and
+// returns the underlying *types.Struct, or nil when T isn't a
+// struct (or pointer to one).
+func dereferenceToStruct(t types.Type) *types.Struct {
+	if ptr, isPtr := t.(*types.Pointer); isPtr {
+		t = ptr.Elem()
+	}
+	if named, isNamed := t.(*types.Named); isNamed {
+		t = named.Underlying()
+	}
+	st, _ := t.(*types.Struct)
+	return st
+}
+
+// formatTypeName returns the user-facing type-name for q.TypeName.
+// For named types, just the unqualified identifier. For pointer
+// types, the dereferenced name. For unnamed types (slice, map,
+// chan, func, struct literal), `types.Type.String()` (using the
+// short package qualifier).
+func formatTypeName(t types.Type) string {
+	if ptr, isPtr := t.(*types.Pointer); isPtr {
+		return formatTypeName(ptr.Elem())
+	}
+	if named, isNamed := t.(*types.Named); isNamed {
+		return named.Obj().Name()
+	}
+	return types.TypeString(t, func(p *types.Package) string {
+		if p == nil {
+			return ""
+		}
+		return p.Name()
+	})
+}
+
+// reflectStructTag mirrors the standard library's
+// `reflect.StructTag` parser without forcing the preprocessor to
+// import `reflect` (which it would otherwise have no need for).
+type reflectStructTag string
+
+// Get returns the value associated with key in the tag string. If
+// the key is absent, Get returns the empty string. Identical
+// semantics to `reflect.StructTag.Get`, simplified for our use:
+// we don't need the (value, ok) form.
+func (tag reflectStructTag) Get(key string) string {
+	for tag != "" {
+		i := 0
+		for i < len(tag) && tag[i] == ' ' {
+			i++
+		}
+		tag = tag[i:]
+		if tag == "" {
+			break
+		}
+		i = 0
+		for i < len(tag) && tag[i] > ' ' && tag[i] != ':' && tag[i] != '"' && tag[i] != 0x7f {
+			i++
+		}
+		if i == 0 || i+1 >= len(tag) || tag[i] != ':' || tag[i+1] != '"' {
+			break
+		}
+		name := string(tag[:i])
+		tag = tag[i+1:]
+		i = 1
+		for i < len(tag) && tag[i] != '"' {
+			if tag[i] == '\\' {
+				i++
+			}
+			i++
+		}
+		if i >= len(tag) {
+			break
+		}
+		qvalue := string(tag[:i+1])
+		tag = tag[i+1:]
+		if key == name {
+			value, err := strconv.Unquote(qvalue)
+			if err != nil {
+				return ""
+			}
+			return value
+		}
+	}
+	return ""
+}
+
+// reflectionFamilyLabel returns the user-facing helper name.
+func reflectionFamilyLabel(f family) string {
+	switch f {
+	case familyFields:
+		return "q.Fields"
+	case familyAllFields:
+		return "q.AllFields"
+	case familyTypeName:
+		return "q.TypeName"
+	case familyTag:
+		return "q.Tag"
+	}
+	return "q.<reflection>"
 }
 
 // enumFamilyLabel is the user-facing name for an enum family in
