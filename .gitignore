@@ -20,6 +20,3 @@
 # Coverage
 *.cover
 coverage.txt
-
-# mkdocs build output (deployed via gh-pages workflow, not checked in)
-/site/
