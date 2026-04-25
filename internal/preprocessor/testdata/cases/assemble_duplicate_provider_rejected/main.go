@@ -13,5 +13,5 @@ func newConfig() *Config       { return &Config{DB: "primary"} }
 func newOtherConfig() *Config  { return &Config{DB: "other"} }
 
 func main() {
-	_ = q.Assemble[*Config](newConfig, newOtherConfig)
+	_, _ = q.Assemble[*Config](newConfig, newOtherConfig)
 }

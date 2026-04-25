@@ -1,7 +1,6 @@
 // Fixture: a typed-nil inline value flows into the assembly. The
-// runtime nil-check on the bound _qDep<N> fires immediately — same
-// machinery that catches nil-returning constructors. For q.AssembleErr
-// the failure bubbles a fmt.Errorf wrapping q.ErrNil.
+// runtime nil-check on the bound _qDep<N> fires immediately and
+// bubbles a fmt.Errorf wrapping q.ErrNil.
 package main
 
 import (
@@ -18,7 +17,7 @@ func newDB(c *Config) *DB { return &DB{cfg: c} }
 
 func boot() (*DB, error) {
 	var nilCfg *Config // typed-nil
-	return q.AssembleErr[*DB](nilCfg, newDB)
+	return q.Assemble[*DB](nilCfg, newDB)
 }
 
 func main() {

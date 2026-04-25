@@ -268,8 +268,8 @@ func main() { _ = q.Assemble[*Root](newA, newB, newRoot) }
 `,
 			wantSubs: []string{
 				"dependency cycle:",
-				"*A (#1)",
-				"*B (#2)",
+				"*A (#1 (newA))",
+				"*B (#2 (newB))",
 			},
 		},
 		{
@@ -301,8 +301,8 @@ func main() { _ = q.Assemble[*DB](newCfg, newDB, unrelated) }
 				"unused recipe(s):",
 				"#3 (unrelated) — provides string",
 				"The target type *DB requires:",
-				"*DB <- recipe #2 [fn]",
-				"*Cfg <- recipe #1 [fn]",
+				"*DB <- #2 (newDB) [fn]",
+				"*Cfg <- #1 (newCfg) [fn]",
 			},
 		},
 		{
@@ -326,20 +326,6 @@ func main() { _ = q.Assemble[*App](newEN, newES, newApp) }
 				"#1 (newEN) → *EN",
 				"#2 (newES) → *ES",
 				"narrow the recipe set or use q.Tagged",
-			},
-		},
-		{
-			name: "errored recipe in pure Assemble",
-			src: `package main
-import "github.com/GiGurra/q/pkg/q"
-type DB struct{}
-func newDB() (*DB, error) { return nil, nil }
-func main() { _ = q.Assemble[*DB](newDB) }
-`,
-			wantSubs: []string{
-				"recipe #1 (newDB) returns (*DB, error)",
-				"q.Assemble has no error path",
-				"use q.AssembleErr or q.AssembleE",
 			},
 		},
 		{
@@ -376,7 +362,7 @@ type DB struct{}
 type MyErr struct{}
 func (e *MyErr) Error() string { return "" }
 func newDB() (*DB, *MyErr) { return nil, nil }
-func main() { _ = q.AssembleErr[*DB](newDB) }
+func main() { _, _ = q.Assemble[*DB](newDB) }
 `,
 			wantSubs: []string{
 				"second return is *MyErr",
@@ -428,6 +414,83 @@ func main() { _ = q.Assemble[*Server](newCfg, newOther, newServer) }
 			}
 			requireDiagContains(t, diags, tc.wantSubs...)
 		})
+	}
+}
+
+// TestUnitAssembleCtxAsInlineValue exercises ctx-as-inline-value:
+// a context.Context value passed as a recipe arg is matched to a
+// recipe input via interface satisfaction. ctx is recipe #1 in the
+// user's list with normal 1-based numbering (no special treatment).
+func TestUnitAssembleCtxAsInlineValue(t *testing.T) {
+	src := `package main
+
+import (
+	"context"
+
+	"github.com/GiGurra/q/pkg/q"
+)
+
+type Cfg struct{}
+type DB struct{ ctx context.Context; cfg *Cfg }
+
+func newCfg() *Cfg                              { return &Cfg{} }
+func newDB(ctx context.Context, c *Cfg) *DB    { return &DB{ctx: ctx, cfg: c} }
+
+func main() {
+	_, _ = q.Assemble[*DB](context.Background(), newCfg, newDB)
+}
+`
+	diags, shapes, err := analyzeAssembleSrc(t, src)
+	if err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+	requireNoDiags(t, diags)
+	steps := shapes[0].Calls[0].AssembleSteps
+	if len(steps) != 3 {
+		t.Fatalf("expected 3 topo-sorted steps; got %d", len(steps))
+	}
+	// ctx is recipe #1 (the first inline value); newCfg is #2; newDB
+	// is #3. Topo: ctx and newCfg are leaves; newDB requires both.
+	// AssembleCtxDepKey must be set so the rewriter knows to bind
+	// _qDbg from the ctx provider for the optional debug-trace
+	// prelude.
+	if shapes[0].Calls[0].AssembleCtxDepKey == "" {
+		t.Errorf("AssembleCtxDepKey should be set when a ctx provider exists")
+	}
+}
+
+// TestUnitAssembleCtxOnlyForDebug verifies that supplying ctx purely
+// for assembly-config — no recipe consumes it — does NOT trigger
+// the unused-recipe diagnostic. context.Context is exempt because
+// it's expected to ride into the assembly for debug / future hooks.
+func TestUnitAssembleCtxOnlyForDebug(t *testing.T) {
+	src := `package main
+
+import (
+	"context"
+
+	"github.com/GiGurra/q/pkg/q"
+)
+
+type Cfg struct{}
+type DB struct{ cfg *Cfg }
+
+// No recipe takes context.Context — ctx is supplied purely for
+// assembly-config (debug etc).
+func newCfg() *Cfg     { return &Cfg{} }
+func newDB(c *Cfg) *DB { return &DB{cfg: c} }
+
+func main() {
+	_, _ = q.Assemble[*DB](context.Background(), newCfg, newDB)
+}
+`
+	diags, shapes, err := analyzeAssembleSrc(t, src)
+	if err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+	requireNoDiags(t, diags) // ctx is exempt from unused-recipe check
+	if shapes[0].Calls[0].AssembleCtxDepKey == "" {
+		t.Errorf("AssembleCtxDepKey should be set even when ctx has no consumer (debug still works)")
 	}
 }
 

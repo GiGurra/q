@@ -65,10 +65,11 @@ The persistent backlog for `q`. A cold-state reader can pick up here without re-
 
   Big lift: needs flow analysis (or a heavy hand: rewrite every reference into shim-method calls), needs to interop with raw resource access (sometimes you do want the underlying `*Conn`), and adds a real per-call atomic. Probably not worth it for the 90% case (functions that own their own resources) — defer until profiles or user reports show resource ownership crosses function boundaries often enough that the existing diagnostics become annoying.
 
-- **#84 — `q.Assemble` follow-on phases.** Phase 1 (pure / errored / chain auto-derived DI with diagnostics, interface-input resolution, runtime nil-recipe detection) shipped — see [`docs/api/assemble.md`](../api/assemble.md). Remaining work, plan in [`docs/planning/assemble.md`](assemble.md):
-    - **Phase 1.5 — `q.AssembleCtx`** with ctx-attached options (`q.WithPar` for parallel construction, `q.Serially` for forced-sequential, `q.WithAssemblyDebug` for trace).
-    - **Phase 2 — selection & multi-output.** `q.AssembleAll[T]` (multiple legitimate providers of T → `[]T`), struct-target multi-output (`q.Assemble[App]` populates each field of `App` from a matching recipe).
+- **#84 — `q.Assemble` follow-on phases.** Phase 1 shipped — single `q.Assemble[T](recipes...) (T, error)` entry, ctx-as-inline-value, runtime nil-recipe detection, debug tracing via `q.WithAssemblyDebug`, full diagnostic matrix with dep-tree visualisation, plus `q.Unwrap` / `q.UnwrapE` runtime helpers for non-bubble call sites. See [`docs/api/assemble.md`](../api/assemble.md). Remaining work, full plan in [`docs/planning/assemble.md`](assemble.md):
+    - **Phase 2a — `q.AssembleAll[T]`.** Multiple legitimate providers of T → `([]T, error)` for plugin/handler/middleware aggregation.
+    - **Phase 2b — struct-target multi-output.** `q.Assemble[App]` populates each field of `App` from a matching recipe.
     - **Phase 3 — resource lifetime.** `(T, func(), error)`-returning resource recipes; defer-LIFO teardown integrates with q.Open's escape detection.
+    - **Phase 4 — parallel construction.** `q.WithAssemblyPar(ctx, n)` rides on the ctx like `q.WithAssemblyDebug`; rewriter emits topo waves with `sync.WaitGroup` per wave.
 
 ### Coroutines
 
@@ -143,7 +144,7 @@ Don't re-propose these without new information — each was ruled out for a spec
 - **q.Default / q.DefaultE** — the 2-arg form `q.Default(call(), -1)` isn't valid Go (the `f(g())` multi-return spread rule requires `g()` to be the *sole* arg). The 3-arg pre-destructured form is redundant with `q.TryE(call).Catch(func(error) (T, error) { return fallback, nil })`.
 - **q.Go** — too opinionated about panic logging + recovery policy. Plain `go fn()` plus a 4-line wrapper in the caller's own module gives full control.
 - **q.TryCatch** (block-scoped try/catch) — `.Catch(handler func(any))` has no return path, so caught panics can't flow into the enclosing function's error return. `q.Recover` / `q.RecoverE` already cover the useful function-boundary case.
-- **q.Must / q.MustE** — panicking is the opposite of what q exists to enable. `if err != nil { panic(err) }` is one line; we don't need a helper for it.
+- **q.Must / q.MustE** — original rationale was "panicking is the opposite of what q exists to enable." Reconsidered when q.Assemble (always (T, error)) needed an escape hatch in main / init / tests where q.Try can't bubble; shipped as **q.Unwrap** / **q.UnwrapE** instead, with the explicit framing that they're for non-bubble call sites only and not a general-purpose error policy.
 - **q.Call / q.Named (named arguments)** — verbose at the call site (noisier than positional + comment), rewriter requires `*types.Signature` to expose param names which fails for any callee with unnamed params, and either "missing names → zero value" semantics turn signature additions into silent bugs OR strict-coverage variants make the surface even longer than struct-options-pattern Go already has. Doesn't earn its keep.
 
 ## How this list is maintained

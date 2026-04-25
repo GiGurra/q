@@ -19,5 +19,5 @@ func newServer(d *DB, c *Config) *Server { return &Server{db: d, cfg: c} }
 
 func main() {
 	// *DB is missing — newServer needs it.
-	_ = q.Assemble[*Server](newConfig, newServer)
+	_, _ = q.Assemble[*Server](newConfig, newServer)
 }

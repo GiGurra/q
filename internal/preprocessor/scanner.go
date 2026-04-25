@@ -126,9 +126,7 @@ const (
 	familyAtCompileTime     // q.AtCompileTime(func() R { ... }, codec...) — comptime evaluation
 	familyAtCompileTimeCode // q.AtCompileTimeCode[R](func() string { ... }) — comptime code generation
 	familyGenerator         // q.Generator[T](func() { ... q.Yield(v) ... }) — iter.Seq[T] sugar
-	familyAssemble    // q.Assemble[T](recipes...) — auto-derived dependency injection (pure)
-	familyAssembleErr // q.AssembleErr[T](recipes...) — same, errored, returns (T, error)
-	familyAssembleE   // q.AssembleE[T](recipes...).<Method>(...) — chain variant
+	familyAssemble // q.Assemble[T](recipes...) (T, error) — auto-derived DI
 )
 
 // form is the syntactic position of a recognised q.* call:
@@ -351,6 +349,14 @@ type qSubCall struct {
 	// re-derive it from the type-text spelling (which qualifies
 	// same-package types differently).
 	AssembleTargetKey string
+
+	// AssembleCtxDepKey is the canonical typeKey of the recipe that
+	// provides context.Context, when one exists. Set by
+	// resolveAssemble. The rewriter uses it to bind _qDbg from that
+	// dep variable for the optional debug-trace prelude. Empty when
+	// no recipe provides context.Context — debug is silently
+	// disabled in that case.
+	AssembleCtxDepKey string
 }
 
 // matchCase is one arm of a q.Match expression — either a
@@ -529,6 +535,11 @@ var chainMethods = map[string]bool{
 var qRuntimeHelpers = map[string]bool{
 	"ToErr":              true,
 	"Const":              true,
+	"Unwrap":                  true,
+	"UnwrapE":                 true,
+	"WithAssemblyDebug":       true,
+	"WithAssemblyDebugWriter": true,
+	"AssemblyDebugWriter":     true,
 	"DebugPrintlnAt":     true,
 	"SlogCtx":            true,
 	"SlogContextHandler": true,
@@ -1566,18 +1577,6 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 			OuterCall:       expr,
 		}, true, nil
 	}
-	// q.AssembleErr[T](recipes...) — errored variant; composes with q.Try.
-	if typeArg, ok := isIndexedSelector(call.Fun, alias, "AssembleErr"); ok {
-		if len(call.Args) == 0 {
-			return qSubCall{}, false, fmt.Errorf("q.AssembleErr[T] requires at least one recipe argument")
-		}
-		return qSubCall{
-			Family:          familyAssembleErr,
-			AsType:          typeArg,
-			AssembleRecipes: append([]ast.Expr(nil), call.Args...),
-			OuterCall:       expr,
-		}, true, nil
-	}
 	// q.Tag[T](field, key) — both args MUST be string literals so
 	// the rewriter can resolve the tag at compile time.
 	if typeArg, ok := isIndexedSelector(call.Fun, alias, "Tag"); ok {
@@ -1965,25 +1964,6 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 				return qSubCall{}, false, fmt.Errorf("q.AsE[T] must take exactly one argument (the value to assert); got %d", len(entry.Args))
 			}
 			return qSubCall{Family: familyAsE, Method: sel.Sel.Name, MethodArgs: call.Args, InnerExpr: entry.Args[0], AsType: typeArg, OuterCall: expr}, true, nil
-		}
-		// q.AssembleE[T] is also an IndexExpr-based entry. The recipes
-		// move to AssembleRecipes so they don't clobber MethodArgs (the
-		// chain method's args).
-		if typeArg, ok := isIndexedSelector(entry.Fun, alias, "AssembleE"); ok {
-			if !chainMethods[sel.Sel.Name] {
-				return qSubCall{}, false, fmt.Errorf("q.AssembleE chain method %q not recognised; valid: Err, ErrF, Catch, Wrap, Wrapf", sel.Sel.Name)
-			}
-			if len(entry.Args) == 0 {
-				return qSubCall{}, false, fmt.Errorf("q.AssembleE[T] requires at least one recipe argument")
-			}
-			return qSubCall{
-				Family:          familyAssembleE,
-				Method:          sel.Sel.Name,
-				MethodArgs:      call.Args,
-				AsType:          typeArg,
-				AssembleRecipes: append([]ast.Expr(nil), entry.Args...),
-				OuterCall:       expr,
-			}, true, nil
 		}
 		switch {
 		case isSelector(entry.Fun, alias, "OkE"):

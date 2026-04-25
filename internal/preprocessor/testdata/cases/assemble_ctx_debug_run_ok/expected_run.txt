@@ -1,0 +1,5 @@
+quiet ok
+[q.Assemble] ctx provided
+[q.Assemble] step #2 (newConfig)
+[q.Assemble] step #3 (newDB)
+[q.Assemble] step #4 (newServer)

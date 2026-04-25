@@ -1,9 +1,9 @@
-# Auto-derived dependency injection: `q.Assemble`, `q.AssembleErr`, `q.AssembleE`
+# Auto-derived dependency injection: `q.Assemble`
 
 You list the recipes; the preprocessor reads each recipe's signature, builds a dependency graph keyed by output type, topo-sorts it, and emits the inlined construction at compile time. No `wire.go` to keep in sync; no runtime container; no `var _ = container.Build()` to forget. The whole graph collapses into one expression at the call site.
 
 ```go
-server := q.Try(q.AssembleErr[*Server](newConfig, newDB, newServer))
+server, err := q.Assemble[*Server](newConfig, newDB, newServer)
 ```
 
 ## Background — why this exists
@@ -18,118 +18,45 @@ Dependency injection in Go usually picks one of three trade-offs:
 
 The model is borrowed from ZIO's [`ZLayer`](https://zio.dev/reference/di/) — list the providers ("layers" in ZIO, "recipes" here), declare the target type, the framework figures out the order. The cooking metaphor maps better onto Go's flat functions-and-types model than ZLayer's monadic composition; **there is no `++` / `>>>` / `>+>` operator**: recipes are listed at the call site, with `slices.Concat` as the grouping primitive when needed.
 
-## Signatures
+## Signature
 
 ```go
-// Pure assembly — every recipe is f(deps...) T.
-func Assemble[T any](recipes ...any) T
-
-// Errored assembly — at least one recipe returns (T, error).
-// Composes naturally with q.Try.
-func AssembleErr[T any](recipes ...any) (T, error)
-
-// Chain variant — composes with .Wrap, .Wrapf, .Err, .ErrF, .Catch
-// from the standard E-variant vocabulary.
-func AssembleE[T any](recipes ...any) ErrResult[T]
+func Assemble[T any](recipes ...any) (T, error)
 ```
 
-`recipes` is `...any` because Go's type system can't express "any function with any number of inputs and one output." The preprocessor's typecheck pass takes over validation — same shape as `q.Match`'s `value any`. Misuse surfaces as a build-time diagnostic with file:line:col and a dependency-tree visualisation.
+Just one entry. Always returns `(T, error)`; compose at the call site:
+
+```go
+// Inside (T, error)-returning function — q.Try bubbles via the error slot.
+server := q.Try(q.Assemble[*Server](newConfig, newDB, newServer))
+
+// In main / init / tests — q.Unwrap panics on err.
+server := q.Unwrap(q.Assemble[*Server](newConfig, newDB, newServer))
+
+// Custom error shaping — q.TryE chain.
+server := q.TryE(q.Assemble[*Server](...)).Wrap("server init")
+
+// Custom panic shaping in main / tests — q.UnwrapE chain.
+server := q.UnwrapE(q.Assemble[*Server](...)).Wrap("server init")
+
+// Tuple form — explicit error handling.
+server, err := q.Assemble[*Server](...)
+if err != nil { ... }
+```
+
+`recipes` is `...any` because Go's type system can't express "any function with any number of inputs and one output". The preprocessor's typecheck pass takes over validation — same shape as `q.Match`'s `value any`. Errors in the recipe set surface as build-time diagnostics with file:line:col plus a dependency-tree visualisation.
 
 ## What counts as a recipe
 
 | Form                       | Example                                      | Behaviour                                                         |
 |----------------------------|----------------------------------------------|-------------------------------------------------------------------|
 | Pure function reference    | `newDB`                                      | Inputs become deps; first return value is the provided type.     |
-| Errored function reference | `newDB` (returns `(*DB, error)`)             | Same; bubbles on failure (only valid in `AssembleErr`/`AssembleE`).|
+| Errored function reference | `newDB` (returns `(*DB, error)`)             | Same; bubbles on failure into the assembly's error path.          |
 | Inline value               | `cfg`, `&Config{...}`, `loadConfig()`        | The value's type IS the provided type; no inputs required.        |
 
 Top-level funcs, package-qualified funcs (`pkg.NewDB`), and method values (`srv.NewDB`) all work — anything `go/types` resolves as a `*types.Signature`. Function calls (`getRecipe()`) are accepted as inline values: their type is the call's return type. Function-typed *values* (a `func() *Config` variable) are treated as function references, not inline values.
 
-## Happy path — every form
-
-### `q.Assemble[T]` — pure DI
-
-```go
-type Config struct{ DB string }
-type DB     struct{ cfg *Config }
-type Cache  struct{ db  *DB }
-type Server struct{ db *DB; cache *Cache; cfg *Config }
-
-func newConfig() *Config                                  { return &Config{DB: "primary"} }
-func newDB(c *Config) *DB                                 { return &DB{cfg: c} }
-func newCache(d *DB) *Cache                               { return &Cache{db: d} }
-func newServer(d *DB, c *Cache, cfg *Config) *Server      { return &Server{db: d, cache: c, cfg: cfg} }
-
-// Recipes can appear in any order — the preprocessor topo-sorts.
-server := q.Assemble[*Server](newServer, newCache, newDB, newConfig)
-```
-
-The rewriter emits roughly:
-
-```go
-server := (func() *Server {
-    _qDep0 := newConfig()
-    _qDep1 := newDB(_qDep0)
-    _qDep2 := newCache(_qDep1)
-    _qDep3 := newServer(_qDep1, _qDep2, _qDep0)
-    return _qDep3
-}())
-```
-
-### `q.AssembleErr[T]` — errored, composes with `q.Try`
-
-```go
-func newDB(c *Config) (*DB, error) {
-    if c.DB == "" { return nil, errors.New("missing db url") }
-    return &DB{cfg: c}, nil
-}
-
-func newServer(d *DB, c *Config) (*Server, error) { ... }
-
-server := q.Try(q.AssembleErr[*Server](newConfig, newDB, newServer))
-```
-
-The IIFE bubbles inside itself, returning `(T, error)`; `q.Try` then bubbles that to the enclosing function as usual. You get one tight call site with the same error-propagation guarantees as hand-rolled wiring.
-
-### `q.AssembleE[T]` — chain variant for shaped errors
-
-```go
-server := q.AssembleE[*Server](newConfig, newDB, newServer).
-    Wrap("server initialisation failed")
-```
-
-The chain methods are the same as `q.TryE`'s — `.Err`, `.ErrF`, `.Wrap`, `.Wrapf`, `.Catch` — and shape the bubbled error before it leaves the function.
-
-### Inline values as recipes
-
-```go
-customCfg := &Config{DB: "override"}
-server := q.Assemble[*Server](customCfg, newDB, newCache, newServer)
-```
-
-Useful for test harnesses, override points, or "I already have this dep, please use it" patterns. Direct ZIO `ZLayer.succeed` analogue.
-
-### Interface inputs satisfied by concrete providers
-
-A recipe can declare an interface input — the resolver matches it against any provider whose output type satisfies the interface (`types.AssignableTo` under the hood). Exact-type matches always win first; the assignability scan only kicks in when no exact provider exists, so tagged services keep their precise routing.
-
-```go
-type Greeter interface{ Greet() string }
-
-type EnglishGreeter struct{}
-func (EnglishGreeter) Greet() string { return "hello" }
-
-type App struct{ g Greeter }
-
-func newGreeter() *EnglishGreeter { return &EnglishGreeter{} } // produces *EnglishGreeter
-func newApp(g Greeter) *App       { return &App{g: g} }        // wants Greeter
-
-app := q.Assemble[*App](newGreeter, newApp) // *EnglishGreeter satisfies Greeter
-```
-
-Two concrete providers both satisfying the same interface input is rejected with the disambiguation diagnostic — see [interface ambiguity](#interface-ambiguity) below.
-
-### Constructor return shapes
+## Constructor return shapes
 
 Every reasonable shape works:
 
@@ -144,18 +71,87 @@ NewX() (Ifc, error) // interface with error path
 
 Pointer / interface / slice / map / chan / func outputs are checked for nil at runtime (see [Nil-recipe detection](#nil-recipe-detection)). Value-typed outputs (struct, basic types, arrays) skip the check — they can't be nil.
 
-### Inline `context.Context`
+## Happy path examples
 
-Constructors that take `context.Context` work today by passing `ctx` as an inline value. The resolver matches the `context.Context` interface input against the supplied value via interface satisfaction, the same way any other interface input is resolved.
+### Basic — function-reference recipes
+
+```go
+type Config struct{ DB string }
+type DB     struct{ cfg *Config }
+type Cache  struct{ db  *DB }
+type Server struct{ db *DB; cache *Cache; cfg *Config }
+
+func newConfig() *Config                                  { return &Config{DB: "primary"} }
+func newDB(c *Config) *DB                                 { return &DB{cfg: c} }
+func newCache(d *DB) *Cache                               { return &Cache{db: d} }
+func newServer(d *DB, c *Cache, cfg *Config) *Server      { return &Server{db: d, cache: c, cfg: cfg} }
+
+// Recipes can appear in any order — the preprocessor topo-sorts.
+server := q.Unwrap(q.Assemble[*Server](newServer, newCache, newDB, newConfig))
+```
+
+The rewriter emits roughly:
+
+```go
+server, err := (func() (*Server, error) {
+    _qDep0 := newConfig()
+    if _qDep0 == nil { return nil, fmt.Errorf("...: %w", q.ErrNil) }
+    _qDep1 := newDB(_qDep0)
+    if _qDep1 == nil { return nil, fmt.Errorf("...: %w", q.ErrNil) }
+    _qDep2 := newCache(_qDep1)
+    if _qDep2 == nil { return nil, fmt.Errorf("...: %w", q.ErrNil) }
+    _qDep3 := newServer(_qDep1, _qDep2, _qDep0)
+    if _qDep3 == nil { return nil, fmt.Errorf("...: %w", q.ErrNil) }
+    return _qDep3, nil
+}())
+// q.Unwrap then panics if err != nil; otherwise returns _qDep3.
+```
+
+### Errored recipes
+
+```go
+func newDB(c *Config) (*DB, error) {
+    if c.DB == "" { return nil, errors.New("missing db url") }
+    return &DB{cfg: c}, nil
+}
+
+func newServer(d *DB, c *Config) (*Server, error) { ... }
+
+// Inside an (T, error)-returning function:
+func boot() (*Server, error) {
+    return q.Assemble[*Server](newConfig, newDB, newServer)
+}
+```
+
+The IIFE bubbles inside itself, returning `(T, error)`. Each errored recipe's error short-circuits with that error; the runtime nil-check fires on each successful step's nilable output.
+
+### Inline values as recipes
+
+```go
+customCfg := &Config{DB: "override"}
+server := q.Unwrap(q.Assemble[*Server](customCfg, newDB, newCache, newServer))
+```
+
+Useful for test harnesses, override points, or "I already have this dep, please use it" patterns. Direct ZIO `ZLayer.succeed` analogue.
+
+### context.Context — just another dependency
+
+ctx isn't special — it's an inline-value recipe like any other. If a recipe takes `context.Context` as input, the resolver matches it to the supplied ctx via interface satisfaction.
 
 ```go
 func newDB(ctx context.Context, c *Config) *DB { ... }
 
-ctx := context.WithValue(context.Background(), "k", "v")
-s := q.Assemble[*Server](ctx, newConfig, newDB, newServer)
+ctx := context.Background()
+server := q.Unwrap(q.Assemble[*Server](ctx, newConfig, newDB, newServer))
 ```
 
-A dedicated `q.AssembleCtx[T](ctx, recipes...)` may come in a later phase to unlock ctx-driven extensibility (parallel construction, debug tracing, deterministic-order opt-in) — see the [planning doc](https://github.com/GiGurra/q/blob/main/docs/planning/assemble.md). Until then, the inline-value path covers the use case.
+ctx supplied without any consumer is also fine — `context.Context` is exempt from the unused-recipe check, so passing ctx purely for assembly-config (debug, future hooks) doesn't fail the build:
+
+```go
+ctx := q.WithAssemblyDebug(context.Background())
+// No recipe takes ctx, but the assembly accepts it and uses it for trace output.
+server := q.Unwrap(q.Assemble[*Server](ctx, newConfig, newDB, newServer))
+```
 
 ### Tagged services — two databases, no special code
 
@@ -172,7 +168,81 @@ func newReplica() ReplicaDB { return q.MkTag[_replica](&DB{name: "replica"}) }
 
 func newServer(p PrimaryDB, r ReplicaDB) *Server { ... }
 
-s := q.Assemble[*Server](newPrimary, newReplica, newServer)
+s := q.Unwrap(q.Assemble[*Server](newPrimary, newReplica, newServer))
+```
+
+### Interface inputs satisfied by concrete providers
+
+A recipe can declare an interface input — the resolver matches it against any provider whose output type satisfies the interface (`types.AssignableTo` under the hood). Exact-type matches always win first; the assignability scan only kicks in when no exact provider exists, so tagged services keep their precise routing.
+
+```go
+type Greeter interface{ Greet() string }
+type EnglishGreeter struct{}
+func (EnglishGreeter) Greet() string { return "hello" }
+
+func newGreeter() *EnglishGreeter { return &EnglishGreeter{} } // produces *EnglishGreeter
+func newApp(g Greeter) *App       { return &App{g: g} }        // wants Greeter
+
+app := q.Unwrap(q.Assemble[*App](newGreeter, newApp)) // *EnglishGreeter satisfies Greeter
+```
+
+Two concrete providers both satisfying the same interface input is rejected with the disambiguation diagnostic — see [interface ambiguity](#interface-ambiguity) below.
+
+## Composition helpers
+
+### `q.Try` — bubble in (T, error)-returning functions
+
+The standard q bubble — only works in functions whose last return is `error`. Inside `func boot() (*Server, error) { ... }`:
+
+```go
+server := q.Try(q.Assemble[*Server](...))
+```
+
+Rewrites to `if err != nil { return zero, err }` and binds the success value.
+
+### `q.Unwrap` — panic in main / init / tests
+
+```go
+func Unwrap[T any](v T, err error) T  // panics on err; returns v on success
+```
+
+Plain runtime function, NOT rewritten. Use when there's no error return path:
+
+```go
+func main() {
+    server := q.Unwrap(q.Assemble[*Server](newConfig, newDB, newServer))
+    server.Run()
+}
+```
+
+### `q.UnwrapE` — chain variant of Unwrap
+
+```go
+func UnwrapE[T any](v T, err error) UnwrapResult[T]
+```
+
+Same shape as `q.TryE` but the chain methods panic instead of bubbling. Use when you want a wrapped error or a recovery path in non-bubble contexts:
+
+```go
+func main() {
+    server := q.UnwrapE(q.Assemble[*Server](...)).Wrap("server init failed")
+    server.Run()
+}
+
+// .Catch lets the caller recover instead of panicking.
+cfg := q.UnwrapE(loadConfig()).Catch(func(error) (*Config, error) {
+    return defaultConfig(), nil
+})
+```
+
+Methods: `.Err(replacement)`, `.ErrF(fn)`, `.Wrap(msg)`, `.Wrapf(format, args...)`, `.Catch(fn)`. All plain runtime; no rewriter pass.
+
+### `q.TryE` — bubble + error shaping
+
+For chain-style error shaping in (T, error) functions:
+
+```go
+return q.TryE(q.Assemble[*Server](...)).Wrap("server init"), nil
 ```
 
 ## Sad path — diagnostics
@@ -188,17 +258,17 @@ func newConfig() *Config                 { return &Config{DB: "x"} }
 func newServer(d *DB, c *Config) *Server { return &Server{db: d, cfg: c} }
 
 func main() {
-    _ = q.Assemble[*Server](newConfig, newServer) // *DB is missing
+    _, _ = q.Assemble[*Server](newConfig, newServer) // *DB is missing
 }
 ```
 
 ```
-./main.go:22:6: q: q.Assemble[*Server] cannot resolve the recipe graph:
+./main.go:22:9: q: q.Assemble[*Server] cannot resolve the recipe graph:
   - missing recipe for *DB — needed by #2 (newServer)
 What the resolver sees:
-- *Server <- recipe #2 [fn]
+- *Server <- #2 (newServer) [fn]
   - input *DB ?? (no recipe provides this)
-  - *Config <- recipe #1 [fn]
+  - *Config <- #1 (newConfig) [fn]
 Providers supplied: #1→*Config, #2→*Server
 ```
 
@@ -207,11 +277,11 @@ The tree shows you exactly where the gap is in the graph rooted at `T`.
 ### Unsatisfiable target
 
 ```go
-_ = q.Assemble[*Server](newConfig, newDB) // no recipe produces *Server
+_, _ = q.Assemble[*Server](newConfig, newDB) // no recipe produces *Server
 ```
 
 ```
-./main.go:21:6: q: q.Assemble[*Server] cannot resolve the recipe graph:
+./main.go:21:9: q: q.Assemble[*Server] cannot resolve the recipe graph:
   - target type *Server is not produced by any recipe
 What the resolver sees:
 - target ?? (no recipe provides T)
@@ -224,16 +294,34 @@ Providers supplied: #1→*Config, #2→*DB
 func newConfig()      *Config { ... }
 func newOtherConfig() *Config { ... }
 
-_ = q.Assemble[*Config](newConfig, newOtherConfig)
+_, _ = q.Assemble[*Config](newConfig, newOtherConfig)
 ```
 
 ```
-./main.go:16:6: q: q.Assemble[*Config] cannot resolve the recipe graph:
+./main.go:16:9: q: q.Assemble[*Config] cannot resolve the recipe graph:
   - duplicate provider for *Config — recipes #1 (newConfig), #2 (newOtherConfig) all
     produce it; pick one or use q.Tagged to brand the variants
 ```
 
-The fix is either dropping one or using `q.Tagged` to brand them as distinct dep slots (see the "two databases" example above).
+The fix is either dropping one or using `q.Tagged` to brand them as distinct dep slots.
+
+### Interface ambiguity
+
+```go
+type Greeter interface{ Greet() string }
+func newEN() *EnglishGreeter { ... }
+func newES() *SpanishGreeter { ... }
+func newApp(g Greeter) *App  { ... }
+
+_, _ = q.Assemble[*App](newEN, newES, newApp)
+```
+
+```
+./main.go:N:M: q: q.Assemble[*App] cannot resolve the recipe graph:
+  - interface input Greeter (needed by #3 (newApp)) is satisfied by multiple
+    providers: #1 (newEN) → *EnglishGreeter, #2 (newES) → *SpanishGreeter —
+    narrow the recipe set or use q.Tagged to disambiguate
+```
 
 ### Dependency cycle
 
@@ -246,12 +334,12 @@ func newA(b *B) *A       { return &A{b: b} }
 func newB(a *A) *B       { return &B{a: a} }
 func newRoot(a *A) *Root { return &Root{a: a} }
 
-_ = q.Assemble[*Root](newA, newB, newRoot)
+_, _ = q.Assemble[*Root](newA, newB, newRoot)
 ```
 
 ```
-./main.go:18:6: q: q.Assemble[*Root] cannot resolve the recipe graph:
-  - dependency cycle: *A (#1) -> *B (#2) -> *A (#1)
+./main.go:18:9: q: q.Assemble[*Root] cannot resolve the recipe graph:
+  - dependency cycle: *A (#1 (newA)) -> *B (#2 (newB)) -> *A (#1 (newA))
 ```
 
 The cycle path is traced — not just "you have a cycle" but the actual edges that close it.
@@ -261,51 +349,28 @@ The cycle path is traced — not just "you have a cycle" but the actual edges th
 ```go
 func unrelated() string { return "stray" }
 
-_ = q.Assemble[*Cache](newConfig, newDB, newCache, unrelated)
+_, _ = q.Assemble[*Cache](newConfig, newDB, newCache, unrelated)
 ```
 
 ```
-./main.go:21:6: q: q.Assemble[*Cache] cannot resolve the recipe graph:
+./main.go:21:9: q: q.Assemble[*Cache] cannot resolve the recipe graph:
   - unused recipe(s): #4 (unrelated) — provides string
 The target type *Cache requires:
-- *Cache <- recipe #3 [fn]
-  - *DB <- recipe #2 [fn]
-    - *Config <- recipe #1 [fn]
+- *Cache <- #3 (newCache) [fn]
+  - *DB <- #2 (newDB) [fn]
+    - *Config <- #1 (newConfig) [fn]
 ```
 
-`q.Assemble` is strict by default — every recipe must be transitively required by `T`. The dep tree shows what *was* required so you know which recipes to keep. The intent is to catch "I added a recipe but forgot to wire its consumer" early; if you genuinely want to supply optional providers, leave them out and pass them explicitly.
+`q.Assemble` is strict by default — every recipe must be transitively required by `T`. The dep tree shows what *was* required so you know which recipes to keep.
 
-### Interface ambiguity
+**Exception:** `context.Context` recipes are exempt from this check. Supplying ctx purely for assembly-config (debug, future hooks) doesn't fail the build even when no recipe consumes it.
 
-```go
-type Greeter interface{ Greet() string }
-func newEN() *EnglishGreeter { ... }
-func newES() *SpanishGreeter { ... }
-func newApp(g Greeter) *App  { ... }
+### Recipe shape rejections
 
-_ = q.Assemble[*App](newEN, newES, newApp)
-```
-
-```
-./main.go:N:M: q: q.Assemble[*App] cannot resolve the recipe graph:
-  - interface input Greeter (needed by #3 (newApp)) is satisfied by multiple
-    providers: #1 (newEN) → *EnglishGreeter, #2 (newES) → *SpanishGreeter —
-    narrow the recipe set or use q.Tagged to disambiguate
-```
-
-### Errored recipe in pure `q.Assemble`
-
-```go
-func newDB(c *Config) (*DB, error) { ... }
-
-_ = q.Assemble[*Server](newConfig, newDB, newServer) // newDB has an error path
-```
-
-```
-./main.go:N:M: q: q.Assemble[*Server] cannot resolve the recipe graph:
-  - recipe #2 (newDB) returns (*DB, error); q.Assemble has no error path —
-    use q.AssembleErr or q.AssembleE
-```
+- **No return values** — `recipe #N (fn) returns no values — recipes must return T or (T, error)`
+- **Three-or-more returns** — `recipe #N (fn) returns 3 values; recipes must return T or (T, error)`
+- **Non-error second return** — `recipe #N (fn) second return is *MyErr; recipes must return T or (T, error) where the second value is the built-in 'error'` (catches the typed-nil-interface pitfall the same way `q.Try` does)
+- **Variadic recipe** — `recipe #N (fn) is variadic; q.Assemble can't infer a fixed dep set for variadic inputs — wrap it in a fixed-arity adapter`
 
 ## Nil-recipe detection
 
@@ -313,13 +378,10 @@ Constructors that return `nil` are a real bug: a recipe of type `func(*Config) *
 
 Each step whose output type is *nilable* (pointer, interface, slice, map, chan, func) gets a runtime nil-check on its `_qDep<N>` immediately after the bind:
 
-- **`q.AssembleErr` / `q.AssembleE`** — bubble `fmt.Errorf("...: %w", q.ErrNil)` so callers can `errors.Is(err, q.ErrNil)` to detect the failure mode.
-- **`q.Assemble` (pure)** — panic with a message naming the offending recipe. Pure assembly has no error path; a buggy nil constructor surfaces loudly at the recipe site rather than propagating silently.
-
 ```go
 func newNilDB(c *Config) *DB { return nil } // bug
-_, err := q.AssembleErr[*Server](newConfig, newNilDB, newServer)
-// err: q.AssembleErr: recipe #2 (newNilDB) returned nil: q: nil value
+_, err := q.Assemble[*Server](newConfig, newNilDB, newServer)
+// err: q.Assemble: recipe #2 (newNilDB) returned nil: q: nil value
 errors.Is(err, q.ErrNil) // true
 ```
 
@@ -327,26 +389,52 @@ Value-typed outputs (struct, basic types, arrays) skip the check — they can't 
 
 The check runs on the *bound* `_qDep<N>` value (not on the result of any subsequent interface conversion), so a typed-nil from a buggy concrete constructor can't masquerade as a non-nil interface at the consumer's call site.
 
-## Output shape
+## Debug tracing
 
-The rewriter emits an IIFE so the result is a single expression that drops into any expression position — `:=`, `=`, return, function arg, struct field, anywhere. Errored recipes get a per-step bubble that returns the IIFE's zero plus the captured error; pure recipes get a single bind line.
+`q.WithAssemblyDebug` enables per-step trace output for any q.Assemble call that consumes the supplied ctx. Each recipe call prints its label to the writer registered on the ctx; useful for diagnosing "why did X get the wrong dep" without re-running with a debugger.
 
-For `q.AssembleErr` composing with `q.Try`, the IIFE returns `(T, error)` and `q.Try` unpacks it as usual — exactly the same shape as `q.Try(call())` for any other `(T, error)`-returning call.
+```go
+ctx := q.WithAssemblyDebug(context.Background())
+server := q.Unwrap(q.Assemble[*Server](ctx, newConfig, newDB, newServer))
+
+// Stderr output (defaults to q.DebugWriter):
+// [q.Assemble] ctx provided
+// [q.Assemble] step #2 (newConfig)
+// [q.Assemble] step #3 (newDB)
+// [q.Assemble] step #4 (newServer)
+```
+
+For tests where stdout/stderr shouldn't be mutated, use `q.WithAssemblyDebugWriter`:
+
+```go
+var buf bytes.Buffer
+ctx := q.WithAssemblyDebugWriter(context.Background(), &buf)
+_ = q.Unwrap(q.Assemble[*Server](ctx, newConfig, newDB, newServer))
+// buf.String() now contains the trace.
+```
+
+The ctx is passed as an inline-value recipe — same as any other context.Context. The rewriter detects when a recipe provides `context.Context` and binds the debug writer from it; the conditional is one ctx.Value lookup per step (microseconds when debug is off).
 
 ## Caveats
 
-- **Strict by default.** Unused recipes fail the build. The discipline is intentional — recipe sets that drift over time stay correct only if every member is needed.
+- **Strict by default.** Unused recipes fail the build (except `context.Context` — exempt because it's expected to ride into the assembly for assembly-config). The discipline is intentional — recipe sets that drift over time stay correct only if every member is needed.
 - **No variadic recipes.** A recipe like `func newServer(plugins ...Plugin) *Server` can't be auto-resolved (the dep set isn't fixed). Wrap it in a fixed-arity adapter instead.
 - **Type identity is `go/types` identity.** Two named types with the same underlying type are still distinct providers — that's how `q.Tagged` works. If you have unintentional collisions (e.g. two packages with `type Config struct{...}`), use type aliases or named wrappers to disambiguate.
-- **Recipes can't be `q.*` calls** (in the function-reference position). Inline-value recipes can wrap one (`q.Try(loadCfg())`) since the value-position rewrite triggers the standard q.* hoist and the inline value sees the resolved `_qTmp<N>`.
+- **Recipes can't be `q.*` calls** in the function-reference position. Inline-value recipes can wrap one (`q.Try(loadCfg())`) since the value-position rewrite triggers the standard q.* hoist.
 
-## Phasing — what's coming
+## What's coming
 
-Phase 1 (this page) ships pure / errored / chain recipes with full diagnostics. Phase 2 will add `q.AssembleAll[T]` (multiple legitimate providers of `T`, returns `[]T`) and struct-target multi-output (`q.Assemble[App]` populating each field of `App` from a matching recipe). Phase 3 will integrate with `q.Open`'s deferred-cleanup machinery via `(T, func(), error)`-returning resource recipes. See [`docs/planning/assemble.md`](https://github.com/GiGurra/q/blob/main/docs/planning/assemble.md) for the full plan.
+Phase 1 (this page) ships the full single-call DI surface. Future phases:
+
+- **Phase 2 — selection & multi-output.** `q.AssembleAll[T]` (multiple legitimate providers of `T` → `[]T`) for plugin-style aggregations; struct-target multi-output (`q.Assemble[App]` populating each field of `App` from a matching recipe).
+- **Phase 3 — resource lifetime.** `(T, func(), error)`-returning recipes for resources that need cleanup; defer-LIFO teardown integrates with `q.Open`'s escape detection.
+- **Phase 4 — parallel construction.** `q.WithAssemblyPar(ctx, n)` rides on the ctx like `q.WithAssemblyDebug`; the rewriter emits topo waves with a `sync.WaitGroup` per wave.
+
+See [`docs/planning/assemble.md`](https://github.com/GiGurra/q/blob/main/docs/planning/assemble.md) for the full plan.
 
 ## See also
 
-- [`q.Try` / `q.TryE`](try.md) — the bubble vocabulary `q.AssembleErr` composes with.
+- [`q.Try` / `q.TryE`](try.md) — the bubble vocabulary `q.Assemble` composes with.
 - [`q.Tagged`](tagged.md) — phantom-type branding used for the "two databases" pattern.
 - [`q.Open`](open.md) — resource lifetime; phase 3 will integrate.
 - [ZIO `ZLayer`](https://zio.dev/reference/di/) — the inspiration. The conceptual model maps closely; the operator-heavy composition (`++`, `>>>`, `>+>`) does not.

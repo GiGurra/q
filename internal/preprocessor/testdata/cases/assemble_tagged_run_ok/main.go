@@ -1,8 +1,7 @@
 // Fixture: q.Tagged[U, T] brands two values of the same underlying
 // type as distinct types. q.Assemble's provider map keys on the full
 // (branded) type, so two providers of *DB tagged differently are
-// treated as distinct dep slots — the "two databases" pattern with
-// no special code in the assembler.
+// treated as distinct dep slots.
 package main
 
 import (
@@ -13,8 +12,6 @@ import (
 
 type DB struct{ name string }
 
-// Brand types — empty structs whose only role is as a phantom
-// type-parameter to q.Tagged.
 type _primary struct{}
 type _replica struct{}
 
@@ -34,7 +31,7 @@ func newServer(p PrimaryDB, r ReplicaDB) *Server {
 }
 
 func main() {
-	s := q.Assemble[*Server](newPrimary, newReplica, newServer)
+	s := q.Unwrap(q.Assemble[*Server](newPrimary, newReplica, newServer))
 	fmt.Println("primary:", s.primary.name)
 	fmt.Println("replica:", s.replica.name)
 }

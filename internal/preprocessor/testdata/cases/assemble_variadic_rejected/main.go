@@ -16,5 +16,5 @@ func newServer(d *DB, extras ...string) *Server { return &Server{} }
 func newDB() *DB { return &DB{} }
 
 func main() {
-	_ = q.Assemble[*Server](newDB, newServer)
+	_, _ = q.Assemble[*Server](newDB, newServer)
 }

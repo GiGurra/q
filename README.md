@@ -284,8 +284,20 @@ func newServer(d *DB, c *Config) *Server { return &Server{db: d, cfg: c} }
 // List the recipes; the preprocessor reads each signature, builds the
 // dep graph, topo-sorts, and emits the inlined construction. ZIO ZLayer
 // in spirit, plain Go functions in shape. No codegen step. No runtime
-// reflection.
-server := q.Try(q.AssembleErr[*Server](newConfig, newDB, newServer))
+// reflection. Always returns (T, error); compose at the call site.
+server := q.Try(q.Assemble[*Server](newConfig, newDB, newServer))
+
+// In main / init / tests, q.Unwrap panics on err.
+func main() {
+    server := q.Unwrap(q.Assemble[*Server](newConfig, newDB, newServer))
+    server.Run()
+}
+
+// Pass ctx as an inline-value recipe — recipes that take context.Context
+// receive it via interface satisfaction. q.WithAssemblyDebug enables
+// per-step trace output for diagnosing wiring.
+ctx := q.WithAssemblyDebug(context.Background())
+server := q.Unwrap(q.Assemble[*Server](ctx, newConfig, newDB, newServer))
 ```
 
 When a recipe is missing or duplicated or the graph cycles, the build fails with a tree visualisation of what the resolver sees. See [`docs/api/assemble.md`](docs/api/assemble.md).

@@ -21,5 +21,5 @@ func newDB() (*DB, *MyErr) { return &DB{}, nil }
 func newServer(d *DB) *Server { return &Server{} }
 
 func main() {
-	_ = q.AssembleErr[*Server](newDB, newServer)
+	_, _ = q.Assemble[*Server](newDB, newServer)
 }

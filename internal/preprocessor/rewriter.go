@@ -334,7 +334,7 @@ func renderShape(fset *token.FileSet, src []byte, sh callShape, counter *int, al
 			subTexts[i] = strconv.Quote(sh.Calls[i].ResolvedString)
 		case familyMatch:
 			subTexts[i] = buildMatchReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts)
-		case familyAssemble, familyAssembleErr:
+		case familyAssemble:
 			text, _ := buildAssembleReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts, alias)
 			subTexts[i] = text
 		case familyAtCompileTime, familyAtCompileTimeCode:
@@ -812,7 +812,7 @@ func isInPlaceFamily(f family) bool {
 		familyGenStringer, familyGenEnumJSONStrict, familyGenEnumJSONLax,
 		familyFields, familyAllFields, familyTypeName, familyTag,
 		familyMatch,
-		familyAssemble, familyAssembleErr,
+		familyAssemble,
 		familyAtCompileTime, familyAtCompileTimeCode,
 		familyGenerator:
 		return true
@@ -1059,17 +1059,14 @@ func renderSubCall(fset *token.FileSet, src []byte, sh callShape, subIdx int, su
 	case familyMatch:
 		// IIFE switch — no imports needed.
 		return "", false, false, false, nil
-	case familyAssemble, familyAssembleErr:
+	case familyAssemble:
 		// IIFE auto-DI — emitted as in-place subText. No bind/check
-		// block here; substituteSpans handles the substitution. We do
-		// flag fmtUsed when AssembleErr's body emits a runtime nil-
-		// check (which uses fmt.Errorf to wrap q.ErrNil); pure
-		// q.Assemble panics with a plain string and stays fmt-free.
-		fmtUsed := sub.Family == familyAssembleErr && assembleHasNilableStep(sub)
+		// block here; substituteSpans handles the substitution. fmt
+		// is needed when the body emits a runtime nil-check (uses
+		// fmt.Errorf to wrap q.ErrNil) OR when a ctx provider exists
+		// (the debug-trace prelude uses fmt.Fprintf).
+		fmtUsed := assembleHasNilableStep(sub) || sub.AssembleCtxDepKey != ""
 		return "", fmtUsed, false, false, nil
-	case familyAssembleE:
-		text, fmtUsed, err := renderAssembleE(fset, src, sh, sub, counter, alias, subs, subTexts)
-		return text, fmtUsed, false, false, err
 	case familyAwait:
 		text, err := renderAwait(fset, src, sh, sub, counter, alias, subs, subTexts)
 		return text, false, false, false, err

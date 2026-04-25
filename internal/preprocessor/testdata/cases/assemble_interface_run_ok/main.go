@@ -1,6 +1,6 @@
 // Fixture: a recipe needs an interface input, satisfied by a concrete
-// provider. The resolver matches via types.AssignableTo when no
-// exact-key provider exists.
+// provider via types.AssignableTo. Exact-type matches always win
+// first; this scan only kicks in when no exact provider exists.
 package main
 
 import (
@@ -21,6 +21,6 @@ func newGreeter() *EnglishGreeter { return &EnglishGreeter{} } // produces *Engl
 func newApp(g Greeter) *App       { return &App{g: g} }        // wants Greeter (interface)
 
 func main() {
-	app := q.Assemble[*App](newGreeter, newApp)
+	app := q.Unwrap(q.Assemble[*App](newGreeter, newApp))
 	fmt.Println(app.g.Greet())
 }

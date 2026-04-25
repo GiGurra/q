@@ -3,6 +3,6 @@
 duplicate provider for *Config
 missing recipe for *Cache — needed by #3 (newServer)
 What the resolver sees:
-- *Server <- recipe #3 [fn]
+- *Server <- #3 (newServer) [fn]
 - input *Cache ?? (no recipe provides this)
 Providers supplied: #1→*Config, #2→*Config, #3→*Server

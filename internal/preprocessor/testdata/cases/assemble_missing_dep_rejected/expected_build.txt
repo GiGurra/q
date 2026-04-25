@@ -2,6 +2,6 @@
 # AND show the dep tree from T so the user sees the gap in context.
 missing recipe for *DB — needed by #2 (newServer)
 What the resolver sees:
-- *Server <- recipe #2 [fn]
+- *Server <- #2 (newServer) [fn]
 - input *DB ?? (no recipe provides this)
-- *Config <- recipe #1 [fn]
+- *Config <- #1 (newConfig) [fn]

@@ -1,3 +1,3 @@
 got err: true
 is q.ErrNil: true
-err message: q.AssembleErr: recipe #2 (newNilDB) returned nil: q: nil value
+err message: q.Assemble: recipe #2 (newNilDB) returned nil: q: nil value

@@ -1,6 +1,6 @@
 // Fixture: q.Assemble drops into every form position. The in-place
-// IIFE substitution must work for define / assign / discard / return /
-// hoist alike.
+// IIFE substitution must work for define / assign / return / hoist.
+// Returns (T, error) so each call site receives a tuple.
 package main
 
 import (
@@ -15,42 +15,41 @@ type DB struct{ cfg *Config }
 func newConfig() *Config  { return &Config{DB: "primary"} }
 func newDB(c *Config) *DB { return &DB{cfg: c} }
 
-// formDefine: `var := q.Assemble(...)`
-func boot1() *DB {
-	d := q.Assemble[*DB](newConfig, newDB)
-	return d
+// formDefine: `var, err := q.Assemble(...)`
+func boot1() (*DB, error) {
+	d, err := q.Assemble[*DB](newConfig, newDB)
+	return d, err
 }
 
-// formAssign: `var = q.Assemble(...)` (var pre-declared)
-func boot2() *DB {
+// formAssign: `var, err = q.Assemble(...)` (vars pre-declared)
+func boot2() (*DB, error) {
 	var d *DB
-	d = q.Assemble[*DB](newConfig, newDB)
-	return d
+	var err error
+	d, err = q.Assemble[*DB](newConfig, newDB)
+	return d, err
 }
 
-// formReturn: directly returned
-func boot3() *DB {
+// formReturn: directly returned (the (T, error) tuple lines up).
+func boot3() (*DB, error) {
 	return q.Assemble[*DB](newConfig, newDB)
 }
 
 // formHoist: nested inside a larger expression — the IIFE substitutes
-// in place; the wrapping call sees the assembled value.
+// in place; the wrapping call sees the (T, error) tuple via q.Try.
 func wrap(d *DB) string { return d.cfg.DB }
 
-func boot4() string {
-	return wrap(q.Assemble[*DB](newConfig, newDB))
-}
-
-// formDiscard: drops the value (rarely useful but must still compile)
-func boot5() {
-	_ = q.Assemble[*DB](newConfig, newDB)
+func boot4() (string, error) {
+	d := q.Try(q.Assemble[*DB](newConfig, newDB))
+	return wrap(d), nil
 }
 
 func main() {
-	fmt.Println("define:", boot1().cfg.DB)
-	fmt.Println("assign:", boot2().cfg.DB)
-	fmt.Println("return:", boot3().cfg.DB)
-	fmt.Println("hoist:", boot4())
-	boot5()
-	fmt.Println("discard ok")
+	d := q.Unwrap(boot1())
+	fmt.Println("define:", d.cfg.DB)
+	d = q.Unwrap(boot2())
+	fmt.Println("assign:", d.cfg.DB)
+	d = q.Unwrap(boot3())
+	fmt.Println("return:", d.cfg.DB)
+	s := q.Unwrap(boot4())
+	fmt.Println("hoist:", s)
 }

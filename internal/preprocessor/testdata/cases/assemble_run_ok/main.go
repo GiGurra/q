@@ -1,6 +1,8 @@
-// Fixture: q.Assemble — pure auto-derived dependency injection. The
-// preprocessor reads each recipe's signature, builds a dep graph
-// keyed by output type, topo-sorts, and emits the inlined construction.
+// Fixture: q.Assemble — auto-derived dependency injection. Always
+// returns (T, error). Compose at the call site:
+//   - q.Try when the caller bubbles errors
+//   - q.Unwrap when the caller has no error path (main, init, tests)
+//   - direct (v, err) :=  for explicit handling
 package main
 
 import (
@@ -25,15 +27,32 @@ func newServer(d *DB, c *Cache, cfg *Config) *Server {
 	return &Server{db: d, cache: c, cfg: cfg}
 }
 
-func main() {
-	// Recipes can appear in any order; the preprocessor topo-sorts.
-	s := q.Assemble[*Server](newServer, newCache, newDB, newConfig)
-	fmt.Println("server cfg:", s.cfg.DB)
-	fmt.Println("server.cache.db == server.db:", s.cache.db == s.db)
+// Tuple receive — recipes can appear in any order; the preprocessor
+// topo-sorts.
+func boot1() (*Server, error) {
+	return q.Assemble[*Server](newServer, newCache, newDB, newConfig)
+}
 
-	// Inline value as a recipe — its type IS the provided type, no
-	// inputs required. Direct ZIO ZLayer.succeed analogue.
+// q.Try unwraps to bare T inside a function returning error.
+func boot2() (*Server, error) {
+	s := q.Try(q.Assemble[*Server](newServer, newCache, newDB, newConfig))
+	return s, nil
+}
+
+// Inline value as a recipe — its type IS the provided type.
+func boot3() (*Server, error) {
 	customCfg := &Config{DB: "override"}
-	s2 := q.Assemble[*Server](customCfg, newDB, newCache, newServer)
-	fmt.Println("override cfg:", s2.cfg.DB)
+	return q.Assemble[*Server](customCfg, newDB, newCache, newServer)
+}
+
+func main() {
+	// q.Unwrap panics on err; useful in main() where there's no error
+	// return path. Here we know the assembly is well-formed at build
+	// time so the err is a static impossibility.
+	s := q.Unwrap(boot1())
+	fmt.Println("boot1 cfg:", s.cfg.DB)
+	s = q.Unwrap(boot2())
+	fmt.Println("boot2 cfg:", s.cfg.DB)
+	s = q.Unwrap(boot3())
+	fmt.Println("boot3 cfg:", s.cfg.DB)
 }

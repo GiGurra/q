@@ -1,6 +1,6 @@
 unused recipe(s):
 #4 (unrelated) — provides string
 The target type *Cache requires:
-- *Cache <- recipe #3 [fn]
-- *DB <- recipe #2 [fn]
-- *Config <- recipe #1 [fn]
+- *Cache <- #3 (newCache) [fn]
+- *DB <- #2 (newDB) [fn]
+- *Config <- #1 (newConfig) [fn]

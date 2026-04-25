@@ -78,6 +78,118 @@ var ErrBadTypeAssert = errors.New("q: type assertion failed")
 // file:line and any user-supplied message before the sentinel.
 var ErrRequireFailed = errors.New("q.Require failed")
 
+// Unwrap takes a (T, error) pair and panics with the error when non-
+// nil; otherwise returns v. Plain runtime function — NOT rewritten
+// by the preprocessor.
+//
+// q.Try is the right tool inside functions returning error: it
+// rewrites to `if err != nil { return zero, err }` and bubbles
+// cleanly. q.Try cannot bubble from main(), init(), test
+// helpers, or any other function without an error return slot —
+// q.Unwrap fills that gap with a panic-on-error escape hatch.
+//
+// Use q.Unwrap when:
+//   - The call site has no error return path (main, init, fixtures).
+//   - You're asserting that a particular call cannot fail (config
+//     loaded once at startup, regexp compiled from a literal,
+//     q.Assemble of a graph proven correct at build time).
+//
+// Avoid q.Unwrap in production library code where the caller might
+// reasonably want to handle the error — that's q.Try territory.
+//
+// Example:
+//
+//	func main() {
+//	    server := q.Unwrap(q.Assemble[*Server](newConfig, newDB, newServer))
+//	    server.Run()
+//	}
+func Unwrap[T any](v T, err error) T {
+	if err != nil {
+		panic(err)
+	}
+	return v
+}
+
+// UnwrapE is the chain variant of Unwrap. The chain methods shape
+// the err before panicking (.Wrap / .Wrapf / .Err / .ErrF) or
+// recover with a fallback value (.Catch). All methods are plain
+// runtime — UnwrapE is NOT rewritten by the preprocessor.
+//
+// Use it for the same contexts as Unwrap (main, init, tests) when
+// you want richer error context on the panic, a wrapped sentinel
+// for errors.Is detection, or a recovery path:
+//
+//	func main() {
+//	    server := q.UnwrapE(q.Assemble[*Server](newConfig, newDB, newServer)).Wrap("server init")
+//	    server.Run()
+//	}
+//
+//	// .Catch lets the caller recover instead of panicking.
+//	cfg := q.UnwrapE(loadConfig()).Catch(func(error) (*Config, error) {
+//	    return defaultConfig(), nil
+//	})
+func UnwrapE[T any](v T, err error) UnwrapResult[T] {
+	return UnwrapResult[T]{v: v, err: err}
+}
+
+// UnwrapResult carries a captured (T, error) pair for the q.UnwrapE
+// chain. Methods either return v (when err is nil) or panic with the
+// shaped error.
+type UnwrapResult[T any] struct {
+	v   T
+	err error
+}
+
+// Err panics with the supplied replacement error when the captured
+// err is non-nil; otherwise returns v.
+func (r UnwrapResult[T]) Err(replacement error) T {
+	if r.err != nil {
+		panic(replacement)
+	}
+	return r.v
+}
+
+// ErrF panics with fn(capturedErr) when err is non-nil; otherwise
+// returns v.
+func (r UnwrapResult[T]) ErrF(fn func(error) error) T {
+	if r.err != nil {
+		panic(fn(r.err))
+	}
+	return r.v
+}
+
+// Wrap panics with fmt.Errorf("<msg>: %w", err) when err is non-nil;
+// otherwise returns v.
+func (r UnwrapResult[T]) Wrap(msg string) T {
+	if r.err != nil {
+		panic(fmt.Errorf("%s: %w", msg, r.err))
+	}
+	return r.v
+}
+
+// Wrapf panics with fmt.Errorf(format + ": %w", args..., err) when
+// err is non-nil; otherwise returns v.
+func (r UnwrapResult[T]) Wrapf(format string, args ...any) T {
+	if r.err != nil {
+		panic(fmt.Errorf(format+": %w", append(args, r.err)...))
+	}
+	return r.v
+}
+
+// Catch passes the captured err through fn when non-nil. fn returns
+// either a recovered (T, nil) — used in place of the panic — or
+// (zero, newErr) — newErr panics in place of the original.
+func (r UnwrapResult[T]) Catch(fn func(error) (T, error)) T {
+	if r.err != nil {
+		v, err := fn(r.err)
+		if err != nil {
+			panic(err)
+		}
+		return v
+	}
+	return r.v
+}
+
 // Const builds a Catch handler that always recovers to the supplied
 // value, ignoring the captured error. Pure runtime helper — not
 // rewritten by the preprocessor. Useful as the fallback in any chain

@@ -23,5 +23,5 @@ func newApp(g Greeter) *App  { return &App{g: g} }
 
 func main() {
 	// Both *EnglishGreeter and *SpanishGreeter satisfy Greeter — ambiguous.
-	_ = q.Assemble[*App](newEN, newES, newApp)
+	_, _ = q.Assemble[*App](newEN, newES, newApp)
 }
