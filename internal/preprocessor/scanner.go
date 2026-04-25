@@ -57,7 +57,8 @@ const (
 	familyRecvE       // q.RecvE(ch).<method> — chain variant
 	familyAs          // q.As[T](x) — type assertion with failure bubble
 	familyAsE         // q.AsE[T](x).<method> — chain variant
-	familyDebug       // q.Debug(v) — in-place rewrite to q.DebugAt("label", v)
+	familyDebugPrintln  // q.DebugPrintln(v) — in-place rewrite to q.DebugPrintlnAt("label", v)
+	familyDebugSlogAttr // q.DebugSlogAttr(v) — in-place rewrite to slog.Any("label", v)
 	familyAwait       // q.Await(f) — Try-like bubble using q.AwaitRaw as the source
 	familyAwaitE      // q.AwaitE(f).<method> — TryE-like chain over q.AwaitRaw
 	familyRecoverAuto  // defer q.Recover()       — inject &err from enclosing sig
@@ -224,7 +225,7 @@ var chainMethods = map[string]bool{
 // flag.
 var qRuntimeHelpers = map[string]bool{
 	"ToErr":           true,
-	"DebugAt":         true,
+	"DebugPrintlnAt":  true,
 	"Async":           true,
 	"AwaitRaw":        true,
 	"AwaitRawCtx":     true,
@@ -698,14 +699,23 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 		}
 		return qSubCall{Family: familyAwait, InnerExpr: call.Args[0], OuterCall: expr}, true, nil
 	}
-	// Bare q.Debug — in-place rewrite to q.DebugAt with an
-	// auto-generated label carrying call-site file:line and the
-	// source text of the argument expression.
-	if isSelector(call.Fun, alias, "Debug") {
+	// Bare q.DebugPrintln — in-place rewrite to q.DebugPrintlnAt
+	// with an auto-generated label carrying call-site file:line
+	// and the source text of the argument expression.
+	if isSelector(call.Fun, alias, "DebugPrintln") {
 		if len(call.Args) != 1 {
-			return qSubCall{}, false, fmt.Errorf("q.Debug must take exactly one argument (the value to print); got %d", len(call.Args))
+			return qSubCall{}, false, fmt.Errorf("q.DebugPrintln must take exactly one argument (the value to print); got %d", len(call.Args))
 		}
-		return qSubCall{Family: familyDebug, InnerExpr: call.Args[0], OuterCall: expr}, true, nil
+		return qSubCall{Family: familyDebugPrintln, InnerExpr: call.Args[0], OuterCall: expr}, true, nil
+	}
+	// Bare q.DebugSlogAttr — in-place rewrite to slog.Any with a
+	// label carrying call-site file:line and the source text of
+	// the argument expression. Returns slog.Attr (no pass-through).
+	if isSelector(call.Fun, alias, "DebugSlogAttr") {
+		if len(call.Args) != 1 {
+			return qSubCall{}, false, fmt.Errorf("q.DebugSlogAttr must take exactly one argument (the value to wrap as a slog.Attr); got %d", len(call.Args))
+		}
+		return qSubCall{Family: familyDebugSlogAttr, InnerExpr: call.Args[0], OuterCall: expr}, true, nil
 	}
 	// Bare q.Recv — channel receive with close bubble.
 	if isSelector(call.Fun, alias, "Recv") {

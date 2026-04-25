@@ -6,8 +6,6 @@
 
 > **Experimental** — APIs and internals may change. Use at your own risk.
 
-Go's `if err != nil { return …, err }` boilerplate accumulates fast: a function with three fallible calls becomes a fifteen-line return-laundering exercise, the actual logic gets pushed off-screen, and copy-paste mistakes drop or shadow errors silently.
-
 `q` brings the flat shape Rust has with `?` and Swift has with `try` to Go. Each `q.Try(...)` / `q.NotNil(...)` / chain call is rewritten at compile time into the conventional `if err != nil { return …, err }` form. Delivered as a `-toolexec` preprocessor — you opt in per-module.
 
 ```go
@@ -34,22 +32,170 @@ func loadUser(id int) (User, error) {
 
 The withdrawn Go [`try` proposal](https://github.com/golang/go/issues/32437) is the same idea, delivered as a preprocessor instead of a language change.
 
-## What's in it
+## Things you can do with q
 
-A small bubble core — entries that turn a kind of failure into an early return — plus helpers for the surrounding patterns where Go boilerplate accumulates.
+A few situations where the flat shape pays off. Each snippet rewrites to ordinary Go at compile time — no runtime overhead, no closures, no panic/recover.
 
-- **Bubble on every common Go failure shape.** `(T, error)`, nil pointers, error-only calls (`db.Ping`), `(T, bool)`, channel close, type assertions. One bare entry per shape (`q.Try`, `q.NotNil`, `q.Check`, `q.Ok`, `q.Recv`, `q.As`).
-- **Shape the bubble at the call site.** Each entry has an `E`-suffixed sibling (`q.TryE`, …) with `.Wrap("loading")` / `.Wrapf("...", id)` / `.Err(constErr)` / `.ErrF(fn)` / `.Catch(fn)` — the last one transforms or recovers.
-- **Acquire/release in one line.** `q.Open(dial(addr)).Release((*Conn).Close)` bubbles on error, registers `defer cleanup(v)` on success.
-- **Context cancellation without ceremony.** `q.Bubble(ctx)` is a one-statement checkpoint. `q.Timeout(ctx, dur)` derives a child ctx with auto-`defer cancel()`. `q.RecvCtx`, `q.AwaitCtx` are ctx-aware versions of channel receive and future await.
-- **JS-flavour futures over goroutines.** `q.Async(fn)` returns a `Future[T]`; `q.Await(f)` blocks and bubbles. `q.AwaitAll` gathers, `q.AwaitAny` returns first-success.
-- **Multi-channel fan-in.** `q.RecvAny` for first-value-wins select, `q.Drain` / `q.DrainAll` to collect until close.
-- **Panic → error.** `defer q.Recover()` auto-wires the function's `error` return so any panic becomes a typed `*q.PanicError` (or whatever shape `RecoverE().Map(fn)` produces).
-- **Mutex sugar.** `q.Lock(&mu)` emits `Lock + defer Unlock` for any `sync.Locker`.
-- **Runtime preconditions.** `q.Require(cond, "msg")` bubbles an error when `cond` is false — same flat shape as the rest of the bubble family, no panics.
-- **Compile-time call-site annotations.** `q.Trace(call)` prefixes the bubbled error with `file:line`; `q.Debug(x)` is Go's missing `dbg!`; `q.TODO` / `q.Unreachable` are panic markers for branches that genuinely shouldn't execute.
+### Wrap an error with context, in one line
 
-Every value-producing helper works in five statement positions — define, assign, discard, return-position, and hoisted inside any expression — so call sites stay where they are most readable.
+```go
+user := q.TryE(loadUser(id)).Wrapf("loading user %d", id)
+```
+
+`%w` is appended automatically — the original error stays unwrappable via `errors.Is` / `errors.As`. Skip the `Wrapf` and use `q.Try(...)` for a bare bubble.
+
+### Recover from a specific failure mode mid-call
+
+```go
+n := q.TryE(strconv.Atoi(s)).Catch(func(e error) (int, error) {
+    if errors.Is(e, strconv.ErrSyntax) {
+        return 0, nil                 // recover with a default
+    }
+    return 0, fmt.Errorf("parsing %q: %w", s, e)
+})
+```
+
+`Catch` is the union of "transform the error" and "substitute a fallback value": `(value, nil)` recovers, `(zero, err)` bubbles.
+
+### Acquire and release a resource in one statement
+
+```go
+conn := q.Open(dial(addr)).Release((*Conn).Close)
+file := q.Open(os.Open(path)).Release((*os.File).Close)
+return process(conn, file)
+// On return: file.Close fires first, then conn.Close. LIFO defer order.
+```
+
+If `os.Open` fails, `conn` was already opened and `conn.Close` runs. Same semantics as hand-written `defer conn.Close()` chains, half the lines.
+
+### Bubble nil pointers, channel closes, type-assertion misses
+
+```go
+user := q.NotNil(table[id])           // bubble q.ErrNil if id isn't in the map
+msg  := q.Recv(inbox)                 // bubble q.ErrChanClosed when inbox closes
+admin := q.AsE[Admin](user).Wrapf("%T is not an admin", user)
+```
+
+Each helper picks a different failure shape; the rewrite is the same `if X { return zero, err }` pattern.
+
+### Cancellation as a one-statement checkpoint
+
+```go
+func sync(ctx context.Context, items []Item) error {
+    for _, it := range items {
+        q.Bubble(ctx)                 // bubble ctx.Err() if cancelled, no-op otherwise
+        q.Try(process(it))
+    }
+    return nil
+}
+```
+
+For ctx-aware blocking ops, `q.RecvCtx(ctx, ch)` and `q.AwaitCtx(ctx, future)` bubble whichever fires first — cancel or value.
+
+### Auto-cancelled child contexts
+
+```go
+ctx = q.Timeout(ctx, 2*time.Second)   // ctx, _qCancel := WithTimeout(...); defer cancel()
+ctx = q.Deadline(ctx, deadline)       // same with WithDeadline
+```
+
+The required `defer cancel()` is wired in by the rewriter — there's no `cancel` variable to forget about.
+
+### JS-flavour futures, with select-style fan-in
+
+```go
+fa := q.Async(func() (Sales, error) { return fetchSales(ctx) })
+fb := q.Async(func() (Inventory, error) { return fetchInventory(ctx) })
+
+sales := q.AwaitCtxE(ctx, fa).Wrap("sales")
+inv   := q.AwaitCtx(ctx, fb)
+
+results := q.AwaitAll(fa, fb, fc)     // []T in input order; bubble first error
+fastest := q.AwaitAny(fa, fb, fc)     // first success wins, errors.Join on all-fail
+```
+
+### Multi-channel select and drain
+
+```go
+v   := q.RecvAny(chA, chB, chC)       // first value across N channels
+all := q.DrainAll(chA, chB, chC)      // [][]T — collected until each closes
+```
+
+### Panic → error, function-wide
+
+```go
+func handle(req Request) (resp Response, err error) {
+    defer q.Recover()                 // any panic becomes a *q.PanicError on err
+    return work(req)
+}
+
+defer q.RecoverE().Map(func(r any) error {
+    return &APIError{Detail: fmt.Sprint(r)}
+})
+```
+
+The `&err` is wired in from the enclosing signature — no need to type it out.
+
+### Mutex sugar
+
+```go
+func (s *Store) Set(k, v string) {
+    q.Lock(&s.mu)                     // Lock + defer Unlock
+    s.data[k] = v
+}
+```
+
+### Runtime preconditions, no panic
+
+```go
+func encode(buf []byte) (Frame, error) {
+    q.Require(len(buf) >= 16, "header too short")
+    // bubble: errors.New("q.Require failed codec.go:42: header too short")
+    ...
+}
+```
+
+Validations bubble like every other failure — no `defer recover()` on the caller's side.
+
+### Mid-expression debug print + auto-keyed slog
+
+```go
+u := loadUser(q.DebugPrintln(id))
+// stderr: "main.go:17 id = 7"  (passes id through unchanged)
+
+slog.Info("loaded", q.DebugSlogAttr(userID))
+// → slog.Info("loaded", slog.Any("main.go:42 userID", userID))
+```
+
+Both auto-capture the source text and `file:line` at compile time — no retyping the variable name as a key.
+
+### Trace a bubble back to its call site
+
+```go
+row := q.TraceE(db.Query(id)).Wrapf("loading user %d", id)
+// → fmt.Errorf("users.go:42: loading user 7: %w", err) on the bubble
+```
+
+Compile-time `file:line` prefix; the wrap and underlying error remain unwrappable.
+
+### Statement positions
+
+Every value-producing helper works in five positions:
+
+```go
+v := q.Try(call())                       // define
+v  = q.Try(call())                       // assign (incl. m[k] = …, obj.field = …)
+     q.Try(call())                       // discard — bubble fires, value dropped
+return q.Try(call()), nil                // return-position
+x := f(q.Try(call()), q.NotNil(p))       // hoist — q.* nested inside any expression
+```
+
+Multiple `q.*` per statement compose:
+
+```go
+return q.Try(a()) * q.Try(b()) / q.Try(c()), nil
+x := q.Try(Foo(q.Try(Bar())))           // nested q.* inside another q.*'s arg
+```
 
 ## Why a preprocessor
 

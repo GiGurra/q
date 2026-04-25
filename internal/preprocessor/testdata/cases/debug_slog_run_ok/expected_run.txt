@@ -1,0 +1,5 @@
+--- slog ---
+level=INFO msg=loaded "main.go:N id"=7
+level=INFO msg=doubled "main.go:N id*2"=14
+level=ERROR msg=failed "main.go:N name"=alice
+level=INFO msg=pair "main.go:N id"=7 "main.go:N name"=alice

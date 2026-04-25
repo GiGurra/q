@@ -45,7 +45,7 @@ nav:
     - q.AwaitCtx:              api/await_ctx.md
     - q.Bubble:                api/bubble.md
     - q.Check:                 api/check.md
-    - q.Debug:                 api/debug.md
+    - q.DebugPrintln / SlogAttr: api/debug.md
     - q.Lock:                  api/lock.md
     - q.NotNil:                api/notnil.md
     - q.Ok:                    api/ok.md

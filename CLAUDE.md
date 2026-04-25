@@ -43,9 +43,10 @@
   - `Lock(l sync.Locker)` — statement-only; emits `_qLockN := l; _qLockN.Lock(); defer _qLockN.Unlock()`.
   - `TODO(msg ...string)` / `Unreachable(msg ...string)` — statement-only panics with file:line-prefixed messages.
   - `Require(cond bool, msg ...string)` — statement-only; bubbles `errors.New("q.Require failed <file>:<line>[: <msg>]")` to the enclosing function's error return when cond is false. Replaces the previous panic-shaped `q.Assert`; q's stance is that the library produces errors, not panics.
-  - `Debug[T any](v T) T` — panic stub; the preprocessor rewrites each call site to `q.DebugAt("<file>:<line> <src-text>", v)`. Usable mid-expression.
-  - `DebugAt[T any](label string, v T) T` — runtime helper paired with Debug. Writes to `q.DebugWriter` (default `os.Stderr`, reassignable for test capture).
-  - `DebugWriter io.Writer = os.Stderr` — user-reassignable destination for DebugAt output.
+  - `DebugPrintln[T any](v T) T` — panic stub; the preprocessor rewrites each call site to `q.DebugPrintlnAt("<file>:<line> <src-text>", v)`. Pass-through, usable mid-expression. Renamed from the original `q.Debug`.
+  - `DebugPrintlnAt[T any](label string, v T) T` — runtime helper paired with DebugPrintln. Writes to `q.DebugWriter` (default `os.Stderr`, reassignable for test capture).
+  - `DebugSlogAttr[T any](v T) slog.Attr` — panic stub; the preprocessor rewrites each call site directly to `slog.Any("<file>:<line> <src-text>", v)`. No q runtime helper on the value path — expands to stdlib `log/slog`. The rewriter detects this family at the shape level and injects the `log/slog` import.
+  - `DebugWriter io.Writer = os.Stderr` — user-reassignable destination for DebugPrintlnAt output.
   - `Async[T any](fn func() (T, error)) Future[T]` — runtime helper; spawns `fn` in a goroutine, returns a `Future[T]` backed by a buffered channel.
   - `AwaitRaw[T any](f Future[T]) (T, error)` — runtime helper; blocks on the Future and returns the tuple.
   - `Await[T any](f Future[T]) T` — Try-like bubble over `q.AwaitRaw(f)`.
@@ -86,7 +87,7 @@
   - `ErrNotOk` sentinel, exposed for `errors.Is` checks against the bare `q.Ok` bubble.
   - `ErrChanClosed` sentinel, exposed for `errors.Is` checks against the bare `q.Recv` bubble.
   - `ErrBadAssert` sentinel, exposed for `errors.Is` checks against the bare `q.As` bubble.
-  - `qRuntimeHelpers` carve-out (scanner): `ToErr`, `DebugAt`, `Async`, `AwaitRaw`, `AwaitRawCtx`, `AwaitAllRaw`, `AwaitAllRawCtx`, `AwaitAnyRaw`, `AwaitAnyRawCtx`, `RecvRawCtx`, `RecvAnyRaw`, `RecvAnyRawCtx`, `Drain`, `DrainAll`, `DrainRawCtx`, `DrainAllRawCtx`, `Recover`, `RecoverE`. These are NOT rewritten and run at runtime.
+  - `qRuntimeHelpers` carve-out (scanner): `ToErr`, `DebugPrintlnAt`, `Async`, `AwaitRaw`, `AwaitRawCtx`, `AwaitAllRaw`, `AwaitAllRawCtx`, `AwaitAnyRaw`, `AwaitAnyRawCtx`, `RecvRawCtx`, `RecvAnyRaw`, `RecvAnyRawCtx`, `Drain`, `DrainAll`, `DrainRawCtx`, `DrainAllRawCtx`, `Recover`, `RecoverE`. These are NOT rewritten and run at runtime.
   - `ToErr[T any, E any, P interface{ *E; error }](v T, e P) (T, error)` — runtime helper (NOT rewritten, real body executes) that adapts a `(T, *E)` callee into `(T, error)` while collapsing a typed-nil `*E` into a literal nil `error`. Satisfies the typed-nil guard (its return type is literally `error`). Usable standalone, not tied to the rest of q.
   - `_qLink` plus `func init() { _qLink() }` — the package-level link gate.
 - `cmd/q/main.go` — toolexec shim, thin wrapper around `internal/preprocessor.Run`.
@@ -110,7 +111,8 @@
 - `internal/preprocessor/testdata/cases/panic_defer_family_run_ok/` — fixture for the statement-only panic/defer helpers (q.Lock on Mutex + RWMutex.RLocker, q.TODO/Unreachable with and without messages). Includes `stripLineNumber` helper to normalise panic messages. q.Require has its own fixture under `require_run_ok` since it bubbles instead of panics.
 - `internal/preprocessor/testdata/cases/require_run_ok/` — fixture for q.Require. Covers cond=true pass-through, cond=false with literal/dynamic message and no message, both `error` and `(T, error)` enclosing-function shapes, and asserts the bubbled error carries the call-site `file:line` prefix.
 - `internal/preprocessor/testdata/cases/recv_as_family_run_ok/` — fixture for `q.Recv` / `q.RecvE` and `q.As[T]` / `q.AsE[T]`. Both bare sentinels, Wrap/Wrapf/Err/Catch on both paths, errors.Is identity for both sentinels.
-- `internal/preprocessor/testdata/cases/debug_run_ok/` — fixture for `q.Debug`. Captures DebugWriter into a bytes.Buffer, line-number-normalises output, asserts pass-through semantics for int/string/arithmetic + direct DebugAt call.
+- `internal/preprocessor/testdata/cases/debug_run_ok/` — fixture for `q.DebugPrintln`. Captures DebugWriter into a bytes.Buffer, line-number-normalises output, asserts pass-through semantics for int/string/arithmetic + direct DebugPrintlnAt call.
+- `internal/preprocessor/testdata/cases/debug_slog_run_ok/` — fixture for `q.DebugSlogAttr`. Builds a slog.TextHandler with a bytes.Buffer destination and a ReplaceAttr that drops the time attr; asserts the rewritten `slog.Any("<file>:<line> <src>", v)` calls produce the expected key=value text-handler output across `slog.Info` / `slog.Error` / multi-attr calls.
 - `internal/preprocessor/testdata/cases/async_await_run_ok/` — fixture for q.Async + q.Await + q.AwaitE. Ok/err/wrap paths for Await, AwaitE.Catch recover+bubble.
 - `internal/preprocessor/testdata/cases/bubble_ctx_run_ok/` — fixture for q.Bubble + q.BubbleE. Covers bare checkpoint (both `error`-only and `(T, error)` signatures) plus every BubbleE chain method (Err/ErrF/Wrap/Wrapf/Catch-suppress/Catch-bubble) on live + cancelled ctx. Asserts `errors.Is(err, context.Canceled)` survives a Wrap.
 - `internal/preprocessor/testdata/cases/recv_await_ctx_run_ok/` — fixture for q.RecvCtx / q.RecvCtxE / q.AwaitCtx / q.AwaitCtxE. Covers happy path, channel close (ErrChanClosed), ctx cancel (Canceled / DeadlineExceeded), chain Wrap, chain Catch recover, and chain Err-replacement with sentinel identity check.

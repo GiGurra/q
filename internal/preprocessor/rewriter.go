@@ -121,6 +121,22 @@ func rewriteFile(fset *token.FileSet, file *ast.File, src []byte, shapes []callS
 		out = append(out[:e.start], append([]byte(e.text), out[e.end:]...)...)
 	}
 
+	// log/slog is injected by syntactic detection — q.DebugSlogAttr
+	// rewrites to a literal slog.Any call, so any shape containing
+	// that family forces the import.
+	needsSlog := false
+	for _, sh := range shapes {
+		for _, c := range sh.Calls {
+			if c.Family == familyDebugSlogAttr {
+				needsSlog = true
+				break
+			}
+		}
+		if needsSlog {
+			break
+		}
+	}
+
 	var addedImports []string
 	if needsFmt && !hasImport(file, "fmt") {
 		out = ensureImport(file, fset, out, "fmt")
@@ -133,6 +149,10 @@ func rewriteFile(fset *token.FileSet, file *ast.File, src []byte, shapes []callS
 	if needsContext && !hasImport(file, "context") {
 		out = ensureImport(file, fset, out, "context")
 		addedImports = append(addedImports, "context")
+	}
+	if needsSlog && !hasImport(file, "log/slog") {
+		out = ensureImport(file, fset, out, "log/slog")
+		addedImports = append(addedImports, "log/slog")
 	}
 
 	if alias != "" {
@@ -163,8 +183,9 @@ func rewriteFile(fset *token.FileSet, file *ast.File, src []byte, shapes []callS
 // q.Try(b()), nil`) — rendering each as a bind + bubble block and
 // joining them with a newline + indent. For formReturn it then
 // appends the reconstructed final return with every q.* call span
-// substituted by its `_qTmp<N>` (or for familyDebug, by an in-
-// place `q.DebugAt(...)` expression — Debug doesn't produce a
+// substituted by its `_qTmp<N>` (or for in-place families, by their
+// rewritten expression — DebugPrintln expands to DebugPrintlnAt(...)
+// and DebugSlogAttr expands to slog.Any(...); neither produces a
 // bubble and so doesn't allocate a temp).
 //
 // *counter is the running per-file counter source. renderShape
@@ -193,18 +214,22 @@ func renderShape(fset *token.FileSet, src []byte, sh callShape, counter *int, al
 
 	// Pre-compute each sub's replacement text so substituteSpans
 	// (used by exprTextSubst, MethodArg text, finalStmtSuffix) can
-	// slice directly. Most families map to "_qTmp<N>"; Debug maps
-	// to an in-place `q.DebugAt(<label>, <inner>)` so its span
-	// vanishes without a temp.
+	// slice directly. Most families map to "_qTmp<N>"; DebugPrintln
+	// and DebugSlogAttr map to in-place expression replacements
+	// (`q.DebugPrintlnAt(...)` / `slog.Any(...)`) so their spans
+	// vanish without a temp.
 	subTexts := make([]string, len(sh.Calls))
 	for i := range sh.Calls {
 		subTexts[i] = "_qTmp" + strconv.Itoa(counters[i])
 	}
-	// Second pass for Debug so innerText can already substitute
-	// non-Debug children.
+	// Second pass for in-place families so innerText can already
+	// substitute non-in-place children.
 	for i := range sh.Calls {
-		if sh.Calls[i].Family == familyDebug {
-			subTexts[i] = buildDebugReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts, alias)
+		switch sh.Calls[i].Family {
+		case familyDebugPrintln:
+			subTexts[i] = buildDebugPrintlnReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts, alias)
+		case familyDebugSlogAttr:
+			subTexts[i] = buildDebugSlogAttrReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts)
 		}
 	}
 
@@ -212,10 +237,10 @@ func renderShape(fset *token.FileSet, src []byte, sh callShape, counter *int, al
 		blocks                           []string
 		fmtUsed, errorsUsed, contextUsed bool
 	)
-	allDebug := true
+	allInPlace := true
 	for _, idx := range order {
-		if sh.Calls[idx].Family != familyDebug {
-			allDebug = false
+		if !isInPlaceFamily(sh.Calls[idx].Family) {
+			allInPlace = false
 		}
 		block, fu, eu, cu, err := renderSubCall(fset, src, sh, idx, sh.Calls, counters, subTexts, alias)
 		if err != nil {
@@ -235,13 +260,13 @@ func renderShape(fset *token.FileSet, src []byte, sh callShape, counter *int, al
 		}
 	}
 	text := joinWith(blocks, "\n"+indent)
-	if sh.Form == formReturn || sh.Form == formHoist || allDebug {
+	if sh.Form == formReturn || sh.Form == formHoist || allInPlace {
 		if len(blocks) > 0 {
 			text += finalStmtSuffix(fset, src, sh, subTexts)
 		} else {
-			// All-Debug shape in a value-producing form: emit only
-			// the substituted statement body with the original
-			// indent, no extra newline prefix.
+			// All-in-place shape in a value-producing form: emit
+			// only the substituted statement body with the
+			// original indent, no extra newline prefix.
 			start := fset.Position(sh.Stmt.Pos()).Offset
 			end := fset.Position(sh.Stmt.End()).Offset
 			text = substituteSpans(fset, src, start, end, sh.Calls, subTexts)
@@ -467,21 +492,48 @@ func isBuiltinErrorType(t ast.Expr) bool {
 	return ok && id.Name == "error"
 }
 
-// buildDebugReplacement is the per-sub replacement text for a
-// familyDebug call: `q.DebugAt("<file>:<line> <src>", <innerText>)`.
-// innerText is computed by substituteSpans so any non-Debug q.*
-// nested inside Debug's argument already maps to its `_qTmpN`. Any
-// Debug-in-Debug case falls through to the call's literal source
-// text — two Debug prints fire in evaluation order.
-func buildDebugReplacement(fset *token.FileSet, src []byte, sub qSubCall, subs []qSubCall, subTexts []string, alias string) string {
+// debugLabel constructs the auto-generated label string used by
+// q.DebugPrintln / q.DebugSlogAttr — `<file>:<line> <src>` with the
+// argument's source text appended after the call-site location.
+// Returns the Go-quoted label literal ready to splice into a call.
+func debugLabel(fset *token.FileSet, src []byte, sub qSubCall) string {
+	innerStart := fset.Position(sub.InnerExpr.Pos()).Offset
+	innerEnd := fset.Position(sub.InnerExpr.End()).Offset
+	srcText := string(src[innerStart:innerEnd])
+	prefix := tracePrefix(fset, sub.OuterCall.Pos())
+	return strconv.Quote(prefix + " " + srcText)
+}
+
+// buildDebugPrintlnReplacement is the per-sub replacement text for a
+// q.DebugPrintln call: `<alias>.DebugPrintlnAt("<label>", <innerText>)`.
+// innerText is computed by substituteSpans so any non-in-place q.*
+// nested inside DebugPrintln's argument already maps to its `_qTmpN`.
+func buildDebugPrintlnReplacement(fset *token.FileSet, src []byte, sub qSubCall, subs []qSubCall, subTexts []string, alias string) string {
 	innerStart := fset.Position(sub.InnerExpr.Pos()).Offset
 	innerEnd := fset.Position(sub.InnerExpr.End()).Offset
 	innerText := substituteSpans(fset, src, innerStart, innerEnd, subs, subTexts)
-	// Source text of the argument for the label.
-	srcText := string(src[innerStart:innerEnd])
-	prefix := tracePrefix(fset, sub.OuterCall.Pos())
-	label := strconv.Quote(prefix + " " + srcText)
-	return fmt.Sprintf("%s.DebugAt(%s, %s)", alias, label, innerText)
+	return fmt.Sprintf("%s.DebugPrintlnAt(%s, %s)", alias, debugLabel(fset, src, sub), innerText)
+}
+
+// buildDebugSlogAttrReplacement is the per-sub replacement text for
+// a q.DebugSlogAttr call: `slog.Any("<label>", <innerText>)`.
+// Expands directly to stdlib slog.Any — no q runtime helper is
+// involved on the value path. The rewriter injects the `log/slog`
+// import elsewhere when this family appears.
+func buildDebugSlogAttrReplacement(fset *token.FileSet, src []byte, sub qSubCall, subs []qSubCall, subTexts []string) string {
+	innerStart := fset.Position(sub.InnerExpr.Pos()).Offset
+	innerEnd := fset.Position(sub.InnerExpr.End()).Offset
+	innerText := substituteSpans(fset, src, innerStart, innerEnd, subs, subTexts)
+	return fmt.Sprintf("slog.Any(%s, %s)", debugLabel(fset, src, sub), innerText)
+}
+
+// isInPlaceFamily reports whether a family rewrites the call
+// expression in place (no bind/check block, no return) so the
+// substituted statement body is the entire output. Used to short-
+// circuit block-emission and to decide between the bind-then-stmt
+// shape and the substitute-only shape.
+func isInPlaceFamily(f family) bool {
+	return f == familyDebugPrintln || f == familyDebugSlogAttr
 }
 
 // orderInnermostFirst returns indices into subs ordered so that
@@ -540,8 +592,9 @@ func spanContains(fset *token.FileSet, outer, inner ast.Expr) bool {
 //
 // subTexts[i] is the replacement string for subs[i]. Callers
 // pre-compute this in renderShape — most families map to
-// "_qTmp<counter>", familyDebug maps to an in-place
-// `q.DebugAt(<label>, <inner>)` expression.
+// "_qTmp<counter>", in-place families map to their rewritten
+// expression (DebugPrintln → q.DebugPrintlnAt(...), DebugSlogAttr
+// → slog.Any(...)).
 func substituteSpans(fset *token.FileSet, src []byte, start, end int, subs []qSubCall, subTexts []string) string {
 	var contained []int
 	for i, sub := range subs {
@@ -669,9 +722,9 @@ func renderSubCall(fset *token.FileSet, src []byte, sh callShape, subIdx int, su
 	case familyAsE:
 		text, fmtUsed, errorsUsed, err := renderAsE(fset, src, sh, sub, counter, subs, subTexts)
 		return text, fmtUsed, errorsUsed, false, err
-	case familyDebug:
-		// Debug is an in-place expression transform — the replacement
-		// text lives in subTexts[subIdx] and is applied when
+	case familyDebugPrintln, familyDebugSlogAttr:
+		// In-place expression transforms — the replacement text
+		// lives in subTexts[subIdx] and is applied when
 		// substituteSpans rebuilds the final stmt. No bind/check
 		// block to emit here.
 		return "", false, false, false, nil

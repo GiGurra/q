@@ -28,6 +28,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"reflect"
 	"runtime/debug"
@@ -37,9 +38,9 @@ import (
 	_ "unsafe" // for //go:linkname
 )
 
-// DebugWriter is the destination q.DebugAt writes to. Defaults to
-// os.Stderr; tests and library users can reassign it to capture
-// Debug output for assertions.
+// DebugWriter is the destination q.DebugPrintlnAt writes to. Defaults
+// to os.Stderr; tests and library users can reassign it to capture
+// q.DebugPrintln output for assertions.
 var DebugWriter io.Writer = os.Stderr
 
 // ErrNil is the sentinel error the bare q.NotNil bubble produces when
@@ -575,31 +576,55 @@ func AwaitE[T any](f Future[T]) ErrResult[T] {
 	return ErrResult[T]{}
 }
 
-// Debug prints v to stderr prefixed with the call-site file:line
-// and the source text of the argument expression, then returns v
-// unchanged so the call can sit mid-expression. Go's missing `dbg!`
-// macro. Usable anywhere a value expression is valid:
+// DebugPrintln prints v to q.DebugWriter (defaults to os.Stderr)
+// prefixed with the call-site file:line and the source text of the
+// argument expression, then returns v unchanged so the call can sit
+// mid-expression. Go's missing `dbg!` / `println!`. Usable anywhere
+// a value expression is valid:
 //
-//	return q.Debug(loadUser(q.Debug(id)))
+//	return q.DebugPrintln(loadUser(q.DebugPrintln(id)))
 //
 // Both prints fire in source order, then the return flows through.
 // Only the preprocessor knows the source text and file:line —
-// without it, q.Debug is a panic stub. Every rewritten site calls
-// q.DebugAt internally, which is also exported for direct use when
-// a custom label is wanted.
-func Debug[T any](v T) T {
-	panicUnrewritten("q.Debug")
+// without it, q.DebugPrintln is a panic stub. Every rewritten site
+// calls q.DebugPrintlnAt internally, which is also exported for
+// direct use when a custom label is wanted.
+func DebugPrintln[T any](v T) T {
+	panicUnrewritten("q.DebugPrintln")
 	return v
 }
 
-// DebugAt is the runtime half of q.Debug. The preprocessor rewrites
-// every `q.Debug(x)` call site into `q.DebugAt("<file>:<line> <src>", x)`,
-// but users who want a custom label (or who need to construct the
-// label at runtime) can call DebugAt directly without going through
-// the preprocessor path.
-func DebugAt[T any](label string, v T) T {
+// DebugPrintlnAt is the runtime half of q.DebugPrintln. The
+// preprocessor rewrites every `q.DebugPrintln(x)` call site into
+// `q.DebugPrintlnAt("<file>:<line> <src>", x)`, but users who want a
+// custom label (or who need to construct the label at runtime) can
+// call DebugPrintlnAt directly without going through the
+// preprocessor path.
+func DebugPrintlnAt[T any](label string, v T) T {
 	_, _ = fmt.Fprintf(DebugWriter, "%s = %+v\n", label, v)
 	return v
+}
+
+// DebugSlogAttr returns a slog.Attr keyed by the call-site
+// `<file>:<line> <src>` label captured at compile time, with v as
+// the value. Use it to attach a labelled value to a structured-log
+// call without retyping the source expression as a key:
+//
+//	slog.Info("loaded", q.DebugSlogAttr(userID))
+//	// → slog.Info("loaded", slog.Any("main.go:42 userID", userID))
+//
+// The preprocessor rewrites every q.DebugSlogAttr call site into
+// the equivalent slog.Any expression at compile time. There is no
+// runtime helper for this one — the rewrite expands directly to
+// stdlib slog, so the value path is purely a stdlib slog call.
+//
+// Unlike q.DebugPrintln, q.DebugSlogAttr does not pass v through:
+// it returns a slog.Attr suitable for the variadic args of slog.Info
+// / slog.Error / etc. For mid-expression instrumentation reach for
+// q.DebugPrintln.
+func DebugSlogAttr[T any](v T) slog.Attr {
+	panicUnrewritten("q.DebugSlogAttr")
+	return slog.Attr{}
 }
 
 // Recv receives from ch and forwards the value; the preprocessor
