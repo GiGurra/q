@@ -592,9 +592,10 @@ func scanFile(fset *token.FileSet, path string, file *ast.File) ([]callShape, []
 // walkFuncLits + collectQCalls to short-circuit descent.
 var atCTSkipFuncLits map[*ast.FuncLit]bool
 
-// comptimeBinding describes a `var X = q.Comptime(impl)` declaration.
-// The scanner records one per detected decl in the comptimeBindings
-// map; call-site detection looks up call expression Funs in this map.
+// comptimeBinding describes a `var X = q.Comptime(impl)` or
+// `var X = q.NestedComptime(impl)` declaration. The scanner records
+// one per detected decl in the comptimeBindings map; call-site
+// detection looks up call expression Funs in this map.
 type comptimeBinding struct {
 	// Ident is the LHS variable name (e.g. `fib`).
 	Ident *ast.Ident
@@ -609,6 +610,11 @@ type comptimeBinding struct {
 	// rewriter replaces this span with Impl's span so the runtime
 	// var ends up as `var X = func(...) { ... }`.
 	MarkerCall *ast.CallExpr
+	// IsNested differentiates q.NestedComptime from q.Comptime. When
+	// true, every call site of this binding is folded by spawning a
+	// per-recursion subprocess via q.ForkComptime (with on-disk
+	// cache), instead of inlining the impl into one synthesis program.
+	IsNested bool
 }
 
 // comptimeBindings is the package-wide set of comptime-marked
@@ -647,7 +653,14 @@ func collectComptimeBindings(files []*ast.File) map[string]*comptimeBinding {
 				if !ok {
 					continue
 				}
-				if !isSelector(call.Fun, alias, "Comptime") {
+				isNested := false
+				switch {
+				case isSelector(call.Fun, alias, "Comptime"):
+					// q.Comptime — single-subprocess recursion.
+				case isSelector(call.Fun, alias, "NestedComptime"):
+					// q.NestedComptime — per-recursion subprocess with cache.
+					isNested = true
+				default:
 					continue
 				}
 				if len(call.Args) != 1 {
@@ -662,6 +675,7 @@ func collectComptimeBindings(files []*ast.File) map[string]*comptimeBinding {
 					Impl:       lit,
 					Decl:       gd,
 					MarkerCall: call,
+					IsNested:   isNested,
 				}
 			}
 		}
@@ -708,23 +722,34 @@ func scanTopLevelVarSpec(fset *token.FileSet, path string, gd *ast.GenDecl, alia
 				}
 			}
 		}
-		// q.AtCompileTime / q.AtCompileTimeCode / q.Comptime at package
-		// level. Each ValueSpec can declare multiple names, but for
-		// this shape we require single-name, single-value pairs.
+		// q.AtCompileTime / q.AtCompileTimeCode / q.Comptime / q.NestedComptime
+		// at package level. Each ValueSpec can declare multiple names,
+		// but for this shape we require single-name, single-value pairs.
 		if len(vs.Names) == 1 && len(vs.Values) == 1 {
 			if call, ok := vs.Values[0].(*ast.CallExpr); ok {
-				// q.Comptime(impl) — record a familyComptimeDecl
-				// shape so the rewriter unwraps the marker call.
-				if isSelector(call.Fun, alias, "Comptime") {
+				// q.Comptime / q.NestedComptime(impl) — record a
+				// familyComptimeDecl shape so the rewriter unwraps
+				// the marker call. Both share the same scanner +
+				// runtime path (IIFE-self-recursive form). The
+				// IsNested flag on the binding distinguishes them
+				// when the synthesis pass folds call sites.
+				ctName := ""
+				switch {
+				case isSelector(call.Fun, alias, "Comptime"):
+					ctName = "Comptime"
+				case isSelector(call.Fun, alias, "NestedComptime"):
+					ctName = "NestedComptime"
+				}
+				if ctName != "" {
 					if len(call.Args) != 1 {
 						*diags = append(*diags, diagAt(fset, path, call.Pos(),
-							fmt.Sprintf("q.Comptime takes exactly one argument (the impl func literal); got %d", len(call.Args))))
+							fmt.Sprintf("q.%s takes exactly one argument (the impl func literal); got %d", ctName, len(call.Args))))
 						continue
 					}
 					lit, ok := call.Args[0].(*ast.FuncLit)
 					if !ok {
 						*diags = append(*diags, diagAt(fset, path, call.Pos(),
-							"q.Comptime: argument must be a function literal (anonymous function), not a function reference or variable"))
+							fmt.Sprintf("q.%s: argument must be a function literal (anonymous function), not a function reference or variable", ctName)))
 						continue
 					}
 					*shapes = append(*shapes, callShape{
