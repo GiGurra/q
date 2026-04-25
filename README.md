@@ -1,4 +1,4 @@
-# q — the question-mark operator for Go
+# Go wild with Q, the funkiest -toolexec preprocessor
 
 [![CI Status](https://github.com/GiGurra/q/actions/workflows/ci.yml/badge.svg)](https://github.com/GiGurra/q/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/GiGurra/q)](https://goreportcard.com/report/github.com/GiGurra/q)
@@ -6,7 +6,7 @@
 
 > **Experimental** — APIs and internals may change. Use at your own risk.
 
-`q` brings the flat shape Rust has with `?` and Swift has with `try` to Go. Each `q.Try(...)` / `q.NotNil(...)` / chain call is rewritten at compile time into the conventional `if err != nil { return …, err }` form. Delivered as a `-toolexec` preprocessor — you opt in per-module.
+`q` is a `-toolexec` preprocessor that implements rejected Go language proposals (the `?` / `try` operator) plus a playground of helpers Go didn't ship: context cancellation checkpoints, futures and fan-in, panic→error recovery, mutex sugar, runtime preconditions, dev-time prints and `slog.Attr` builders. Every `q.*` call is rewritten at compile time into ordinary Go — call sites read flat, generated code is identical to hand-written error forwarding, runtime overhead is zero. You opt in per-module.
 
 ```go
 // Without q
@@ -30,7 +30,7 @@ func loadUser(id int) (User, error) {
 }
 ```
 
-The withdrawn Go [`try` proposal](https://github.com/golang/go/issues/32437) is the same idea, delivered as a preprocessor instead of a language change.
+The withdrawn Go [`try` proposal](https://github.com/golang/go/issues/32437) is the seed; q ships that idea (and a handful of others) as a preprocessor instead of waiting on a language change.
 
 ## Things you can do with q
 

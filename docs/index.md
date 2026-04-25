@@ -1,9 +1,9 @@
-# q
+# Go wild with Q, the funkiest -toolexec preprocessor
 
 [![CI Status](https://github.com/GiGurra/q/actions/workflows/ci.yml/badge.svg)](https://github.com/GiGurra/q/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/GiGurra/q)](https://goreportcard.com/report/github.com/GiGurra/q)
 
-The question-mark operator for Go. Each `q.Try(...)` / `q.NotNil(...)` / chain call is rewritten at compile time into the conventional `if err != nil { return …, err }` shape — call sites read flat, generated code is identical to hand-written error forwarding, runtime overhead is zero.
+`q` is a `-toolexec` preprocessor that implements rejected Go language proposals (the `?` / `try` operator) plus a playground of helpers Go didn't ship: context cancellation checkpoints, futures and fan-in, panic→error recovery, mutex sugar, runtime preconditions, dev-time prints and `slog.Attr` builders. Every `q.*` call is rewritten at compile time into ordinary Go — call sites read flat, generated code is identical to hand-written error forwarding, runtime overhead is zero.
 
 ```go
 // Without q

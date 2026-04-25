@@ -1,6 +1,6 @@
 site_name: q
 site_url: https://gigurra.github.io/q/
-site_description: The question-mark operator for Go, delivered as a -toolexec preprocessor
+site_description: Go wild with Q — the funkiest -toolexec preprocessor. Rejected Go language proposals plus a playground of helpers the language committee didn't ship.
 repo_url: https://github.com/GiGurra/q
 repo_name: GiGurra/q
 

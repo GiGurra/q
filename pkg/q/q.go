@@ -1,9 +1,15 @@
-// Package q is a question-mark operator for Go, delivered as a -toolexec
-// preprocessor. Each q.Try / q.NotNil call (and their chain-style siblings
-// q.TryE / q.NotNilE with .Err / .ErrF / .Catch / .Wrap / .Wrapf methods)
-// is rewritten at compile time into the conventional `if err != nil {
-// return … }` shape — flat call sites, identical generated code to
-// hand-written error forwarding, zero runtime overhead.
+// Package q is "Go wild with Q, the funkiest -toolexec preprocessor"
+// — a -toolexec preprocessor that implements rejected Go language
+// proposals (the ? / try operator) plus a playground of helpers Go
+// didn't ship: ctx cancellation checkpoints, futures and fan-in,
+// panic→error recovery, mutex sugar, runtime preconditions,
+// dbg!-style prints and slog.Attr builders. Each q.Try / q.NotNil
+// call (and their chain-style siblings q.TryE / q.NotNilE with
+// .Err / .ErrF / .Catch / .Wrap / .Wrapf / .RecoverIs / .RecoverAs
+// methods) is rewritten at compile time into the conventional
+// `if err != nil { return … }` shape — flat call sites, identical
+// generated code to hand-written error forwarding, zero runtime
+// overhead.
 //
 // Build contract:
 //
