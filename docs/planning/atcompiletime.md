@@ -149,14 +149,15 @@ Each phase is independently shippable. Don't merge phases.
 
 **Deliverable:** Compile-time loading of arbitrary structured data via the user's module. User can specify gob (for unexported fields) or binary (for fixed structs) instead of JSON.
 
-### Phase 3 — q.* in closures + caching + custom codecs (1-2 sessions)
+### Phase 3 — q.* in closures + custom codecs (1-2 sessions)
 
 **Scope:**
 - Closure body can use q.* (subprocess `go run` invoked with `-toolexec=q`).
 - Custom user-defined codecs (any type implementing `q.Codec[T]`).
-- Caching: hash the synthesized program (closure source + captured values + codec choices + Go version + module version) and skip re-running on cache hit. Cache lives next to `$GOCACHE`.
 
-**Deliverable:** Full graph of compile-time computations with arbitrary domain-specific encoders. Production-grade build cost.
+**Deliverable:** Full graph of compile-time computations with arbitrary domain-specific encoders.
+
+**Build caching:** Go's build cache handles incremental builds. Source unchanged → Go reuses the previously compiled artifact and the synthesis subprocess doesn't re-run. Source changed → full re-expansion. Closures must be deterministic for this to be sound.
 
 ## Implementation architecture
 
@@ -377,7 +378,6 @@ Per-phase fixtures under `internal/preprocessor/testdata/cases/`:
 **Phase 3:**
 - `atcompiletime_chained_run_ok/` — one AtCompileTime's output captured by another's closure; topo-sort works.
 - `atcompiletime_q_try_in_body_run_ok/` — closure body uses q.Try (subprocess invoked with -toolexec=q).
-- `atcompiletime_cache_hit/` — second build of same code uses cached result.
 
 ## $TMPDIR module setup details (Phase 2)
 
@@ -471,16 +471,11 @@ n := 102334155
 
 This bypasses the var+init() route. Detection: R is in the primitive set AND codec is JSONCodec (default). For other codecs even on primitive R, fall back to var+init() — keeps the codec-roundtrip symmetric.
 
-## Caching (Phase 3)
+## Build caching
 
-Cache key: hash of `(closure-body-source + sorted-list-of-imports + user-module-version + Go-version)`. Use SHA-256 or similar.
+q does not maintain its own cache. Go's build cache covers it: when the user's source is unchanged, Go reuses the previously compiled package artifact and the synthesis subprocess does not re-run. Source change triggers full re-expansion.
 
-Cache location: `$GOCACHE/q-comptime/` (next to Go's existing cache so it's cleaned when the user runs `go clean -cache`).
-
-Cache miss → subprocess runs, result written to cache.
-Cache hit → read cached result, skip subprocess.
-
-User module version: `git rev-parse HEAD` (fast for git repos; fallback to mtime sum of the module's source files). For Phase 3 to work without git, fall back to walking the module dir for source mtimes.
+This requires closures to be deterministic — same source must produce the same output run-to-run. Closures that read `time.Now()`, `os.Getenv()`, randomness, or other non-deterministic I/O break this assumption and should be avoided.
 
 ## Edge cases and caveats (across phases)
 
