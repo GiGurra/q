@@ -539,9 +539,11 @@ func topoSortAtCompileTime(fset *token.FileSet, calls []*atCallInfo) (Diagnostic
 	order := make([]int, 0, n)
 	for len(queue) > 0 {
 		// Stable order by source position so output is deterministic.
+		// Use OuterCall (always set) rather than Closure (nil for
+		// familyComptimeCall — those have no closure body).
 		sort.SliceStable(queue, func(a, b int) bool {
-			pa := fset.Position(calls[queue[a]].Closure.Pos())
-			pb := fset.Position(calls[queue[b]].Closure.Pos())
+			pa := fset.Position(calls[queue[a]].Sub.OuterCall.Pos())
+			pb := fset.Position(calls[queue[b]].Sub.OuterCall.Pos())
 			if pa.Filename != pb.Filename {
 				return pa.Filename < pb.Filename
 			}
@@ -561,7 +563,7 @@ func topoSortAtCompileTime(fset *token.FileSet, calls []*atCallInfo) (Diagnostic
 		// Cycle: pick any unsorted call's position.
 		for i := range calls {
 			if indegree[i] > 0 {
-				pos := fset.Position(calls[i].Closure.Pos())
+				pos := fset.Position(calls[i].Sub.OuterCall.Pos())
 				return Diagnostic{
 					File: pos.Filename,
 					Line: pos.Line,
