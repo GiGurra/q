@@ -323,13 +323,21 @@ type qSubCall struct {
 }
 
 // matchCase is one arm of a q.Match expression — either a
-// `q.Case(value, result)`, `q.CaseFn(value, fn)`, `q.Default(result)`,
-// or `q.DefaultFn(fn)`.
+// `q.Case(cond, result)` or a `q.Default(result)`. The scanner only
+// captures the source-level shape; the typecheck pass classifies
+// cond's role (value match vs predicate, eager vs lazy fn) by
+// inspecting its type via go/types, populating CondLazy / IsPredicate
+// / ResultLazy accordingly.
 type matchCase struct {
-	ValueExpr  ast.Expr // nil for default arm
-	ResultExpr ast.Expr // either the eager result OR the lazy fn — depends on IsLazy
+	CondExpr   ast.Expr // nil for default; cond expression for q.Case
+	ResultExpr ast.Expr
 	IsDefault  bool
-	IsLazy     bool // true for CaseFn / DefaultFn — emit `(fn)()` in the case body
+
+	// Populated by the typecheck pass once go/types resolves the
+	// expressions — see resolveMatch.
+	IsPredicate bool // cond is bool / func()bool — emit `if cond` instead of equality compare
+	CondLazy    bool // cond is func()V or func()bool — call before use
+	ResultLazy  bool // result is func()R — call before return
 }
 
 // cleanupKind is the inferred cleanup form for q.Open(...).Release()
@@ -1436,12 +1444,13 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 		}
 		return qSubCall{Family: familyMatch, InnerExpr: call.Args[0], MatchCases: cases, OuterCall: expr}, true, nil
 	}
-	// q.Case / q.CaseFn / q.Default / q.DefaultFn at the regular
-	// classifier path: silently no-match. They're only meaningful as
-	// q.Match's argument, where the q.Match scanner extracts them.
-	// Anywhere else the runtime panic stub fires.
+	// q.Case / q.CaseFn / q.Default / q.DefaultFn / q.Where / q.WhereFn
+	// at the regular classifier path: silently no-match. They're only
+	// meaningful as q.Match's argument, where the q.Match scanner
+	// extracts them. Anywhere else the runtime panic stub fires.
 	if isSelector(call.Fun, alias, "Case") || isSelector(call.Fun, alias, "CaseFn") ||
-		isSelector(call.Fun, alias, "Default") || isSelector(call.Fun, alias, "DefaultFn") {
+		isSelector(call.Fun, alias, "Default") || isSelector(call.Fun, alias, "DefaultFn") ||
+		isSelector(call.Fun, alias, "Where") || isSelector(call.Fun, alias, "WhereFn") {
 		return qSubCall{}, false, nil
 	}
 	// q.Tag[T](field, key) — both args MUST be string literals so
@@ -2179,42 +2188,31 @@ func matchExhaustiveSwitch(s *ast.SwitchStmt, alias string, fnType *ast.FuncType
 }
 
 // parseMatchArms walks q.Match's tail arguments (each expected to be
-// a q.Case / q.CaseFn / q.Default / q.DefaultFn call) and extracts
-// the (value, result, isDefault, isLazy) tuple per arm. Returns an
-// error when an argument doesn't match any expected shape; that
-// becomes a diagnostic.
+// a q.Case or q.Default call) and extracts the cond/result
+// expressions. The typecheck pass classifies each arm later, by
+// inspecting cond's resolved type — see resolveMatch.
 //
-// At most one default-arm (q.Default OR q.DefaultFn) is allowed.
-// q.Case and q.CaseFn may mix freely.
+// At most one q.Default arm is allowed.
 func parseMatchArms(args []ast.Expr, alias string) ([]matchCase, error) {
 	cases := make([]matchCase, 0, len(args))
 	defaultSeen := false
 	for i, a := range args {
 		call, ok := a.(*ast.CallExpr)
 		if !ok {
-			return nil, fmt.Errorf("q.Match argument %d is not a q.Case / q.CaseFn / q.Default / q.DefaultFn call", i+1)
+			return nil, fmt.Errorf("q.Match argument %d is not a q.Case / q.Default call", i+1)
 		}
 		switch {
 		case isSelector(call.Fun, alias, "Case"):
 			if len(call.Args) != 2 {
-				return nil, fmt.Errorf("q.Case must take exactly two arguments (value, result); got %d", len(call.Args))
+				return nil, fmt.Errorf("q.Case must take exactly two arguments (cond, result); got %d", len(call.Args))
 			}
 			cases = append(cases, matchCase{
-				ValueExpr:  call.Args[0],
+				CondExpr:   call.Args[0],
 				ResultExpr: call.Args[1],
-			})
-		case isSelector(call.Fun, alias, "CaseFn"):
-			if len(call.Args) != 2 {
-				return nil, fmt.Errorf("q.CaseFn must take exactly two arguments (value, func() R); got %d", len(call.Args))
-			}
-			cases = append(cases, matchCase{
-				ValueExpr:  call.Args[0],
-				ResultExpr: call.Args[1],
-				IsLazy:     true,
 			})
 		case isSelector(call.Fun, alias, "Default"):
 			if defaultSeen {
-				return nil, fmt.Errorf("q.Match has more than one default arm; at most one q.Default / q.DefaultFn is allowed")
+				return nil, fmt.Errorf("q.Match has more than one default arm; at most one q.Default is allowed")
 			}
 			if len(call.Args) != 1 {
 				return nil, fmt.Errorf("q.Default must take exactly one argument (the default result); got %d", len(call.Args))
@@ -2224,21 +2222,8 @@ func parseMatchArms(args []ast.Expr, alias string) ([]matchCase, error) {
 				IsDefault:  true,
 			})
 			defaultSeen = true
-		case isSelector(call.Fun, alias, "DefaultFn"):
-			if defaultSeen {
-				return nil, fmt.Errorf("q.Match has more than one default arm; at most one q.Default / q.DefaultFn is allowed")
-			}
-			if len(call.Args) != 1 {
-				return nil, fmt.Errorf("q.DefaultFn must take exactly one argument (a func() R); got %d", len(call.Args))
-			}
-			cases = append(cases, matchCase{
-				ResultExpr: call.Args[0],
-				IsDefault:  true,
-				IsLazy:     true,
-			})
-			defaultSeen = true
 		default:
-			return nil, fmt.Errorf("q.Match argument %d is not a q.Case / q.CaseFn / q.Default / q.DefaultFn call", i+1)
+			return nil, fmt.Errorf("q.Match argument %d is not a q.Case / q.Default call", i+1)
 		}
 	}
 	return cases, nil

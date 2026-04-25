@@ -1,0 +1,22 @@
+sign(5): positive
+sign(-3): negative
+sign(0): zero
+bucket(0): zero
+bucket(150): big
+bucket(42): answer
+bucket(-1): negative
+bucket(7): ordinary
+bumpsLookup(7): matches threshold lookups=1
+bumpsLookup(8): doesn't match threshold lookups=1
+usesPredicateFn(5): positive (via fn)
+usesPredicateFn(-5): non-positive
+lazyResults(0): zero hits=1
+lazyResults(5): pos hits=1
+lazyResults(-5): neg hits=1
+describe(Red): warm
+describe(Green): natural
+describe(Blue): cool
+category("alpha"): A
+category("zebra"): Z-prefixed
+category("longish"): long
+category("hi"): misc

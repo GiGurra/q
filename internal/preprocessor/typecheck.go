@@ -517,44 +517,91 @@ func resolveMatch(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPath s
 		}
 		return p.Name()
 	}
+	// Resolve the matched value's type V (used to classify each cond).
+	var matchedType types.Type
 	if tv, ok := info.Types[sc.InnerExpr]; ok && tv.Type != nil {
-		sc.EnumTypeText = types.TypeString(tv.Type, qualifier)
+		matchedType = tv.Type
+		sc.EnumTypeText = types.TypeString(matchedType, qualifier)
 	}
-	// Result type from the first arm whose result expression
-	// resolves cleanly. For q.Case / q.Default the result expr's
-	// type IS R. For q.CaseFn / q.DefaultFn the result expr is a
-	// `func() R` — unwrap the func's single return.
-	var resultArm *matchCase
+
+	// Classify every q.Case arm's cond by its resolved type:
+	//   matched-value-typed → value match
+	//   bool                → predicate
+	//   func() V            → lazy value match
+	//   func() bool         → lazy predicate
+	// Diagnostic for any other shape — the user wrote something
+	// nonsensical for q.Case's first arg.
 	for i := range sc.MatchCases {
 		mc := &sc.MatchCases[i]
-		if !mc.IsDefault {
-			resultArm = mc
+		if mc.IsDefault {
+			continue
+		}
+		tv, ok := info.Types[mc.CondExpr]
+		if !ok || tv.Type == nil || matchedType == nil {
+			continue
+		}
+		if d, ok := classifyMatchCond(fset, sc, mc, tv.Type, matchedType, qualifier); ok {
+			return d, true
+		}
+	}
+
+	// Result type — q.Case / q.Default's result is R-typed; the first
+	// non-default arm's result Type IS R. Used by the rewriter to
+	// spell the IIFE's return type.
+	for i := range sc.MatchCases {
+		mc := &sc.MatchCases[i]
+		if mc.IsDefault {
+			continue
+		}
+		if tv, ok := info.Types[mc.ResultExpr]; ok && tv.Type != nil {
+			sc.ResolvedString = types.TypeString(tv.Type, qualifier)
 			break
 		}
 	}
-	if resultArm == nil {
+	if sc.ResolvedString == "" {
+		// All non-default arms unresolved — try the default arm.
 		for i := range sc.MatchCases {
 			mc := &sc.MatchCases[i]
-			if mc.IsDefault {
-				resultArm = mc
+			if !mc.IsDefault {
+				continue
+			}
+			if tv, ok := info.Types[mc.ResultExpr]; ok && tv.Type != nil {
+				sc.ResolvedString = types.TypeString(tv.Type, qualifier)
 				break
 			}
 		}
 	}
-	if resultArm != nil {
-		if tv, ok := info.Types[resultArm.ResultExpr]; ok && tv.Type != nil {
-			resultType := tv.Type
-			if resultArm.IsLazy {
-				if sig, isSig := tv.Type.(*types.Signature); isSig && sig.Results().Len() == 1 {
-					resultType = sig.Results().At(0).Type()
-				}
-			}
-			sc.ResolvedString = types.TypeString(resultType, qualifier)
+
+	// Predicate-arm rule: when any arm is a predicate (bool / func()
+	// bool cond) the if-chain shape can't statically cover the value
+	// space, so a q.Default arm is required.
+	hasPredicate := false
+	hasDefaultArm := false
+	for _, mc := range sc.MatchCases {
+		if mc.IsPredicate {
+			hasPredicate = true
 		}
+		if mc.IsDefault {
+			hasDefaultArm = true
+		}
+	}
+	if hasPredicate && !hasDefaultArm {
+		pos := fset.Position(sc.OuterCall.Pos())
+		return Diagnostic{
+			File: pos.Filename,
+			Line: pos.Line,
+			Col:  pos.Column,
+			Msg:  "q: q.Match with a predicate q.Case (bool or func() bool cond) requires a q.Default(...) arm — predicate matches can't be statically covered for exhaustiveness.",
+		}, true
 	}
 
 	// Coverage check: only when the value type is an enum (defined
-	// named type with constants) AND no q.Default arm is present.
+	// named type with constants) AND no q.Default arm is present AND
+	// no predicate arms are involved (predicates can't be statically
+	// counted as covering specific constants).
+	if hasPredicate {
+		return Diagnostic{}, false
+	}
 	tv, ok := info.Types[sc.InnerExpr]
 	if !ok || tv.Type == nil {
 		return Diagnostic{}, false
@@ -590,7 +637,7 @@ func resolveMatch(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPath s
 			hasDefault = true
 			continue
 		}
-		if name, ok := exprAsConstObjName(mc.ValueExpr, info); ok && declared[name] {
+		if name, ok := exprAsConstObjName(mc.CondExpr, info); ok && declared[name] {
 			covered[name] = true
 		}
 	}
@@ -631,6 +678,64 @@ func resolveMatch(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPath s
 		}, true
 	}
 	return Diagnostic{}, false
+}
+
+// classifyMatchCond inspects a q.Case arm's cond type and populates
+// mc.IsPredicate / mc.CondLazy. Four shapes are accepted:
+//
+//	cond is matched-value-typed   → value match (no flags)
+//	cond is bool                  → predicate (IsPredicate)
+//	cond is func() V              → lazy value match (CondLazy)
+//	cond is func() bool           → lazy predicate (IsPredicate + CondLazy)
+//
+// Anything else returns a diagnostic — the user wrote something that
+// doesn't fit any sensible q.Case dispatch shape.
+//
+// Untyped-bool / untyped-int constants are normalised via the
+// matched-value comparison: an untyped 0 in a q.Case(0, ...) where
+// V is int is reported as type "int" (not "untyped int") via the
+// info.Types lookup, which already does the conversion.
+func classifyMatchCond(fset *token.FileSet, sc *qSubCall, mc *matchCase, condType, matchedType types.Type, qualifier types.Qualifier) (Diagnostic, bool) {
+	boolType := types.Typ[types.Bool]
+
+	// Direct shapes first.
+	if types.AssignableTo(condType, matchedType) {
+		// Plain value match — default flags.
+		return Diagnostic{}, false
+	}
+	if types.Identical(condType, boolType) {
+		mc.IsPredicate = true
+		return Diagnostic{}, false
+	}
+
+	// Function shapes: func() V or func() bool.
+	if sig, ok := condType.(*types.Signature); ok {
+		if sig.Params().Len() == 0 && sig.Results().Len() == 1 {
+			retType := sig.Results().At(0).Type()
+			if types.AssignableTo(retType, matchedType) {
+				mc.CondLazy = true
+				return Diagnostic{}, false
+			}
+			if types.Identical(retType, boolType) {
+				mc.CondLazy = true
+				mc.IsPredicate = true
+				return Diagnostic{}, false
+			}
+		}
+	}
+
+	pos := fset.Position(mc.CondExpr.Pos())
+	return Diagnostic{
+		File: pos.Filename,
+		Line: pos.Line,
+		Col:  pos.Column,
+		Msg: fmt.Sprintf(
+			"q: q.Case cond has type %s, which is not the matched value's type (%s), bool, func() %s, or func() bool",
+			types.TypeString(condType, qualifier),
+			types.TypeString(matchedType, qualifier),
+			types.TypeString(matchedType, qualifier),
+		),
+	}, true
 }
 
 // isReflectionFamily reports whether sc's family is one of the

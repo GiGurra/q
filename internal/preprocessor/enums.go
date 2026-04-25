@@ -108,46 +108,70 @@ func buildEnumOrdinalReplacement(fset *token.FileSet, src []byte, sub qSubCall, 
 		t, strings.Join(cases, "; "), argText)
 }
 
-// buildMatchReplacement emits an IIFE-wrapped switch for q.Match.
-// Shape:
+// buildMatchReplacement emits an IIFE-wrapped switch (or if-chain)
+// for q.Match.
 //
-//	(func() R {
-//	    switch <value> {
-//	    case <val1>: return <result1>
-//	    case <val2>: return <result2>
-//	    default:     return <defaultResult>   // when q.Default is present
-//	    }
-//	    var _zero R; return _zero             // when no q.Default
-//	}())
+// Two output shapes:
 //
-// V's type text comes from sub.EnumTypeText (populated by the
-// typecheck pass via go/types). R's type text comes from
-// sub.ResolvedString (the type of the first arm's result). When
-// either is missing — the typecheck pass couldn't resolve — we fall
-// back to `any` and let the Go compiler complain at the call site.
+//	switch shape (every arm is q.Case / q.CaseFn / q.Default):
+//	  (func() R {
+//	      switch <value> {
+//	      case <val1>: return <result1>
+//	      default:     return <defaultResult>   // when q.Default is present
+//	      }
+//	      var _zero R; return _zero             // when no q.Default
+//	  }())
+//
+//	if-chain shape (any arm is q.Where / q.WhereFn):
+//	  (func() R {
+//	      _v := <value>                          // bound only if any q.Case arm exists
+//	      if <pred1>            { return <r1> } // q.Where boolExpr is rewritten verbatim
+//	      if _v == <caseVal2>   { return <r2> } // q.Case mixed in if-chain
+//	      if (<predFn>)()       { return <r3> } // q.WhereFn pred fn called lazily
+//	      return <defaultResult>
+//	  }())
+//
+// R's type text comes from sub.ResolvedString. When missing, falls
+// back to `any`.
 func buildMatchReplacement(fset *token.FileSet, src []byte, sub qSubCall, subs []qSubCall, subTexts []string) string {
 	valueText := exprTextSubst(fset, src, sub.InnerExpr, subs, subTexts)
 	resultType := sub.ResolvedString
 	if resultType == "" {
 		resultType = "any"
 	}
+
+	hasPredicate := false
+	for _, mc := range sub.MatchCases {
+		if mc.IsPredicate {
+			hasPredicate = true
+			break
+		}
+	}
+	if hasPredicate {
+		return buildMatchIfChain(fset, src, sub, subs, subTexts, valueText, resultType)
+	}
+	return buildMatchSwitch(fset, src, sub, subs, subTexts, valueText, resultType)
+}
+
+// buildMatchSwitch is the all-value-equality shape — emits a Go
+// `switch` expression inside an IIFE. Used when every non-default
+// arm is a value match (no q.Case with bool / func()bool cond).
+func buildMatchSwitch(fset *token.FileSet, src []byte, sub qSubCall, subs []qSubCall, subTexts []string, valueText, resultType string) string {
 	var caseLines []string
 	var defaultText string
 	hasDefault := false
 	for _, mc := range sub.MatchCases {
 		resText := exprTextSubst(fset, src, mc.ResultExpr, subs, subTexts)
-		if mc.IsLazy {
-			// Lazy arm — call the user-supplied func only when
-			// this branch fires.
-			resText = "(" + resText + ")()"
-		}
 		if mc.IsDefault {
 			defaultText = resText
 			hasDefault = true
 			continue
 		}
-		valExpr := exprTextSubst(fset, src, mc.ValueExpr, subs, subTexts)
-		caseLines = append(caseLines, fmt.Sprintf("case %s: return %s", valExpr, resText))
+		condText := exprTextSubst(fset, src, mc.CondExpr, subs, subTexts)
+		if mc.CondLazy {
+			condText = "(" + condText + ")()"
+		}
+		caseLines = append(caseLines, fmt.Sprintf("case %s: return %s", condText, resText))
 	}
 	cases := joinWith(caseLines, "; ")
 	if hasDefault {
@@ -156,6 +180,64 @@ func buildMatchReplacement(fset *token.FileSet, src []byte, sub qSubCall, subs [
 	}
 	return fmt.Sprintf("(func() %s { switch %s { %s }; var _zero %s; return _zero }())",
 		resultType, valueText, cases, resultType)
+}
+
+// buildMatchIfChain handles the case where at least one arm is a
+// predicate (cond is bool or func() bool) — emits an if/return
+// chain instead of a switch, since Go's switch can't carry predicate
+// cases.
+//
+// _v binding: only emitted when at least one non-predicate arm
+// (value-match q.Case) exists, so it's never declared-and-unused.
+// When no value-match arms exist we still evaluate <value> for side
+// effects via `_ = <value>`.
+func buildMatchIfChain(fset *token.FileSet, src []byte, sub qSubCall, subs []qSubCall, subTexts []string, valueText, resultType string) string {
+	bindV := false
+	for _, mc := range sub.MatchCases {
+		if !mc.IsDefault && !mc.IsPredicate {
+			bindV = true
+			break
+		}
+	}
+
+	var lines []string
+	if bindV {
+		lines = append(lines, fmt.Sprintf("_v := %s", valueText))
+	} else {
+		lines = append(lines, fmt.Sprintf("_ = %s", valueText))
+	}
+
+	var defaultText string
+	hasDefault := false
+	for _, mc := range sub.MatchCases {
+		resText := exprTextSubst(fset, src, mc.ResultExpr, subs, subTexts)
+		if mc.IsDefault {
+			defaultText = resText
+			hasDefault = true
+			continue
+		}
+		condText := exprTextSubst(fset, src, mc.CondExpr, subs, subTexts)
+		if mc.CondLazy {
+			condText = "(" + condText + ")()"
+		}
+		if !mc.IsPredicate {
+			condText = "_v == " + condText
+		}
+		lines = append(lines, fmt.Sprintf("if %s { return %s }", condText, resText))
+	}
+
+	if hasDefault {
+		lines = append(lines, "return "+defaultText)
+	} else {
+		// The validateMatch pass should have rejected this combination
+		// already (no q.Default with predicate arms is a build error);
+		// emit a zero-value return as a defensive backstop so the
+		// rewritten expression still parses while the diagnostic
+		// surfaces.
+		lines = append(lines, fmt.Sprintf("var _zero %s; return _zero", resultType))
+	}
+
+	return fmt.Sprintf("(func() %s { %s }())", resultType, joinWith(lines, "; "))
 }
 
 // buildFieldsReplacement emits a literal `[]string{"a", "b", "c"}`

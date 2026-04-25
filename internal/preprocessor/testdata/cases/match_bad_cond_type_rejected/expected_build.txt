@@ -1,0 +1,1 @@
+q.Case cond has type string, which is not the matched value's type (int), bool, func() int, or func() bool

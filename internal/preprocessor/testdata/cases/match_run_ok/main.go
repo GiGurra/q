@@ -67,10 +67,12 @@ func sideEffect(name string) string {
 }
 
 func lazyDescribe(c Color) string {
+	// All result expressions are source-rewritten by the preprocessor,
+	// so sideEffect only fires for the matching arm.
 	return q.Match(c,
-		q.CaseFn(Red, func() string { return sideEffect("warm") }),
-		q.CaseFn(Green, func() string { return sideEffect("natural") }),
-		q.CaseFn(Blue, func() string { return sideEffect("cool") }),
+		q.Case(Red, sideEffect("warm")),
+		q.Case(Green, sideEffect("natural")),
+		q.Case(Blue, sideEffect("cool")),
 	)
 }
 
@@ -90,17 +92,18 @@ func main() {
 	out := lazyDescribe(Green)
 	fmt.Printf("lazyDescribe(Green) = %s sideEffects=%d\n", out, sideEffectCount)
 
-	// q.DefaultFn — only fires when no value arm matches.
+	// Lazy q.Default — source-rewritten, only fires when no q.Case
+	// matches.
 	sideEffectCount = 0
 	out = q.Match("xyz",
 		q.Case("a", "alpha"),
-		q.DefaultFn(func() string { return sideEffect("default") }),
+		q.Default(sideEffect("default")),
 	)
 	fmt.Printf("DefaultFn miss = %s sideEffects=%d\n", out, sideEffectCount)
 	sideEffectCount = 0
 	out = q.Match("a",
 		q.Case("a", "alpha"),
-		q.DefaultFn(func() string { return sideEffect("default") }),
+		q.Default(sideEffect("default")),
 	)
 	fmt.Printf("DefaultFn match = %s sideEffects=%d\n", out, sideEffectCount)
 }

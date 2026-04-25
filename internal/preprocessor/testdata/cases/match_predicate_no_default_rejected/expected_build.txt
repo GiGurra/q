@@ -1,0 +1,1 @@
+q.Match with a predicate q.Case (bool or func() bool cond) requires a q.Default(...) arm
