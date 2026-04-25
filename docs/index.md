@@ -37,6 +37,7 @@ Around that core sit a handful of orthogonal helpers — context cancellation, f
 
 | Helper | What it does |
 |--------|--------------|
+| [`q.AtCompileTime` / `q.AtCompileTimeCode`](api/atcompiletime.md) | Run pure Go code at preprocessor time and splice the result as a value (or as parsed source code) at the call site. The universal escape hatch every other compile-time helper is a special case of. Recursive — closures can contain further `q.AtCompileTime` calls (each level becomes a deeper compiler invocation). |
 | [`q.As` / `q.AsE`](api/as.md) | Comma-ok specialised to type assertion; bubbles `q.ErrBadTypeAssert` on miss. |
 | [`q.Async`, `q.Await` / `q.AwaitE`](api/async.md) | JS-flavour promises on top of goroutines + channels. |
 | [`q.AwaitAll` / `q.AwaitAny`](api/await_multi.md) | Fan-in over many futures: gather all (`[]T`) or first-success-wins (`T`). |

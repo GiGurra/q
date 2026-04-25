@@ -538,6 +538,83 @@ Picking up this work fresh:
 - **Should the closure see the call-site's package context?** Phase 2: yes, via importing the user's package. Phase 1: no (stdlib only).
 - **What about `q.AtCompileTime` inside a generic function?** R is concrete at instantiation, but the preprocessor sees the generic source. Reject in Phase 1 — needs the generic instantiation point's type info, which lives at the call site, not the declaration. Phase 3 could lift this if there's demand.
 
+## Phase 4 — code generation (macros) and recursive comptime — SHIPPED
+
+Both pieces shipped:
+
+- **Phase 4.2** (recursive comptime): the recursion-rejection diagnostic in `validateAtCompileTime` was lifted; the existing `-toolexec=<qBin>` passthrough on the synthesis subprocess (added in Phase 3) was already enough — q.AtCompileTime calls inside a closure body get processed by a recursive q invocation that synthesizes its own `.q-comptime-<hash>/` directory. Fixture `atct_recursive_run_ok` exercises 2-level deep nesting; `atct_fib_recursive_run_ok` and `atct_fib5_recursive_run_ok` compute fib(4) and fib(5) entirely at compile time across 4-5 levels of compiler-recursive q invocations.
+
+- **Phase 4.1** (code generation): new surface `q.AtCompileTimeCode[R any](fn func() string) R`. Closure returns a Go expression as a string; the rewriter splices the parsed expression in place of the call. Fixture `atct_codegen_run_ok` covers function-literal / string / multi-line switch; `atct_codegen_combined_run_ok` shows code-gen composing with cross-call captures (a code-gen closure references a value-returning AtCompileTime LHS, baking the value into the generated source); `atct_codegen_invalid_rejected` confirms malformed source fails the build.
+
+### Phase 4.1 — `q.AtCompileTime` returning code
+
+Today `q.AtCompileTime[R]` returns a value of type R. A Phase 4 extension would let the closure return Go SOURCE CODE that the rewriter parses + splices into the user's package as actual declarations. This is a real macro system — closer to Zig `comptime` or Lisp macros than to constexpr.
+
+**Surface sketch (working):**
+
+```go
+// User declares the type they want to fill in:
+var greet func(name string) string = q.AtCompileTimeCode(func() string {
+    // Closure builds source code for the function body.
+    return `func (name string) string { return "Hello, " + name }`
+})
+```
+
+The preprocessor:
+1. Runs the closure at preprocessor time (same subprocess infrastructure as Phase 1+2).
+2. Captures the returned string as a Go expression / declaration source.
+3. Parses the returned source via go/parser.
+4. Inlines the parsed AST at the call site (replacing the q.AtCompileTimeCode call with the parsed expression / decl).
+
+**Why this is a real macro system:** the closure doesn't return DATA, it returns CODE. The compiler then compiles the generated code as if the user had written it directly. Combined with Phase 3 (q.* allowed inside the closure), users can build templated Go code from data + iteration + branching, producing zero-overhead specialised functions per use site.
+
+**Use cases:**
+- Inline-specialised `Map`/`Filter`/etc. without runtime function-call overhead (the closure emits a flat `for { ... }` for the specific T, R).
+- Domain-specific languages that compile to Go (SQL builders, regex compilers, parser combinators).
+- Per-type "marshallers" generated from a struct's reflection — emit straight-line code per field.
+- Build-time configuration that emits typed accessor functions instead of map lookups.
+
+**Complications worth flagging:**
+
+- **Hygiene.** Variable names used by the generated code might clash with the surrounding scope. Either:
+  - The macro must use uniquified names (closure inserts `__hyg_<n>`-style prefixes).
+  - The rewriter alpha-renames bindings inside the spliced code so they don't collide.
+- **Scoping.** Inlined code sees the call site's scope (local vars, imports, etc). Variables in the call site that the generated code references need to be valid at the splice point. Static check + diagnostics at rewrite time.
+- **Diagnostic mapping.** Compile errors in the generated code need to map back to the closure's source lines via `//line` directives, or users get unactionable error messages pointing at the synthesised splice.
+- **Parsing fragments.** Returning an expression vs a statement vs a declaration changes what the rewriter splices. Either provide multiple flavours (`q.AtCompileTimeExpr`, `q.AtCompileTimeStmt`, `q.AtCompileTimeDecl`) or auto-detect based on the closure's R.
+- **Composition with regular q.AtCompileTime.** A code-generating closure might depend on a value-returning closure's output (e.g., the macro generates a switch over enum constants computed by an earlier AtCompileTime). The synthesis pass already does cross-call captures + topo-sort, so this composes — but the dependent macro would need to read the constant value at preprocessor time and stitch its source-text accordingly.
+
+**Variant idea: full-function generation.** Instead of a func variable initialiser, allow `q.GenerateFunc(target, recipe)` at file scope:
+
+```go
+var _ = q.GenerateFunc("greet", func() string {
+    return `func greet(name string) string { return "Hello, " + name }`
+})
+
+// Elsewhere — the function exists, type-checked, callable:
+greet("world")
+```
+
+Reaches into Zig territory: the user's package gains real declarations created by preprocessor-time computation. Same mechanism as `q.GenStringer` (file-synthesis pass) but the contents come from a closure rather than a fixed template.
+
+**Decision:** park as Phase 4 in this plan. Phase 1-3 is plenty of complexity to ship first; Phase 4 lights up after the value-returning core is solid and the value-vs-code split is well-understood by users.
+
+### Phase 4.2 — toolexec passthrough so q.* works at preprocessor time
+
+Phase 3 plans to invoke the comptime subprocess with `-toolexec=q` so closure bodies can use `q.Try` / `q.Match` / etc. The remaining piece is **passing the parent's compile flags into the comptime subprocess**, not just `-toolexec`. Without this, the comptime program might be compiled differently from how the user's actual build is configured (different build tags, different `-mod` mode, different `GOOS`/`GOARCH` target ABI tweaks).
+
+Concretely, the synthesis pass should construct the subprocess command as:
+
+```go
+cmd := exec.Command("go", "run", "-toolexec="+qBinPath, "./.q-comptime-<hash>")
+cmd.Dir = modRoot
+cmd.Env = inheritedEnv(parent)  // GOOS, GOARCH, GOMODCACHE, GOFLAGS sans toolexec
+```
+
+**Why flag-passthrough unlocks recursive comptime:** with `-toolexec=q` set on the comptime subprocess, q.* calls in closure bodies get rewritten before the subprocess compiles them. That includes recursive `q.AtCompileTime` calls inside closure bodies — the inner AtCompileTime's closure runs in *its own* sub-subprocess, which (transitively) inherits the same flag set, all the way down. Each recursion level adds one subprocess invocation; cycle detection prevents infinite recursion (the existing topo-sort doesn't catch cross-package cycles, so we'd need a per-recursion-level visited set).
+
+**Why parked, not Phase 3:** the simpler form of Phase 3 is "allow q.* in closure bodies but no recursive comptime". That's cheaper to ship and covers the 80% case (using q.Match / q.F / q.Snake inside an AtCompileTime closure). Recursive comptime is a 20% case that needs more careful flag handling and cycle detection. Once Phase 3 lands and someone asks for recursion, the Phase 4.2 work is small.
+
 ## Why this matters
 
 q.AtCompileTime is the one feature where every other macro is a special case:

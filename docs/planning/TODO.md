@@ -10,7 +10,9 @@ The persistent backlog for `q`. Mirrors the in-session task list so a fresh conv
 
 **Status update (2026-04-25):** #80 and #81 both shipped. Surface now covers the complete data-ops kit (sequential + parallel) without forcing users into a Either/Option monad. New backlog additions parked: `#82` (q.AtCompileTime — universal preprocessor-time evaluation escape hatch), `#83` (q.Open resource-escape detection + ARC for non-RAM resources), `#84` (q.Assemble[T] compile-time DI graph — ZIO ZLayer / google-wire shape), `#85` (coroutines — three tiers from iter.Seq sugar to stackless preprocessor-rewritten state machines).
 
-**Status update (2026-04-25, late):** Substantial run of small additions shipped this session: `#79` (Lax-default rule for q.Exhaustive / q.Match), `#85 tier 2` (q.Coro bidirectional coroutines), q.MapValues / q.MapKeys / q.MapEntries / q.Keys / q.Values (map ops), q.Pair / q.Zip / q.Unzip / q.ZipMap (zip family), q.Sort / q.SortBy / q.SortFunc / q.Min / q.Max / q.MinBy / q.MaxBy / q.Sum (sort + extrema). The data-ops surface is now genuinely complete. The next big feature on the roadmap is `#82` q.AtCompileTime — its full implementation plan lives at [atcompiletime.md](atcompiletime.md). **Read that document before starting #82 work.** Phase 1 (primitives + stdlib) is the entry point; Phases 2 (JSON pass-through + module access) and 3 (chained AtCompileTime + caching) follow.
+**Status update (2026-04-25, late):** Substantial run of small additions shipped this session: `#79` (Lax-default rule for q.Exhaustive / q.Match), `#85 tier 2` (q.Coro bidirectional coroutines), q.MapValues / q.MapKeys / q.MapEntries / q.Keys / q.Values (map ops), q.Pair / q.Zip / q.Unzip / q.ZipMap (zip family), q.Sort / q.SortBy / q.SortFunc / q.Min / q.Max / q.MinBy / q.MaxBy / q.Sum (sort + extrema). The data-ops surface is now genuinely complete.
+
+**Status update (2026-04-25, end):** `#82` q.AtCompileTime Phases 1-4 SHIPPED — including 4.1 (`q.AtCompileTimeCode` macro flavour) and 4.2 (recursive comptime). 17 e2e fixtures total. fib(5) computed entirely at compile time across 5 levels of compiler-recursive `q.AtCompileTime` invocations (~5s build time on a hot cache). Surface: `q.AtCompileTime[R](fn func() R, codec ...Codec[R]) R` with built-in JSONCodec / GobCodec / BinaryCodec. Cross-call captures + module-local imports + struct R + q.* (non-bubbling) inside closure bodies all work. Subprocess runs inside `<modRoot>/.q-comptime-<hash>/` so go.mod is inherited; passes `-toolexec=<qBin>` so q.* in closures get rewritten too. 12 e2e fixtures (8 positive + 4 negative). Phase 4 (code generation, recursive comptime, flag-passthrough) parked with full design notes in atcompiletime.md. Next highest-priority items: #72 (named arguments), #74 (sum types), #75 (phantom types), #78 (embed rewire / proven), #83 (q.Open escape detection), #84 (q.Assemble[T] DI graph).
 
 The big-picture trajectory: q is becoming a Scala-style compile-time macro toolkit for Go — every shipped helper folds at the AST level, runtime cost is zero, IDE sees ordinary Go. Each new feature reuses the typecheck pass + file-synthesis primitive established earlier.
 
@@ -119,6 +121,8 @@ The features below all fit q's model: parse as valid Go, rewrite at compile time
   **Rewriter sketch:** types pass resolves T, walks its method set / fields, splices a literal `[]string{"a","b","c"}` or `"foo"` at the call site. Inject `unsafe` import for `Size`.
 
 - [x] **#79 — Enforce `default:` on `q.Exhaustive` / `q.Match` for Lax-opted types** — shipped. See Done ledger.
+
+- [x] **#82 — `q.AtCompileTime[R](fn func() R, codec ...Codec[R]) R` and `q.AtCompileTimeCode[R](fn func() string) R` (compile-time evaluation + code generation)** — Phases 1, 2, 3, AND 4 shipped. See Done ledger and [atcompiletime.md](atcompiletime.md). Phase 4 includes both 4.1 (`q.AtCompileTimeCode` macro flavour — closure returns Go source code that the rewriter parses and splices) and 4.2 (recursive comptime — q.AtCompileTime nested inside a comptime closure, processed by a recursive `-toolexec=q` subprocess). Open follow-up: full Go-declaration generation (currently the spliced code must be a single expression; statements/declarations would need a different splice site).
 
 - [ ] **#72 — Named arguments via `q.Call` + `q.Named`.** Proposal #12854 (default arguments) and #29137 (named args) were both rejected. q can offer a workable shape for the named-args half.
 
@@ -251,36 +255,6 @@ The features below all fit q's model: parse as valid Go, rewrite at compile time
   4. New e2e fixture combining all three: a function that uses `q.Try`, `proven.True`, and `rewire.Mock` in the same body.
 
   **Open question:** does running multiple toolexec passes on the same compile produce correct results, or does pass N+1 trip on temp paths from pass N? Likely fine since each pass writes its own tempdir and the final argv just lists them all, but worth a smoke test before going deeper.
-
-- [ ] **#82 — `q.AtCompileTime[R](fn func() R) R` (compile-time evaluation).** Run pure Go code at preprocessor time and splice the result as a value at the call site. Universal escape hatch: every other compile-time helper (q.F, q.Snake, q.SQL, q.Match resolution, etc.) is a special case of this.
-
-  **The full implementation plan lives in [atcompiletime.md](atcompiletime.md)** — that document is the authoritative resume-point with:
-  - Surface API + restrictions
-  - Three-phase rollout (Phase 1: primitives + stdlib, Phase 2: JSON pass-through + module access, Phase 3: chained AtCompileTime + q.* in closures + caching)
-  - Implementation architecture per phase (which file gets what)
-  - $TMPDIR module setup mechanics
-  - JSON encoding details
-  - Edge cases and open questions
-  - Test fixture matrix per phase
-  - Cold-state resume checklist
-
-  Read atcompiletime.md before starting any work on this. The summary below is intentionally lean.
-
-  **Surface:** `func AtCompileTime[R any](fn func() R) R` — pure runtime stub, body panics if reached. The preprocessor rewrites every call site away.
-
-  **Phase summary** (full detail in [atcompiletime.md](atcompiletime.md)):
-  - **Phase 1** — primitives + stdlib only. Closure body uses stdlib + builtins, returns primitives (int/string/bool/float). $TMPDIR `go run` subprocess (no go.mod needed). Inline-literal splice at call site. Estimated 1-2 sessions.
-  - **Phase 2** — JSON pass-through + module access. Closure body can import the user's module. $TMPDIR with replace-directive go.mod. Complex R encoded as JSON; rewriter generates `init()` + `var` synthesis. Estimated 2-3 sessions.
-  - **Phase 3** — chained AtCompileTime + q.* in closures + caching. Topo-sort for chained calls, subprocess `-toolexec=q` for q.* support, hash-based cache. Estimated 1-2 sessions.
-
-  **Restrictions** (enforced at compile time, full list in atcompiletime.md):
-  - Argument MUST be a `*ast.FuncLit` literal (not a named-function reference / variable)
-  - No captures from enclosing scope (Phase 3 lifts: AtCompileTime results are allowed)
-  - R must be a primitive (Phase 1) / JSON-encodable (Phase 2+) / not a generic type parameter
-  - Closure body must be pure (no time / random / I/O of mutable state) — documented, not enforced
-  - No q.* in closure body (Phase 3 lifts)
-
-  **Why this matters.** It's the universal escape hatch every other compile-time helper is a special case of. Once it ships cleanly, future "I want a compile-time helper that does X" requests reduce to "wrap X in `q.AtCompileTime`."
 
 - [ ] **#83 — Resource-escape detection for `q.Open` (and longer-term ARC).** A `q.Open(...).Release(cleanup)` value is alive *only* until the enclosing function returns — the rewriter registers `defer cleanup(v)` at that scope. Letting the value escape that scope (returning it, handing it to a goroutine that outlives the function, storing it in a field) is a use-after-close in waiting. Detect at compile time and surface a diagnostic.
 
@@ -462,9 +436,37 @@ The features below all fit q's model: parse as valid Go, rewrite at compile time
 
 - [ ] **#16 — Multi-LHS from a single q.\*** (deferred). `v, w := q.Try(call())` where we'd want q.Try to split a multi-result producer. Requires new runtime helpers `q.Try2[T1, T2]` / `q.Try3` and matching rewrite templates. The hoist infrastructure already handles *incidental* multi-LHS (where the RHS call itself returns multi, and a q.* is nested in its args — see `multiLHS` in the hoist fixture). This parking-lot item is strictly the shape where q.* IS the multi-result producer; deprioritised in favour of #15 / #17.
 
+- [ ] **#86 — Zig-style native binary embedding for `q.AtCompileTime` results.** Today's q.AtCompileTime ships values from preprocessor-time to runtime via Codec encode/decode round-trips (default JSON). It works for arbitrary types but pays a runtime decode cost on every program startup, plus a one-time encode at preprocessor time. Zig sidesteps this entirely: comptime values become target-native bytes embedded directly in `.rodata` / `.data` sections, with linker relocations patching pointers. No serialization, no decode — the bytes are simply the type's natural in-memory representation.
+
+  **Zig pipeline (reference for the Go translation):**
+
+  1. **Sema / InternPool** — comptime values live in the compiler's interned tagged-union value representation. Identity preserved (same comptime allocation = same symbol).
+  2. **Lowering** — when a comptime value escapes to runtime, codegen walks it transitively and emits raw bytes per the target ABI memory layout: integer endianness, struct field offsets, slice = `{ptr, len}` pair, etc.
+  3. **Pointers become relocations** — pointer fields emit zero bytes plus a relocation entry; the linker patches addresses. Cycles handled because revisited values already have an assigned symbol.
+  4. **`@embedFile` is the trivial case** — file bytes stuffed verbatim into a `[N]u8` symbol in `.rodata`.
+
+  **Limitations Zig enforces:** no comptime pointers into runtime memory; no real heap allocator at comptime; `@ptrFromInt` of arbitrary integers can survive to runtime as opaque values but not be dereferenced at comptime; pointers to comptime-only types (`type`, `comptime_int`) can't escape; mutable comptime-pointer chains land in `.data` instead of `.rodata`.
+
+  **What this would look like in q:** instead of a runtime `init()` that decodes via Codec, the rewriter emits a `[N]byte` literal whose contents are the target-native struct bytes, plus an `unsafe.Slice` / `unsafe.Pointer` cast at the use site. For pointer-bearing types, separate symbols + Go's symbol-relocation machinery (which the gc compiler does support, used by `//go:linkname` and embedded data) chain them together.
+
+  **Why parked, not in active development:**
+
+  1. **Go has no public ABI guarantees.** Struct field offsets, padding, and even alignment depend on compiler version. JSON / Gob round-tripping is layout-agnostic; bytes-are-bytes embedding requires us to track gc's layout for the target arch + version. A Go upgrade could silently corrupt embedded values.
+  2. **Cross-arch builds get awkward.** A linux/amd64 build host preprocessing for a darwin/arm64 target would need to know the *target's* layout rules at preprocess time — not the host's. Doable (encoding/binary plus careful padding emulation) but non-trivial.
+  3. **The 90% case is satisfied by the codec route.** Decode cost on startup for a few kilobytes of static config is microseconds. The bytes-native path matters mostly for very large embedded tables (CRC tables, sin tables, parser state machines) where every kilobyte of binary size + every microsecond of init() time count.
+  4. **Pointer-relocation machinery is invasive.** Emitting a `[N]byte` literal is one thing; emitting cross-symbol pointer relocations from the preprocessor would need either a custom object-file pass (huge lift) or an `init()` that fixes pointers at startup using `unsafe.Add` / `unsafe.Pointer` arithmetic on a known base — at which point we're back to runtime work.
+
+  **Realistic scope if pursued:** start with fixed-layout primitive arrays (`[N]int`, `[N]float64`, `[N]byte`) where Go's layout is well-defined. Emit a `var _qCt0_value = [...]int{1, 2, 3, ...}` Go literal at file scope. The Go compiler's existing constant-folding optimisations turn this into `.rodata` placement automatically — no preprocessor relocation work needed. That covers the "embed a 64KB CRC table" use case at zero runtime cost. Defer the pointer-relocation tier indefinitely; the codec route is good enough for everything else.
+
+  **When this matters:** if a real workload shows q.AtCompileTime decode time as a measurable startup-cost line item OR if the encoded JSON/Gob blob bloats the binary noticeably. Until then, the codec route earns its keep.
+
 ## Done
 
 A short ledger of what's shipped — newest first. Look at `git log` for the full story.
+
+- **#82 (Phases 1-4) — q.AtCompileTime[R] / q.AtCompileTimeCode[R].** Phase 4 builds on the Phases 1-3 entry below: 4.1 adds `q.AtCompileTimeCode[R](fn func() string) R` (the macro flavour — closure returns Go source; rewriter parses + splices the expression); 4.2 lifts the recursion ban on q.AtCompileTime so a closure body may contain another q.AtCompileTime call, processed by a recursive `-toolexec=q` subprocess. Fixtures `atct_codegen_run_ok` (function literals, multi-line switches), `atct_codegen_combined_run_ok` (code-gen composing with value-returning AtCompileTime via cross-call captures), `atct_codegen_invalid_rejected` (malformed Go source fails the build), `atct_recursive_run_ok` (2-level nesting), `atct_fib_recursive_run_ok` (fib(4) across 4 levels), `atct_fib5_recursive_run_ok` (fib(5) across 5 levels — ~5s build time). Phase 4.1 implementation: new family `familyAtCompileTimeCode` in scanner; in `synthesizeAtCompileTimeMain` the result type is forced to `string` (closure body really returns string regardless of user-supplied R) and the JSON-encoded string is unquoted at resolution time; the unquoted source becomes the AtCTResolved text wrapped in parens (so the spliced expression remains a single expression). Phase 4.2 implementation: simply removed the q.AtCompileTime-in-closure-body diagnostic from `validateAtCompileTime` — Phase 3's `-toolexec=<qBin>` passthrough was already sufficient for recursion to "just work".
+
+- **#82 (Phases 1-3) — q.AtCompileTime[R](fn func() R, codec ...Codec[R]) R.** Run pure Go code at preprocessor time and splice the result as a value at the call site. Surface: function-literal arg + optional codec (default `q.JSONCodec[R]`; built-ins `q.GobCodec[R]` / `q.BinaryCodec[R]` plus user-supplied `Codec[T]` impls). Architecture: ONE synthesis program per package compile, all calls topo-sorted by inter-call captures (a closure may reference another q.AtCompileTime LHS variable; the synthesis pass rewrites the captured ident to `_qCt<N>` in the synthesized program). Subprocess runs inside `<modRoot>/.q-comptime-<hash>/` so it inherits the user's go.mod / replace directives / module deps for free — no separate go.mod synthesis. JSON output of all per-call codec-encoded values; rewriter parses + folds primitives to inline literals or emits `func _qCtFn<N>() R { decode(...) }` companion functions for non-primitives (function-call form so package-level user vars `var X = q.AtCompileTime(...)` see the decoded value at var-init time, before init() would run). Phase 3 lifts the q.* restriction inside closure bodies by passing `-toolexec=<qBin>` to the subprocess `go run` — q.Match / q.Upper / q.F / q.Snake / q.SQL etc work inside closures. Recursive q.AtCompileTime rejected (Phase 4). Fixtures: `atct_primitive_run_ok` (int/string/bool/float), `atct_cross_call_run_ok` (a→b→c chain), `atct_stdlib_run_ok` (md5/strings), `atct_complex_main_run_ok` (slices/maps in main pkg), `atct_subpkg_types_run_ok` (struct R from sibling pkg), `atct_module_local_run_ok` (calls into sibling helper pkg), `atct_cross_subpkg_run_ok` (package-level var initializer + cross-pkg AtCompileTime), `atct_combined_run_ok` (everything together), `atct_q_in_body_run_ok` (Phase 3 — q.Match / q.Upper / q.Snake / q.F inside closure), `atct_capture_local_rejected` (capture diagnostic), `atct_named_func_rejected` (named-fn diagnostic), `atct_recursive_rejected` (recursive AtCompileTime diagnostic). Phase 4 (code generation, recursive comptime, flag-passthrough) is a parked future enhancement designed in [atcompiletime.md §"Phase 4"](atcompiletime.md). Implementation lives in `pkg/q/atcompiletime.go` (surface), `internal/preprocessor/atcompiletime.go` (synthesis pass), with hooks in `scanner.go` (familyAtCompileTime + skip-funclit-bodies), `typecheck.go` (validateAtCompileTime + capture detection), `rewriter.go` (in-place dispatch + keep-alive injection), `userpkg.go` (pipeline wiring).
 
 - **#85 (tier 2) — q.Coro / Coroutine[I, O] (bidirectional coroutines).** Pure runtime helper backed by a goroutine + two channels (in / out). `q.Coro(body)` spawns the body; the caller drives via `.Resume(v) (O, bool)`, `.Close()`, `.Wait()`, `.Done()`. Closing is idempotent, propagates as channel close so the body's `for v := range in` loop terminates cleanly. Resume returns `(zero, false)` on body completion or after Close. Cooperative protocol — body must alternate read-from-in / write-to-out for each step or Resume blocks. Different I and O types per coroutine (generic in both). Fixture `coro_run_ok` covers doubler / running-sum / fibs-via-token / Resume-after-Close / two-input-then-return body / different I-O types / idempotent Close. Stable under -race -count=3. Tier 1 (iter.Seq sugar over q.Yield, preprocessor-rewritten) and tier 3 (stackless state machines) remain open under #85.
 
