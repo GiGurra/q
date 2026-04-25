@@ -80,14 +80,6 @@ The persistent backlog for `q`. A cold-state reader can pick up here without re-
 
   **Mechanism sketch.** Rewriter detects `q.AssemblyCache(ctx) != nil` at IIFE entry (one ctx.Value lookup, like the debug-trace prelude). When non-nil, each step emits `if v, ok := _qCache.Load(typeKey); ok { _qDep<N> = v.(T) } else { _qDep<N> = recipe(...); _qCache.Store(typeKey, _qDep<N>) }`. When nil, sequential serial emit unchanged.
 
-- **#88 — `q.Unique` / `q.UniqueFn` (Scala-style stdlib wrappers).** Fits the q-wraps-stdlib pattern (`q.Map` / `q.Filter` / `q.Fold` / `q.Reduce`). Surface:
-  - `q.Unique[T comparable](xs []T) []T` — order-preserving dedup via `map[T]struct{}` set; mirrors what people reach for `slices.Compact + slices.Sort` for, but without the sort step changing element order.
-  - `q.UniqueFn[T any](xs []T, eq func(T, T) bool) []T` — for non-comparable T or custom equality.
-
-  **Why over stdlib:** `slices.Compact` / `slices.CompactFunc` only dedup *adjacent* equal elements (you must sort first, which mutates order). The Scala-flavored `xs.distinct` is order-preserving and is the more common need at call sites. q.Unique earns its keep when order matters.
-
-  Skip `q.UniqueFnErr` — error path on an equality predicate is unusual; if a user needs error-bubble inside the predicate they can wrap it themselves with `q.Try`.
-
 ### Coroutines
 
 - **#85 tier 3 — Stackless coroutines (preprocessor-rewritten state machines).** The preprocessor analyses a function containing `q.Yield(v)` calls, identifies yield points as state-machine transitions, and rewrites the entire function into a state-machine struct with a `Resume(input) (output, done)` method. No goroutine. No channel. Just a struct holding the saved local variables and a `state int` field.

@@ -563,9 +563,14 @@ func Reduce[T any](slice []T, fn func(T, T) T) T {
 	return acc
 }
 
-// Distinct returns each unique element preserving first-occurrence
+// Unique returns each unique element preserving first-occurrence
 // order. T must be comparable (uses a map for O(n) deduplication).
-func Distinct[T comparable](slice []T) []T {
+//
+// Different from `slices.Compact`: that only collapses *adjacent*
+// equal elements, so you'd typically sort first (which mutates
+// element order). Unique is the order-preserving "Scala-style
+// distinct" people usually reach for.
+func Unique[T comparable](slice []T) []T {
 	if len(slice) == 0 {
 		return nil
 	}
@@ -576,6 +581,33 @@ func Distinct[T comparable](slice []T) []T {
 			continue
 		}
 		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	return out
+}
+
+// UniqueBy returns each element whose key (computed via fn) is seen
+// first, preserving input order. Useful when T isn't comparable, or
+// when you want dedup by some derived attribute (case-insensitive
+// strings, just one field of a struct, etc.).
+//
+//	emails := q.UniqueBy(rawEmails, strings.ToLower) // case-insensitive dedup
+//	users  := q.UniqueBy(users,  func(u User) int { return u.ID })
+//
+// The key fn runs once per input element. Only the first element
+// per key is kept.
+func UniqueBy[T any, K comparable](slice []T, fn func(T) K) []T {
+	if len(slice) == 0 {
+		return nil
+	}
+	seen := make(map[K]struct{}, len(slice))
+	out := make([]T, 0, len(slice))
+	for _, v := range slice {
+		k := fn(v)
+		if _, ok := seen[k]; ok {
+			continue
+		}
+		seen[k] = struct{}{}
 		out = append(out, v)
 	}
 	return out

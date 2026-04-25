@@ -338,7 +338,7 @@ func findAdmin(users []User) (User, error) {
 }
 ```
 
-Functional data ops over slices: `Map`, `FlatMap`, `Filter`, `GroupBy`, `Exists`, `ForAll`, `Find`, `Fold`, `Reduce`, `Distinct`, `Partition`, `Chunk`, `Count`, `Take`, `Drop`. Each fallible op ships in two flavours — bare and `…Err` returning `(result, error)` — designed to flow through `q.Try` / `q.TryE` for the bubble path. Pure runtime helpers; no `…E` chain flavour because `q.TryE(q.MapErr(…)).Wrap(…)` already produces that shape. Iterator (`iter.Seq`) variants are deferred to a follow-up wave. Inspiration: Scala collections and [samber/lo](https://github.com/samber/lo).
+Functional data ops over slices: `Map`, `FlatMap`, `Filter`, `GroupBy`, `Exists`, `ForAll`, `Find`, `Fold`, `Reduce`, `Unique`, `UniqueBy`, `Partition`, `Chunk`, `Count`, `Take`, `Drop`. Each fallible op ships in two flavours — bare and `…Err` returning `(result, error)` — designed to flow through `q.Try` / `q.TryE` for the bubble path. Pure runtime helpers; no `…E` chain flavour because `q.TryE(q.MapErr(…)).Wrap(…)` already produces that shape. Iterator (`iter.Seq`) variants are deferred to a follow-up wave. Inspiration: Scala collections and [samber/lo](https://github.com/samber/lo).
 
 ### Parallel data ops
 
