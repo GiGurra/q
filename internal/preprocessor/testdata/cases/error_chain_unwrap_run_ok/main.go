@@ -61,11 +61,13 @@ func openConn(mode string) (*Conn, error) {
 	return &Conn{id: 1}, nil
 }
 
+//q:no-escape-check
 func openWrappedF(mode string) (*Conn, error) {
 	c := q.OpenE(openConn(mode)).Wrapf("opening %q", mode).Release((*Conn).Close)
 	return c, nil
 }
 
+//q:no-escape-check
 func openWrappedNoF(mode string) (*Conn, error) {
 	c := q.OpenE(openConn(mode)).Wrap("opening").Release((*Conn).Close)
 	return c, nil

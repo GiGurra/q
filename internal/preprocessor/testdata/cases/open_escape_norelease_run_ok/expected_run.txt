@@ -1,0 +1,7 @@
+openWithNoRelease.id: 1
+openLocalUseOnly: ok
+openAndProcess: 3
+closedChan: 1
+closedChan: 2
+closedChan: 3
+chanFactoryWithDirective: v=99 ok1=true ok2=false

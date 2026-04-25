@@ -144,6 +144,44 @@ return  q.Open(dial()).Release(cleanup), nil                    // return-positi
 id   := identify(q.Open(dial()).Release(cleanup))               // hoist
 ```
 
+## Resource-escape detection
+
+A `q.Open(...).Release(...)` value is alive *only* until the enclosing function returns — that's when the deferred cleanup fires. Letting the value escape that scope is a use-after-close in waiting. The preprocessor catches the obvious shapes and fails the build with a diagnostic.
+
+Three death events make a binding "dead" from a given source point onward:
+
+1. **`q.Open(...).Release(...)` itself** — auto-defers cleanup. Dead from the assign line.
+2. **`defer x.Close()`** — explicit user-written defer. Dead from the defer line.
+3. **`x.Close()`** — synchronous close. Dead from this point onward.
+
+Note that `close(ch)` and `defer close(ch)` are NOT death events. Receiving from a closed channel is idiomatic (`close(ch); return ch` is a legitimate finite-channel factory), so channels are exempt.
+
+Once dead, the binding cannot escape via:
+
+- `return c`
+- `go fn(c)` / `defer fn(c)` (other than the cleanup itself)
+- field / global / map / index store: `p.c = c`, `m[k] = c`, etc.
+- channel send: `ch <- c`
+
+One-hop alias tracking covers the common `c2 := c; return c2` shape. Deeper indirection (passing through function calls, returning from inner closures) is out of scope — flag-everything-that-might-escape produces too many false positives without a real flow analysis.
+
+`q.Open(...).NoRelease()` is the explicit "caller takes ownership" form and never makes the binding dead — return it freely.
+
+### `//q:no-escape-check` opt-out
+
+Some test fixtures (notably tests of q.Open's mechanism itself) intentionally factory out a closed resource so the caller can probe its post-close state. Mark such functions with a `//q:no-escape-check` directive:
+
+```go
+//q:no-escape-check
+func channelAutoInner() (chan int, error) {
+    ch := q.Open(makeChan()).Release()
+    ch <- 7
+    return ch, nil
+}
+```
+
+Real user code shouldn't need this — the patterns it suppresses are bug-shaped in production. The directive exists so we can write tests that verify q.Open's deferred close actually fires.
+
 ## See also
 
 - [Design](../design.md#21-bare-bubble) — why `.Release` is terminal

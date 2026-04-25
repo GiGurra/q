@@ -1,0 +1,1 @@
+c is returned after its close was registered (synchronous close happened earlier in this function); the caller would receive a closed/released resource

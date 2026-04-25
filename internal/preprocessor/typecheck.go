@@ -152,6 +152,12 @@ func checkErrorSlotsWithInfo(fset *token.FileSet, pkgPath, importcfgPath string,
 			}
 		}
 	}
+
+	// Resource-escape detection. Independent of the type-resolution
+	// passes above — purely syntactic, but it consults the scanner's
+	// classified shapes to recognise q.Open(...).Release(...) bindings.
+	diags = append(diags, checkResourceEscapes(fset, files, shapes)...)
+
 	return info, diags
 }
 

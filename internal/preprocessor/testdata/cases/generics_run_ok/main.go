@@ -50,6 +50,7 @@ func (b Box[T]) read() (T, error) { return b.v, b.err }
 // verify the defer fires with the generic type's value.
 var openGenericsLog []string
 
+//q:no-escape-check
 func takeGeneric[T any](produce func() (T, error), cleanup func(T)) (T, error) {
 	v := q.Open(produce()).Release(cleanup)
 	return v, nil
@@ -67,6 +68,7 @@ type Holder[T any] struct {
 	err error
 }
 
+//q:no-escape-check
 func (h Holder[T]) acquireWith(cleanup func(T)) (T, error) {
 	v := q.Open(h.supply()).Release(cleanup)
 	return v, nil

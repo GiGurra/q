@@ -23,6 +23,8 @@ func makeChan() (chan int, error) {
 // has fired. The trick: the auto-Release defer runs as
 // channelAutoInner returns, so the caller can probe the channel's
 // closed state to confirm the close happened.
+//
+//q:no-escape-check
 func channelAutoInner() (chan int, error) {
 	ch := q.Open(makeChan()).Release()
 	ch <- 7
@@ -93,6 +95,7 @@ func explicitRelease(closed *[]int) error {
 
 // --- OpenE chain composition: Wrap + auto Release. ---
 
+//q:no-escape-check
 func errCloserAutoWrap(closed *[]int) (*errCloser, error) {
 	v := q.OpenE(openErrCloser(44, closed)).Wrap("dial").Release()
 	return v, nil
@@ -107,6 +110,7 @@ func failingOpen() (*errCloser, error) {
 	return nil, errOpen
 }
 
+//q:no-escape-check
 func autoReleaseBubble() (*errCloser, error) {
 	v := q.Open(failingOpen()).Release()
 	return v, nil

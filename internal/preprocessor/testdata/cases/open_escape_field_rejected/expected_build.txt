@@ -1,0 +1,1 @@
+c is stored into a non-local destination after its close was registered (q.Open(...).Release(...) auto-defers cleanup); the caller would receive a closed/released resource

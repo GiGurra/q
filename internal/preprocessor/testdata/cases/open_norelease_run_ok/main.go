@@ -55,6 +55,8 @@ func noReleaseECatch() (*Conn, error) {
 }
 
 // regression: .Release still fires the defer cleanup.
+//
+//q:no-escape-check
 func releaseSuccess() (*Conn, error) {
 	conn := q.Open(dial(5, false)).Release(closeConn)
 	return conn, nil

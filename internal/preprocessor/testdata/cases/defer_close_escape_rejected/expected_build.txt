@@ -1,0 +1,1 @@
+c is returned after its close was registered (deferred close registered here); the caller would receive a closed/released resource

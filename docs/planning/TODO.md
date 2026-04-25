@@ -55,24 +55,7 @@ The persistent backlog for `q`. A cold-state reader can pick up here without re-
 
 ### Resource lifetime + dependency injection
 
-- **#83 — Resource-escape detection for `q.Open` (and longer-term ARC).** A `q.Open(...).Release(cleanup)` value is alive *only* until the enclosing function returns — the rewriter registers `defer cleanup(v)` at that scope. Letting the value escape that scope (returning it, handing it to a goroutine that outlives the function, storing it in a field) is a use-after-close in waiting. Detect at compile time and surface a diagnostic.
-
-  **Detect-and-reject phase (small, well-scoped).** The typecheck pass already knows every `q.Open` call site and which local binding holds the resource. Walk the function body for misuses:
-
-  1. **`return v` where v is a Release-bound resource.** Always a bug — the moment the function returns, `defer cleanup(v)` fires, so the caller gets a closed resource. Diagnostic: *"q.Open(...).Release-bound value escapes via return; use .NoRelease() (caller takes ownership) or scope the work inside this function."*
-  2. **`go fn(v)` / spawning a goroutine that captures v.** Goroutine-lifetime > function-lifetime → `cleanup(v)` fires while the goroutine still holds it. Diagnostic: *"q.Open(...).Release-bound value passed to goroutine that may outlive its scope; use .NoRelease() and manage cleanup explicitly, or join the goroutine before return."*
-  3. **`field = v` where field is on a struct receiver / global.** Same flavour — the field outlives the function. Same diagnostic shape.
-  4. **`channel <- v`** — value escapes through the channel; receiver may use it after defer fires. Diagnostic.
-
-  Edge case to handle gracefully: passing v to a *blocking* function call that doesn't escape — `process(v)` is fine, the call completes before defer runs. Detection is local-flow + escape-analysis-lite; for v3 we could lean on `go/ssa`'s actual escape analysis, but a syntactic over-approximation is enough for v1. Document the false-positive frontier (any function call could in principle stash v in a global; we only flag goroutine spawns + return + field-store + channel-send).
-
-  Build-out path:
-  - Add a per-`qSubCall` field `ReleaseBound bool`.
-  - In typecheck, walk each enclosing function's AST after the q.Open is bound; collect every reference site (`info.Uses[ident]` matching the binding) and flag escape patterns.
-  - Diagnostic carries `file:line:col` of the offending site, plus the originating Open's location.
-  - Negative fixtures under `internal/preprocessor/testdata/cases/open_escape_*_rejected/`.
-
-  **Long-term phase: ARC for non-RAM resources.** "Last-usage-site closes" is what Rust gets through linear types and what Swift / Objective-C get through reference counting. q's seed for this is already half-built: `q.Open` is the resource constructor, `Release` is the destructor, and the rewriter knows where every resource binding flows.
+- **#83 ARC for non-RAM resources (long-term).** "Last-usage-site closes" is what Rust gets through linear types and what Swift / Objective-C get through reference counting. q's seed is already half-built: `q.Open` is the resource constructor, `.Release` is the destructor, the rewriter knows where every resource binding flows, and the resource-escape detection pass identifies when a binding outlives its function.
 
   The ambitious version: track every reference site of an Opened resource (including escapes) and, when escape is OK (e.g. handed to a goroutine that joins), insert refcount inc/dec at each ownership-transfer point so the resource closes at the *actual* last usage rather than the function boundary. Concretely:
 
@@ -80,9 +63,7 @@ The persistent backlog for `q`. A cold-state reader can pick up here without re-
   - At each transfer site (return, channel send, field store, goroutine spawn), emit `rc.Add(1)`. At each scope exit, emit `if rc.Add(-1) == 0 { cleanup(value) }`.
   - The shim is invisible to user code — q.Open's existing surface (`Release`, `NoRelease`) stays — but the deferred cleanup becomes "decrement, free if last" instead of unconditional close.
 
-  This is a big lift: needs flow analysis (or a heavy hand: rewrite every reference into shim-method calls), needs to interop with raw resource access (sometimes you do want the underlying *Conn), and adds a real per-call atomic. Probably not worth it for the 90% case (functions that own their own resources). But it's the natural endgame if escape patterns turn out to be common.
-
-  **Detection-phase priority: ship before ARC.** The detect-and-reject pass alone closes the practical safety hole — most cases that would leak are caught with no runtime cost. ARC is a maybe-someday if profiles or user reports show resource ownership crosses function boundaries often enough that the diagnostics become annoying.
+  Big lift: needs flow analysis (or a heavy hand: rewrite every reference into shim-method calls), needs to interop with raw resource access (sometimes you do want the underlying `*Conn`), and adds a real per-call atomic. Probably not worth it for the 90% case (functions that own their own resources) — defer until profiles or user reports show resource ownership crosses function boundaries often enough that the existing diagnostics become annoying.
 
 - **#84 — `q.Assemble[T](recipes...)` — compile-time dependency-injection graph.** ZIO `ZLayer` / Scala-Cats `MakeFromInOut` / google/wire for Go, but resolved by q's preprocessor at the call site — no codegen step, no runtime reflection, no manual ordering. The user supplies a bag of recipes (functions producing a value, possibly with deps); q topologically sorts them and emits a flat sequence of calls that build the requested target.
 
