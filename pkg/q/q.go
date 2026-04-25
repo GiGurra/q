@@ -784,6 +784,57 @@ func SlogLine() slog.Attr {
 	return slog.Attr{}
 }
 
+// SlogFileLine returns a slog.Attr with key "file" and a value of
+// the form "<basename>:<line>" — the same compile-time capture as
+// q.SlogFile + q.SlogLine combined into one attr. Use it when you
+// want a single, parseable location string per log record:
+//
+//	slog.Info("event", q.SlogFileLine())
+//	// → slog.Info("event", slog.Any("file", "main.go:42"))
+func SlogFileLine() slog.Attr {
+	panicUnrewritten("q.SlogFileLine")
+	return slog.Attr{}
+}
+
+// File returns the basename of the call-site source file as a
+// plain string (e.g. "main.go"). Captured at compile time. Use
+// this when you want the location info as a primitive value
+// rather than a slog.Attr.
+func File() string {
+	panicUnrewritten("q.File")
+	return ""
+}
+
+// Line returns the integer line number of the call site as a
+// plain int. Captured at compile time.
+func Line() int {
+	panicUnrewritten("q.Line")
+	return 0
+}
+
+// FileLine returns "<basename>:<line>" as a plain string, e.g.
+// "main.go:42". Captured at compile time.
+func FileLine() string {
+	panicUnrewritten("q.FileLine")
+	return ""
+}
+
+// Expr returns the literal source text of its argument as a
+// string, captured at compile time. The argument is type-checked
+// (so it must be valid Go) but its runtime value is discarded:
+//
+//	q.Expr(a + b)         // → "a + b"
+//	q.Expr(user.Email)    // → "user.Email"
+//	q.Expr(items[i*2])    // → "items[i*2]"
+//
+// Useful for self-documenting error messages or labels that
+// reflect the exact source spelling of an expression. The type
+// parameter is `any`, so any expression form is accepted.
+func Expr[T any](v T) string {
+	panicUnrewritten("q.Expr")
+	return ""
+}
+
 // Recv receives from ch and forwards the value; the preprocessor
 // rewrites the call site into the inlined `v, _ok := <-ch; if !_ok
 // { return zero, q.ErrChanClosed }` shape. Use q.RecvE to supply a

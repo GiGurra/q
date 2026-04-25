@@ -62,6 +62,11 @@ const (
 	familySlogAttr      // q.SlogAttr(v) — in-place rewrite to slog.Any("<src>", v)
 	familySlogFile      // q.SlogFile() — in-place rewrite to slog.Any("file", "<basename>")
 	familySlogLine      // q.SlogLine() — in-place rewrite to slog.Any("line", <line-int>)
+	familySlogFileLine  // q.SlogFileLine() — in-place rewrite to slog.Any("file", "<basename>:<line>")
+	familyFile          // q.File() — in-place rewrite to "<basename>" string literal
+	familyLine          // q.Line() — in-place rewrite to <line-int> integer literal
+	familyFileLine      // q.FileLine() — in-place rewrite to "<basename>:<line>" string literal
+	familyExpr          // q.Expr(v) — in-place rewrite to "<src-text-of-v>" string literal
 	familyAwait       // q.Await(f) — Try-like bubble using q.AwaitRaw as the source
 	familyAwaitE      // q.AwaitE(f).<method> — TryE-like chain over q.AwaitRaw
 	familyRecoverAuto  // defer q.Recover()       — inject &err from enclosing sig
@@ -811,6 +816,46 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 			return qSubCall{}, false, fmt.Errorf("q.SlogLine takes no arguments; got %d", len(call.Args))
 		}
 		return qSubCall{Family: familySlogLine, OuterCall: expr}, true, nil
+	}
+	// Bare q.SlogFileLine — zero-arg in-place rewrite to
+	// slog.Any("file", "<basename>:<line>").
+	if isSelector(call.Fun, alias, "SlogFileLine") {
+		if len(call.Args) != 0 {
+			return qSubCall{}, false, fmt.Errorf("q.SlogFileLine takes no arguments; got %d", len(call.Args))
+		}
+		return qSubCall{Family: familySlogFileLine, OuterCall: expr}, true, nil
+	}
+	// Bare q.File — zero-arg in-place rewrite to "<basename>"
+	// string literal.
+	if isSelector(call.Fun, alias, "File") {
+		if len(call.Args) != 0 {
+			return qSubCall{}, false, fmt.Errorf("q.File takes no arguments; got %d", len(call.Args))
+		}
+		return qSubCall{Family: familyFile, OuterCall: expr}, true, nil
+	}
+	// Bare q.Line — zero-arg in-place rewrite to <line-int>.
+	if isSelector(call.Fun, alias, "Line") {
+		if len(call.Args) != 0 {
+			return qSubCall{}, false, fmt.Errorf("q.Line takes no arguments; got %d", len(call.Args))
+		}
+		return qSubCall{Family: familyLine, OuterCall: expr}, true, nil
+	}
+	// Bare q.FileLine — zero-arg in-place rewrite to
+	// "<basename>:<line>" string literal.
+	if isSelector(call.Fun, alias, "FileLine") {
+		if len(call.Args) != 0 {
+			return qSubCall{}, false, fmt.Errorf("q.FileLine takes no arguments; got %d", len(call.Args))
+		}
+		return qSubCall{Family: familyFileLine, OuterCall: expr}, true, nil
+	}
+	// Bare q.Expr — in-place rewrite to "<src-text>" string
+	// literal. The argument's value is discarded; only its source
+	// text is captured.
+	if isSelector(call.Fun, alias, "Expr") {
+		if len(call.Args) != 1 {
+			return qSubCall{}, false, fmt.Errorf("q.Expr must take exactly one argument (the expression to source-quote); got %d", len(call.Args))
+		}
+		return qSubCall{Family: familyExpr, InnerExpr: call.Args[0], OuterCall: expr}, true, nil
 	}
 	// Bare q.Recv — channel receive with close bubble.
 	if isSelector(call.Fun, alias, "Recv") {

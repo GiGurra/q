@@ -128,7 +128,7 @@ func rewriteFile(fset *token.FileSet, file *ast.File, src []byte, shapes []callS
 	for _, sh := range shapes {
 		for _, c := range sh.Calls {
 			switch c.Family {
-			case familyDebugSlogAttr, familySlogAttr, familySlogFile, familySlogLine:
+			case familyDebugSlogAttr, familySlogAttr, familySlogFile, familySlogLine, familySlogFileLine:
 				needsSlog = true
 			}
 			if needsSlog {
@@ -239,6 +239,16 @@ func renderShape(fset *token.FileSet, src []byte, sh callShape, counter *int, al
 			subTexts[i] = buildSlogFileReplacement(fset, sh.Calls[i])
 		case familySlogLine:
 			subTexts[i] = buildSlogLineReplacement(fset, sh.Calls[i])
+		case familySlogFileLine:
+			subTexts[i] = buildSlogFileLineReplacement(fset, sh.Calls[i])
+		case familyFile:
+			subTexts[i] = buildFileReplacement(fset, sh.Calls[i])
+		case familyLine:
+			subTexts[i] = buildLineReplacement(fset, sh.Calls[i])
+		case familyFileLine:
+			subTexts[i] = buildFileLineReplacement(fset, sh.Calls[i])
+		case familyExpr:
+			subTexts[i] = buildExprReplacement(fset, src, sh.Calls[i])
 		}
 	}
 
@@ -565,6 +575,47 @@ func buildSlogLineReplacement(fset *token.FileSet, sub qSubCall) string {
 	return fmt.Sprintf("slog.Any(%s, %d)", strconv.Quote("line"), pos.Line)
 }
 
+// buildSlogFileLineReplacement is the per-sub replacement for
+// q.SlogFileLine: `slog.Any("file", "<basename>:<line>")`. Both
+// pieces come from OuterCall's source position; the value is the
+// concatenation that's standard in Go error / log output.
+func buildSlogFileLineReplacement(fset *token.FileSet, sub qSubCall) string {
+	pos := fset.Position(sub.OuterCall.Pos())
+	value := fmt.Sprintf("%s:%d", filepath.Base(pos.Filename), pos.Line)
+	return fmt.Sprintf("slog.Any(%s, %s)", strconv.Quote("file"), strconv.Quote(value))
+}
+
+// buildFileReplacement is the per-sub replacement for q.File: a
+// raw string literal naming the basename of the call site's
+// source file. Returns a Go-quoted literal ready to substitute.
+func buildFileReplacement(fset *token.FileSet, sub qSubCall) string {
+	pos := fset.Position(sub.OuterCall.Pos())
+	return strconv.Quote(filepath.Base(pos.Filename))
+}
+
+// buildLineReplacement is the per-sub replacement for q.Line: the
+// integer line number of the call site.
+func buildLineReplacement(fset *token.FileSet, sub qSubCall) string {
+	pos := fset.Position(sub.OuterCall.Pos())
+	return strconv.Itoa(pos.Line)
+}
+
+// buildFileLineReplacement is the per-sub replacement for
+// q.FileLine: a raw string literal of the form "basename:line".
+func buildFileLineReplacement(fset *token.FileSet, sub qSubCall) string {
+	pos := fset.Position(sub.OuterCall.Pos())
+	return strconv.Quote(fmt.Sprintf("%s:%d", filepath.Base(pos.Filename), pos.Line))
+}
+
+// buildExprReplacement is the per-sub replacement for q.Expr: a
+// Go-quoted string literal of the argument's literal source text.
+// The argument's runtime value is discarded.
+func buildExprReplacement(fset *token.FileSet, src []byte, sub qSubCall) string {
+	innerStart := fset.Position(sub.InnerExpr.Pos()).Offset
+	innerEnd := fset.Position(sub.InnerExpr.End()).Offset
+	return strconv.Quote(string(src[innerStart:innerEnd]))
+}
+
 // isInPlaceFamily reports whether a family rewrites the call
 // expression in place (no bind/check block, no return) so the
 // substituted statement body is the entire output. Used to short-
@@ -573,7 +624,8 @@ func buildSlogLineReplacement(fset *token.FileSet, sub qSubCall) string {
 func isInPlaceFamily(f family) bool {
 	switch f {
 	case familyDebugPrintln, familyDebugSlogAttr,
-		familySlogAttr, familySlogFile, familySlogLine:
+		familySlogAttr, familySlogFile, familySlogLine, familySlogFileLine,
+		familyFile, familyLine, familyFileLine, familyExpr:
 		return true
 	}
 	return false
@@ -765,7 +817,9 @@ func renderSubCall(fset *token.FileSet, src []byte, sh callShape, subIdx int, su
 	case familyAsE:
 		text, fmtUsed, errorsUsed, err := renderAsE(fset, src, sh, sub, counter, subs, subTexts)
 		return text, fmtUsed, errorsUsed, false, err
-	case familyDebugPrintln, familyDebugSlogAttr, familySlogAttr, familySlogFile, familySlogLine:
+	case familyDebugPrintln, familyDebugSlogAttr,
+		familySlogAttr, familySlogFile, familySlogLine, familySlogFileLine,
+		familyFile, familyLine, familyFileLine, familyExpr:
 		// In-place expression transforms — the replacement text
 		// lives in subTexts[subIdx] and is applied when
 		// substituteSpans rebuilds the final stmt. No bind/check

@@ -146,5 +146,4 @@ id   := identify(q.Open(dial()).Release(cleanup))               // hoist
 
 ## See also
 
-- [Examples → Resources](../examples/resources.md)
 - [Design](../design.md#21-bare-bubble) — why `.Release` is terminal

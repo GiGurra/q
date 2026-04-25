@@ -6,7 +6,7 @@
 
 > **Experimental** — APIs and internals may change. Use at your own risk.
 
-`q` is a `-toolexec` preprocessor that implements rejected Go language proposals (the `?` / `try` operator) plus a playground of helpers Go didn't ship: context cancellation checkpoints, futures and fan-in, panic→error recovery, mutex sugar, runtime preconditions, dev-time prints and `slog.Attr` builders. Every `q.*` call is rewritten at compile time into ordinary Go — call sites read flat, generated code is identical to hand-written error forwarding, runtime overhead is zero. You opt in per-module.
+`q` is a `-toolexec` preprocessor that implements rejected Go language proposals. Every `q.*` call is rewritten at compile time into ordinary Go — call sites read flat, generated code is identical to hand-written error forwarding, runtime overhead is zero.
 
 ```go
 // Without q

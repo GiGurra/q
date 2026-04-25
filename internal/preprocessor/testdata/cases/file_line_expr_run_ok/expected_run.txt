@@ -1,0 +1,8 @@
+file=main.go
+line.type=int
+fileLine=main.go:N
+expr.add=a + b
+expr.call=sideEffect()
+expr.index=items["key"]
+expr.sideEffectCount=0
+level=INFO msg=event file=main.go:N

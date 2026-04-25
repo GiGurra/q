@@ -63,7 +63,5 @@ q.NotNil(somePtr)                  // fail loudly and early if nil
 
 ## See also
 
-- [Examples → Basic bubbling](../examples/basic.md)
-- [Examples → Error shaping](../examples/error-shaping.md)
 - [q.Try](try.md) — for `(T, error)` values
 - [Design](../design.md#2-the-user-facing-surface) — why the two families split

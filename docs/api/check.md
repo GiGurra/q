@@ -70,5 +70,4 @@ func shutdown(db *sql.DB, file *os.File) error {
 
 ## See also
 
-- [Examples → Basic bubbling](../examples/basic.md) — includes a `Check`-based shutdown sequence
 - [q.Try](try.md) — for `(T, error)` values

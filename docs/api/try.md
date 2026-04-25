@@ -127,8 +127,6 @@ Multi-LHS where `q.Try` itself is the multi-result producer (`v, w := q.Try(call
 
 ## See also
 
-- [Examples → Basic bubbling](../examples/basic.md)
-- [Examples → Error shaping](../examples/error-shaping.md)
 - [q.Check](check.md) — for functions returning just `error`
 - [q.NotNil](notnil.md) — for nil-pointer bubbles
 - [Design](../design.md) — rewriter contract, link gate, phasing
