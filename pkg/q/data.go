@@ -26,6 +26,35 @@ import "slices"
 // First wave is slice-input / slice-output only. Iterator (iter.Seq)
 // variants are deferred until usage patterns settle.
 
+// ForEach iterates slice and calls fn for each element, in input
+// order. Side-effect-only — no result collected. Almost identical to
+// a plain `for _, v := range slice { fn(v) }`; the helper exists so
+// "swap to parallel" is a one-line change to q.ParForEach without
+// restructuring the loop:
+//
+//	q.ForEach(items, func(it Item) { log(it) })
+//	q.ParForEach(ctx, items, func(it Item) { log(it) }) // parallel
+func ForEach[T any](slice []T, fn func(T)) {
+	for _, v := range slice {
+		fn(v)
+	}
+}
+
+// ForEachErr iterates slice and calls fn for each element, in input
+// order. First error short-circuits and is returned; subsequent
+// elements are not visited. Compose with q.Check / q.CheckE for the
+// bubble path:
+//
+//	q.Check(q.ForEachErr(rows, validateRow))
+func ForEachErr[T any](slice []T, fn func(T) error) error {
+	for _, v := range slice {
+		if err := fn(v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Map applies fn to each element of slice and returns the collected
 // results in input order. Output length always equals input length.
 //

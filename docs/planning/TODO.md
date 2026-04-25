@@ -8,6 +8,8 @@ The persistent backlog for `q`. Mirrors the in-session task list so a fresh conv
 
 **Next-up addition (2026-04-25):** Scala/lo-style functional data ops added to the backlog — `#80` (sequential `q.Map`/`FlatMap`/`Filter`/`GroupBy`/`Exists`/`ForAll`/`Find`/`Reduce`/`Distinct`/etc., each with bare + `…Err` + `…E` flavours), then `#81` (`q.ParMap`/`ParFlatMap`/etc., parallel via `runtime.NumCPU()` default with ctx-carried `q.WithPar(ctx, n)` override). Pure runtime helpers (no rewriter), so they slot under `qRuntimeHelpers`. **Order is settled: ship #80 first to lock the surface, then #81 layers on the same naming.**
 
+**Status update (2026-04-25):** #80 and #81 both shipped. Surface now covers the complete data-ops kit (sequential + parallel) without forcing users into a Either/Option monad. New backlog additions parked: `#82` (q.AtCompileTime — universal preprocessor-time evaluation escape hatch), `#83` (q.Open resource-escape detection + ARC for non-RAM resources), `#84` (q.Assemble[T] compile-time DI graph — ZIO ZLayer / google-wire shape), `#85` (coroutines — three tiers from iter.Seq sugar to stackless preprocessor-rewritten state machines).
+
 The big-picture trajectory: q is becoming a Scala-style compile-time macro toolkit for Go — every shipped helper folds at the AST level, runtime cost is zero, IDE sees ordinary Go. Each new feature reuses the typecheck pass + file-synthesis primitive established earlier.
 
 **Standing rule (bookkeeping).** When a task lands, move it to the "Done" section *in the same commit* with a one-line note about what shipped (and a commit ref if useful). When a new task is created, add it here *in the same commit* that creates the in-session task. The two views must not drift.
@@ -204,7 +206,7 @@ The features below all fit q's model: parse as valid Go, rewrite at compile time
 
 - [x] **#80 — Data manipulation helpers** — shipped. See Done ledger.
 
-- [ ] **#81 — Parallel data manipulation (q.ParMap / q.ParFlatMap and their `…Err` / `…E` variants).** Same surface as #80's Map/FlatMap (and ideally Filter / GroupBy if they earn it), but each fn invocation runs on a bounded worker pool. Default parallel limit: `runtime.NumCPU()`. Limit configurable via `context.Context`.
+- [x] **#81 — Parallel data manipulation** — shipped. See Done ledger.
 
   **Surface:**
   - `q.ParMap[T, R](ctx context.Context, slice []T, fn func(context.Context, T) R) []R`
@@ -380,6 +382,53 @@ The features below all fit q's model: parse as valid Go, rewrite at compile time
 
   **Implementation order.** Big lift. Realistically lands after #82 (q.AtCompileTime) so we can lean on its preprocessor-time evaluation primitives — though strictly speaking q.Assemble's resolution is type-only and doesn't need to *execute* anything at preprocess time, just topo-sort. Could ship as a standalone pass earlier.
 
+- [ ] **#85 — Coroutines (`q.Coro` / `q.Yield` / `q.Resume`).** Go has goroutines (concurrency, separate stacks) and Go 1.23 has `iter.Seq` (pull-based iteration). It does not have full coroutines: bidirectional, suspendable functions you can pass values into and out of cooperatively. q's preprocessor opens the door — we could rewrite a function with `q.Yield` points into a state machine, just as C# / Kotlin do for `async`/`await` and `yield`.
+
+  **Three escalating tiers, pick what earns its keep:**
+
+  **Tier 1 — `iter.Seq` sugar.** Smallest. A helper that takes a body using `q.Yield(v)` and produces a stdlib `iter.Seq[T]`:
+
+  ```go
+  // Today:
+  fibs := func(yield func(int) bool) {
+      a, b := 0, 1
+      for { if !yield(a) { return }; a, b = b, a+b }
+  }
+
+  // With q:
+  fibs := q.Generator(func() {
+      a, b := 0, 1
+      for { q.Yield(a); a, b = b, a+b }
+  })
+  ```
+
+  The rewriter wraps the body, threads the yield func through, and rewrites `q.Yield(v)` to `if !yield(v) { return }`. Result is a plain `iter.Seq[int]` — interop is free. Entirely sugar over Go 1.23's existing pull mechanism.
+
+  **Tier 2 — Bidirectional coroutines.** Like Lua / Python generators with `.send(v)`. Caller passes a value INTO the coroutine on each resume; the coroutine sees that value at its next `q.Yield(out)` call. Implementation: synchronous goroutine + two channels (in / out), with `Resume(v)` blocking until the coroutine yields again. Looks like:
+
+  ```go
+  pingPong := q.Coro(func(in <-chan int, out chan<- int) {
+      for v := range in {
+          out <- v * 2
+      }
+  })
+  reply := pingPong.Resume(21) // 42
+  ```
+
+  Implementation is goroutine + channels — no preprocessor work needed. Pure runtime helper. Real value is the API shape: Resume/Yield reads cleaner than channel ping-pong code does in production. Plus q.Resume could integrate with q.Try for fallible coroutines.
+
+  **Tier 3 — Stackless coroutines (preprocessor-rewritten state machines).** The ambitious version. The preprocessor analyzes a function containing `q.Yield(v)` calls, identifies yield points as state-machine transitions, and rewrites the entire function into a state machine struct with a `Resume(input) (output, done)` method. No goroutine. No channel. Just a struct holding the saved local variables and a `state int` field.
+
+  Pros: zero goroutine overhead; faster than tier 2 for tight loops (no channel send/receive on each yield).
+
+  Cons: this is THE hard problem. Closures over local variables need to lift to struct fields. Defer / recover semantics get weird (where does a deferred call go in a state machine?). Loops that span yield points need careful state tracking. C#'s async-rewriter took years to get right, and Go's syntax is more permissive (defer, goroutine spawning, panic/recover all interact with control flow).
+
+  Realistic scope: tier 3 might be too big for q. Tier 1 + tier 2 cover 80% of the real ergonomic wins. Park tier 3 unless someone has a specific tight-loop workload that justifies the lift.
+
+  **Why this fits q's mission.** "Things Go didn't ship" — coroutines are exactly that. iter.Seq came in 1.23 and is half the picture; q can complete the other half. Plus q.Yield reads better than the current `yield func(T) bool` callback dance, which most users find awkward the first 5 times they write it.
+
+  **Speculation: integration with q.Try.** A coroutine that bubbles via Try would be neat: `q.Try(coro.Resume(v))` if coro yields `(T, error)` shaped values. Would require both q.Try AND coro to know about each other's surface, but the preprocessor controls both, so this composes naturally.
+
 ### Future / parking lot
 
 - [ ] **#11 — `q.<X>` for is-nil-as-failure / comma-ok / etc.** Umbrella ticket — superseded by #20, #24. Keep open as the catch-all for any additional bubble triggers that surface later (e.g. `q.IfNil(x)` for error-less nil checks that don't want to spell `q.NotNilE(…).Err(ErrSomething)`).
@@ -425,6 +474,10 @@ The features below all fit q's model: parse as valid Go, rewrite at compile time
 ## Done
 
 A short ledger of what's shipped — newest first. Look at `git log` for the full story.
+
+- **#81 — Parallel data ops (q.ParMap / q.ParMapErr / q.ParFlatMap / q.ParFlatMapErr / q.ParFilter / q.ParFilterErr / q.ParEach / q.ParEachErr).** Bounded-concurrency variants of #80's data ops. Default worker count `runtime.NumCPU()`; configurable via `q.WithPar(ctx, n)` — limit travels on `context.Context`, NOT functional options or a builder. ctx-carried-limit was a deliberate departure from samber/lo PR #858 (functional options) and github.com/GiGurra/party (builder pattern); ctx-carried propagates through call graphs without re-threading and matches q's house style for ctx-aware helpers (`q.RecvCtx`, `q.AwaitCtx`, etc). All Par* take ctx as first arg; user fn in `…Err` variants takes ctx for early-exit. Bare versions IGNORE ctx cancellation (no error path to bubble it through); `…Err` versions honour cancellation and produce `ctx.Err()`. First-error wins via 1-buffered errCh + non-blocking send (no atomics needed); pattern from samber/lo PR #858. Two-phase select in dispatcher: priority check on errCh / ctx.Done before competing with work-channel send. Fixture `par_run_ok` covers ctx helpers (default = NumCPU, WithPar/WithParUnbounded round-trip, non-positive fallback), concurrency-cap-honoured (atomic max-active under WithPar(3)), composes with q.Try / q.TryE.Wrap, ctx-cancel returns context.Canceled, ParEachErr first-error-wins (limit=1 + slice-ends-at-erroring-element makes seen-before-err deterministic), ParMap unbounded all-spawned. Stable under `-race -count=5`.
+
+- **#80 — Functional data ops (q.Map / q.FlatMap / q.Filter / q.GroupBy / q.Exists / q.ForAll / q.Find / q.Fold / q.Reduce / q.Distinct / q.Partition / q.Chunk / q.Count / q.Take / q.Drop, plus their `…Err` variants).** Scala / samber/lo-style data manipulation over slices. Pure runtime helpers — no preprocessor rewriting. Each fallible op ships in two flavours: bare and `…Err` returning `(result, error)`. Designed to compose with q.Try / q.TryE: `q.Try(q.MapErr(rows, parseRow))` and `q.TryE(q.MapErr(...)).Wrap("ctx")` work without a separate `…E` chain flavour. q.Find returns (T, bool) for q.Ok / q.OkE composition. Fold = explicit-init Scala foldLeft (R may differ from T). Reduce = no-init T-only — returns Go zero on empty (sound when fn is monoidal — `fn(zero, x) == x` — silent footgun otherwise; reach for q.Fold with explicit identity for max/min/multiply); single-element slice returns the element unchanged. Iterator (iter.Seq) variants deferred. Fixture `data_run_ok` exercises every helper plus composition with the bubble family; q.Exists delegates to slices.ContainsFunc.
 
 - **golangci-lint fix: phantom type params on MatchCase.** v2.11 flagged `value V` and `result R` fields as unused. Replaced with `_ [0]V` / `_ [0]R` zero-size phantom-type-parameter pattern — flows V/R through the type-checker, no storage, no warnings. Commit `6203ec7`.
 

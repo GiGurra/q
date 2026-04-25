@@ -433,6 +433,23 @@ var qRuntimeHelpers = map[string]bool{
 	"Count":           true,
 	"Take":            true,
 	"Drop":            true,
+	"ForEach":          true,
+	"ForEachErr":       true,
+	"ParMap":           true,
+	"ParMapErr":        true,
+	"ParFlatMap":       true,
+	"ParFlatMapErr":    true,
+	"ParFilter":        true,
+	"ParFilterErr":     true,
+	"ParForEach":       true,
+	"ParForEachErr":    true,
+	"ParExists":        true,
+	"ParExistsErr":     true,
+	"ParForAll":        true,
+	"ParForAllErr":     true,
+	"WithPar":          true,
+	"WithParUnbounded": true,
+	"GetPar":           true,
 }
 
 // scanFile walks one parsed source file and returns the list of

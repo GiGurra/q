@@ -1,0 +1,38 @@
+default GetPar == NumCPU: true
+WithPar(8): 8
+WithParUnbounded sentinel: true
+WithPar(0) falls back: true
+WithPar(-5) falls back: true
+ParMap: [2 4 6 8 10]
+ParMap empty: []
+ParMap WithPar(3) cap honoured: true
+ParMapErr ok: [1 2 3]
+ParMapErr fail: true
+q.TryE(ParMapErr).Wrap fail: parsing: strconv.Atoi: parsing "y": invalid syntax
+ParMapErr cancel: true
+ParFlatMap: [1 10 2 20 3 30]
+ParFlatMapErr fail: flat-fail
+ParFilter: [2 4 6]
+ParFilterErr ok: [1 3]
+ParFilterErr fail: true
+ParForEach sum: 15
+ParForEachErr err: boom
+ParForEachErr seen-before-err: [1 2]
+ParForEachErr cancel: true
+ForEach sum: 15
+ForEachErr fail: true
+ParExists yes: true
+ParExists no: false
+ParExists empty: false
+ParExistsErr yes: true
+ParExistsErr fail: true
+ParForAll yes: true
+ParForAll no: false
+ParForAll empty: true
+ParForAllErr yes: true
+ParForAllErr no: false
+ParForAllErr fail: true
+ParMap cancelled (result len matches input): true
+ParMap cancelled (ctx.Err detectable): true
+ParMapErr timeout (DeadlineExceeded): true
+ParMap unbounded all-spawned: true

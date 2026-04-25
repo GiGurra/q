@@ -258,6 +258,26 @@ func findAdmin(users []User) (User, error) {
 
 Scala / samber/lo-style data ops over slices: `Map`, `FlatMap`, `Filter`, `GroupBy`, `Exists`, `ForAll`, `Find`, `Fold`, `Reduce`, `Distinct`, `Partition`, `Chunk`, `Count`, `Take`, `Drop`. Each fallible op ships in two flavours — bare and `…Err` returning `(result, error)` — designed to flow through `q.Try` / `q.TryE` for the bubble path. Pure runtime helpers; no `…E` chain flavour because `q.TryE(q.MapErr(…)).Wrap(…)` already produces that shape. Iterator (`iter.Seq`) variants are deferred to a follow-up wave.
 
+### Parallel data ops
+
+```go
+// Bounded concurrency, default = runtime.NumCPU(). Limit travels on ctx.
+ctx = q.WithPar(ctx, 8)
+results := q.Try(q.ParMapErr(ctx, urls, fetchURL))
+
+// Bare versions — read ctx for the limit but ignore cancellation.
+doubled := q.ParMap(ctx, items, expensive)
+
+// One goroutine per item (use sparingly).
+ctx2 := q.WithParUnbounded(ctx)
+results = q.ParMap(ctx2, items, expensive)
+
+// Side-effect fan-out + first-error-wins.
+q.Check(q.ParEachErr(ctx, files, upload))
+```
+
+`q.ParMap` / `q.ParMapErr`, `q.ParFlatMap` / `q.ParFlatMapErr`, `q.ParFilter` / `q.ParFilterErr`, `q.ParEach` / `q.ParEachErr`. The worker count rides on `context.Context` via `q.WithPar(ctx, n)` rather than per-call options — set once at the request top, every nested ParMap respects it without re-threading. ctx cancellation triggers `ctx.Err()` bubble in `…Err` variants. First error wins. Inspired by [samber/lo PR #858](https://github.com/samber/lo/pull/858) and [github.com/GiGurra/party](https://github.com/GiGurra/party); the ctx-carried-limit twist is q's house style.
+
 ### Compile-time reflection
 
 ```go
