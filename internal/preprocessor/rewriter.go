@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 )
 
 // rewriteFile applies every shape's replacement to a copy of src and
@@ -72,13 +73,21 @@ func rewriteFile(fset *token.FileSet, file *ast.File, src []byte, shapes []callS
 		// in DWARF — breaking debugger breakpoints set against the
 		// original source.
 		//
-		// Trailing newline is essential: the bytes immediately after
-		// the rewritten stmt can include a same-line trailing
-		// comment (`q.Check(...) // note`). Without the newline the
-		// user's `// note` would end up on the same physical line as
-		// the `//line` directive, making it "invalid line number"
-		// to the go parser.
-		if origPath != "" {
+		// Conditional on the rewrite actually adding lines: a span-
+		// substitution (in-place family, line-preserving) keeps the
+		// downstream mapping correct without a directive, AND
+		// shouldn't have a directive injected in the middle of
+		// container-statement headers (e.g. `if v := q.X(); cond`)
+		// where a stray newline would split the header invalidly.
+		//
+		// Trailing newline is essential when emitted: the bytes
+		// immediately after the rewritten stmt can include a same-
+		// line trailing comment (`q.Check(...) // note`). Without
+		// the newline the user's `// note` would end up on the same
+		// physical line as the `//line` directive.
+		origLines := bytes.Count(src[start:end], []byte{'\n'})
+		newLines := strings.Count(text, "\n")
+		if origPath != "" && newLines > origLines {
 			afterLine := fset.Position(sh.Stmt.End()).Line + 1
 			text = text + "\n//line " + origPath + ":" + strconv.Itoa(afterLine) + "\n"
 		}

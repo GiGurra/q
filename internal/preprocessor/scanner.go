@@ -472,6 +472,12 @@ func walkChildBlocks(fset *token.FileSet, path string, stmt ast.Stmt, alias stri
 	case *ast.BlockStmt:
 		walkBlock(fset, path, s, alias, fnType, shapes, diags)
 	case *ast.IfStmt:
+		if s.Init != nil {
+			scanContainerInit(fset, path, s.Init, alias, fnType, shapes, diags, "if")
+		}
+		if s.Cond != nil {
+			scanContainerExpr(fset, path, s, []ast.Expr{s.Cond}, alias, fnType, shapes, diags, "if")
+		}
 		walkBlock(fset, path, s.Body, alias, fnType, shapes, diags)
 		if s.Else != nil {
 			switch elseStmt := s.Else.(type) {
@@ -482,14 +488,31 @@ func walkChildBlocks(fset *token.FileSet, path string, stmt ast.Stmt, alias stri
 			}
 		}
 	case *ast.ForStmt:
+		if s.Init != nil {
+			scanContainerInit(fset, path, s.Init, alias, fnType, shapes, diags, "for")
+		}
+		if s.Post != nil {
+			scanContainerInit(fset, path, s.Post, alias, fnType, shapes, diags, "for")
+		}
+		if s.Cond != nil {
+			scanContainerExpr(fset, path, s, []ast.Expr{s.Cond}, alias, fnType, shapes, diags, "for")
+		}
 		walkBlock(fset, path, s.Body, alias, fnType, shapes, diags)
 	case *ast.RangeStmt:
+		if s.X != nil {
+			scanContainerExpr(fset, path, s, []ast.Expr{s.X}, alias, fnType, shapes, diags, "range")
+		}
 		walkBlock(fset, path, s.Body, alias, fnType, shapes, diags)
 	case *ast.SwitchStmt:
 		if shape, ok, err := matchExhaustiveSwitch(s, alias, fnType); err != nil {
 			*diags = append(*diags, diagAt(fset, path, s.Pos(), err.Error()))
 		} else if ok {
 			*shapes = append(*shapes, shape)
+		} else if s.Tag != nil {
+			scanContainerExpr(fset, path, s, []ast.Expr{s.Tag}, alias, fnType, shapes, diags, "switch")
+		}
+		if s.Init != nil {
+			scanContainerInit(fset, path, s.Init, alias, fnType, shapes, diags, "switch")
 		}
 		walkBlock(fset, path, s.Body, alias, fnType, shapes, diags)
 	case *ast.TypeSwitchStmt:
@@ -1502,6 +1525,158 @@ func classifyOpenChain(call *ast.CallExpr, sel *ast.SelectorExpr, alias string) 
 		NoRelease:   noRelease,
 		AutoRelease: autoRelease,
 	}, true, nil
+}
+
+// scanContainerInit scans an Init / Post sub-statement of an
+// IfStmt / ForStmt / SwitchStmt. The sub-stmt sits inside the
+// container's header — `if v := q.X(); cond { … }` — so the rewrite
+// must be a single-line span substitution to keep the header valid.
+//
+// Supported: in-place families only (q.EnumName, q.F, q.SQL, etc.).
+// They rewrite to a same-line expression, so the substituted Init
+// remains a valid SimpleStmt.
+//
+// Bubble families (q.Try, q.NotNil, q.Check, q.Recv, …) would need
+// to inject a multi-line bind+check block — illegal inside the
+// container header. For those, the user must extract the call to a
+// preceding statement. Diagnostic guides them there. The keyword
+// arg ("if" / "for" / "switch") is interpolated into the message
+// for clarity.
+func scanContainerInit(fset *token.FileSet, path string, stmt ast.Stmt, alias string, fnType *ast.FuncType, shapes *[]callShape, diags *[]Diagnostic, kw string) {
+	shape, ok, err := matchStatement(stmt, alias, fnType)
+	if err != nil {
+		*diags = append(*diags, diagAt(fset, path, stmt.Pos(), err.Error()))
+		return
+	}
+	if !ok {
+		// No q.* matched. If a q.* reference exists in an
+		// unsupported sub-shape, the regular fall-through
+		// diagnostic in walkBlock would catch it — but we're not
+		// in walkBlock. Produce the same diagnostic here.
+		if !isContainerStmt(stmt) {
+			if pos := findQReference(stmt, alias); pos.IsValid() {
+				*diags = append(*diags, diagAt(fset, path, pos,
+					fmt.Sprintf("unsupported q.* call shape inside %s-statement init/post", kw)))
+			}
+		}
+		return
+	}
+	for _, sc := range shape.Calls {
+		if !isInPlaceFamily(sc.Family) {
+			pos := fset.Position(sc.OuterCall.Pos())
+			*diags = append(*diags, Diagnostic{
+				File: pos.Filename,
+				Line: pos.Line,
+				Col:  pos.Column,
+				Msg:  fmt.Sprintf("q: bubble-shape q.* (%s) is not supported inside the %s-statement header — the rewrite would inject a multi-line bind+check that breaks the header. Extract the call to a preceding statement: `v, err := …; if err != nil { … }`", familyDisplayName(sc.Family), kw),
+			})
+			return
+		}
+	}
+	*shapes = append(*shapes, shape)
+}
+
+// scanContainerExpr walks the expression position(s) of a container
+// statement (RangeStmt.X, IfStmt.Cond, ForStmt.Cond, SwitchStmt.Tag)
+// for q.* calls. Only IN-PLACE families are supported in these
+// positions: their span substitutes cleanly into the container's
+// header. Bubble families would need to inject a multi-line
+// bind+check block, which has no place inside a header expression —
+// those produce a diagnostic asking the user to extract the call.
+//
+// One shape is emitted PER q.* call (not per container) so the
+// edit span is scoped to just the q.*'s OuterCall — without this,
+// the container's body would be re-emitted by the in-place
+// substitution, overlapping with edits the body's own statements
+// generate and corrupting the rewrite.
+//
+// The synthetic *ast.ExprStmt wrapper ensures Stmt.Pos/End match
+// the q.*'s OuterCall span; renderShape's all-in-place branch then
+// emits a span-only substitution at exactly that range.
+func scanContainerExpr(fset *token.FileSet, path string, container ast.Stmt, exprs []ast.Expr, alias string, fnType *ast.FuncType, shapes *[]callShape, diags *[]Diagnostic, kw string) {
+	subs, err := collectQCalls(exprs, alias)
+	if err != nil {
+		*diags = append(*diags, diagAt(fset, path, container.Pos(), err.Error()))
+		return
+	}
+	if len(subs) == 0 {
+		return
+	}
+	for _, sc := range subs {
+		if !isInPlaceFamily(sc.Family) {
+			pos := fset.Position(sc.OuterCall.Pos())
+			*diags = append(*diags, Diagnostic{
+				File: pos.Filename,
+				Line: pos.Line,
+				Col:  pos.Column,
+				Msg:  fmt.Sprintf("q: bubble-shape q.* (%s) is not supported inside the %s-statement header — the rewrite would inject a multi-line bind+check that breaks the header. Extract the call to a preceding statement: `v, err := …; if err != nil { … }; %s … { … }`", familyDisplayName(sc.Family), kw, kw),
+			})
+			return
+		}
+	}
+	for i := range subs {
+		// Synthesize a per-call ExprStmt so the rewriter's
+		// edit-span machinery sees the q.* call's exact byte
+		// range. The ExprStmt isn't part of the source AST; it's
+		// only used for Pos/End.
+		synthetic := &ast.ExprStmt{X: subs[i].OuterCall}
+		*shapes = append(*shapes, callShape{
+			Stmt:              synthetic,
+			Form:              formDiscard,
+			Calls:             []qSubCall{subs[i]},
+			EnclosingFuncType: fnType,
+		})
+	}
+}
+
+// familyDisplayName returns the user-facing q.* name for a family —
+// used in diagnostic messages so users can map directly to docs.
+func familyDisplayName(f family) string {
+	switch f {
+	case familyTry:
+		return "q.Try"
+	case familyTryE:
+		return "q.TryE"
+	case familyNotNil:
+		return "q.NotNil"
+	case familyNotNilE:
+		return "q.NotNilE"
+	case familyOk:
+		return "q.Ok"
+	case familyOkE:
+		return "q.OkE"
+	case familyCheck:
+		return "q.Check"
+	case familyCheckE:
+		return "q.CheckE"
+	case familyOpen:
+		return "q.Open"
+	case familyOpenE:
+		return "q.OpenE"
+	case familyRecv:
+		return "q.Recv"
+	case familyRecvE:
+		return "q.RecvE"
+	case familyAs:
+		return "q.As"
+	case familyAsE:
+		return "q.AsE"
+	case familyTrace:
+		return "q.Trace"
+	case familyTraceE:
+		return "q.TraceE"
+	case familyAwait:
+		return "q.Await"
+	case familyAwaitE:
+		return "q.AwaitE"
+	case familyCheckCtx:
+		return "q.CheckCtx"
+	case familyCheckCtxE:
+		return "q.CheckCtxE"
+	case familyRequire:
+		return "q.Require"
+	}
+	return "q.*"
 }
 
 // matchExhaustiveSwitch detects the

@@ -1,0 +1,14 @@
+if-init: Green
+if-cond: 99 not valid
+range: Red ord=0
+range: Green ord=1
+range: Blue ord=2
+for-classic: 0
+for-classic: 1
+for-classic: 2
+switch-init: matched Blue
+switch-tag: matched Green
+if-init-F: hi world!
+range-names: 0=Red
+range-names: 1=Green
+range-names: 2=Blue
