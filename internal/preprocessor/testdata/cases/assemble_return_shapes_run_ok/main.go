@@ -1,4 +1,4 @@
-// Fixture: every recipe return shape works.
+// Fixture: every recipe return shape works inside one assembly.
 //
 //   NewX() X         — value type
 //   NewX() *X        — pointer
@@ -6,65 +6,69 @@
 //   NewX() (X, err)  — value type with error
 //   NewX() (*X, err) — pointer with error
 //   NewX() (Ifc, err)— interface with error
+//
+// q.Tagged is used to brand otherwise-identical types so each shape
+// occupies a distinct slot in the dep graph (without it, e.g. two
+// providers of `int` would clash on duplicate-provider).
 package main
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/GiGurra/q/pkg/q"
 )
-
-type ValT struct{ x int }
-type RefT struct{ x int }
 
 type Ifc interface{ Tag() string }
 type ifcImpl struct{ name string }
 
 func (i ifcImpl) Tag() string { return i.name }
 
+// Brand types — empty structs whose only role is to differentiate
+// otherwise-identical types in the recipe graph.
+type _val struct{}
+type _ptr struct{}
+type _ifc struct{}
+type _vale struct{}
+type _ptre struct{}
+type _ifce struct{}
+
+type Val   = q.Tagged[int, _val]
+type Ptr   = q.Tagged[*int, _ptr]
+type IfcV  = q.Tagged[Ifc, _ifc]
+type ValE  = q.Tagged[int, _vale]
+type PtrE  = q.Tagged[*int, _ptre]
+type IfcVE = q.Tagged[Ifc, _ifce]
+
+// Pure recipes — one per return shape.
+func newVal() Val { return q.MkTag[_val](1) }
+func newPtr() Ptr { v := 2; return q.MkTag[_ptr](&v) }
+func newIfc() IfcV { return q.MkTag[_ifc](Ifc(ifcImpl{name: "plain"})) }
+
+// Errored recipes — one per return shape. All return nil-error in this
+// happy-path fixture; the bind+bubble shape is exercised by the rewrite
+// regardless of whether the error path actually fires at runtime.
+func newValE() (ValE, error)  { return q.MkTag[_vale](10), nil }
+func newPtrE() (PtrE, error)  { v := 20; return q.MkTag[_ptre](&v), nil }
+func newIfcE() (IfcVE, error) { return q.MkTag[_ifce](Ifc(ifcImpl{name: "errored"})), nil }
+
 type App struct {
-	v   ValT
-	p   *RefT
+	v   int
+	p   *int
 	i   Ifc
-	v2  ValT
-	p2  *RefT
-	i2  Ifc
+	ve  int
+	pe  *int
+	ie  Ifc
 }
 
-func newVal() ValT             { return ValT{x: 1} }
-func newPtr() *RefT            { return &RefT{x: 2} }
-func newIfc() Ifc              { return ifcImpl{name: "plain"} }
-func newValE() (ValT, error)   { return ValT{x: 10}, nil }
-func newPtrE() (*RefT, error)  { return &RefT{x: 20}, nil }
-func newIfcE() (Ifc, error)    { return ifcImpl{name: "errored"}, nil }
-func newApp(v ValT, p *RefT, i Ifc, v2 ValT, p2 *RefT, i2 Ifc) (*App, error) {
-	if v.x == 0 {
-		return nil, errors.New("zero")
-	}
-	return &App{v: v, p: p, i: i, v2: v2, p2: p2, i2: i2}, nil
-}
-
-// Tag the value-typed providers so we have distinct keys for v vs v2.
-type _alt struct{}
-
-type ValT2 = q.Tagged[ValT, _alt]
-type RefT2 = q.Tagged[*RefT, _alt]
-type Ifc2  = q.Tagged[Ifc, _alt]
-
-func newValT2() ValT2 { return q.MkTag[_alt](ValT{x: 100}) }
-func newRefT2() RefT2 { return q.MkTag[_alt](&RefT{x: 200}) }
-func newIfcT2() Ifc2  { return q.MkTag[_alt](Ifc(ifcImpl{name: "tagged"})) }
-
-func newApp2(v ValT, p *RefT, i Ifc, v2 ValT2, p2 RefT2, i2 Ifc2) (*App, error) {
-	return &App{v: v, p: p, i: i, v2: v2.Value(), p2: p2.Value(), i2: i2.Value()}, nil
+func newApp(v Val, p Ptr, i IfcV, ve ValE, pe PtrE, ie IfcVE) *App {
+	return &App{v: v.Value(), p: p.Value(), i: i.Value(), ve: ve.Value(), pe: pe.Value(), ie: ie.Value()}
 }
 
 func main() {
-	a, err := q.AssembleErr[*App](newVal, newPtr, newIfc, newValT2, newRefT2, newIfcT2, newApp2)
+	a, err := q.AssembleErr[*App](newVal, newPtr, newIfc, newValE, newPtrE, newIfcE, newApp)
 	if err != nil {
 		fmt.Println("err:", err)
 		return
 	}
-	fmt.Println("v.x:", a.v.x, "p.x:", a.p.x, "i:", a.i.Tag(), "v2.x:", a.v2.x, "p2.x:", a.p2.x, "i2:", a.i2.Tag())
+	fmt.Println("v:", a.v, "p:", *a.p, "i:", a.i.Tag(), "ve:", a.ve, "pe:", *a.pe, "ie:", a.ie.Tag())
 }

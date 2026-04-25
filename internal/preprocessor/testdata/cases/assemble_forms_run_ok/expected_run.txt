@@ -1,0 +1,5 @@
+define: primary
+assign: primary
+return: primary
+hoist: primary
+discard ok

@@ -1,1 +1,2 @@
 target type *Server is not produced by any recipe
+Providers supplied: #1→*Config, #2→*DB

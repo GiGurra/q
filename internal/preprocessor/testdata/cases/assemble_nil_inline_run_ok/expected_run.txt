@@ -1,0 +1,2 @@
+got err: true
+is q.ErrNil: true

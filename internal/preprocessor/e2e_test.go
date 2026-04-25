@@ -19,7 +19,10 @@ import (
 //	    expected_build.txt   # optional:
 //	                         #   absent / empty -> build must succeed
 //	                         #   non-empty      -> build must fail AND combined
-//	                         #                     output must contain that text
+//	                         #                     output must contain EVERY
+//	                         #                     non-empty line as a substring
+//	                         #                     (one per line; #-prefixed
+//	                         #                     lines are comments)
 //	    expected_run.txt     # optional, only meaningful when build succeeds:
 //	                         #   absent     -> nothing is run
 //	                         #   present    -> `go run ./...` from fixture root,
@@ -136,10 +139,16 @@ replace github.com/GiGurra/q => %s
 		}
 	} else {
 		if buildErr == nil {
-			t.Fatalf("expected build to fail (substring %q) but it succeeded.\noutput:\n%s", wantBuild, gotBuild)
+			t.Fatalf("expected build to fail (substrings %q) but it succeeded.\noutput:\n%s", wantBuild, gotBuild)
 		}
-		if !strings.Contains(gotBuild, wantBuild) {
-			t.Fatalf("build failed but output missing expected substring.\nwant:\n%s\n---\ngot:\n%s", wantBuild, gotBuild)
+		// Every non-empty, non-comment line in expected_build.txt is a
+		// required substring — supports asserting on multi-problem
+		// diagnostics (e.g. q.Assemble's combined-errors output) where
+		// each problem is one line.
+		for _, want := range parseExpectedSubstrings(wantBuild) {
+			if !strings.Contains(gotBuild, want) {
+				t.Fatalf("build failed but output missing expected substring.\nwant:\n%s\n---\ngot:\n%s", want, gotBuild)
+			}
 		}
 		// build was expected to fail; nothing to run.
 		return
@@ -156,6 +165,24 @@ replace github.com/GiGurra/q => %s
 	if gotRun != wantRunTrim {
 		t.Fatalf("run output mismatch.\nwant:\n%s\n---\ngot:\n%s", wantRunTrim, gotRun)
 	}
+}
+
+// parseExpectedSubstrings splits the expected_build.txt content into
+// the list of substrings that must each appear in the build output.
+// Each non-empty, non-comment line is one required substring. Lines
+// starting with `#` are treated as comments. Empty input returns an
+// empty slice — caller's responsibility to skip the whole assertion
+// when the file is absent or blank.
+func parseExpectedSubstrings(s string) []string {
+	var out []string
+	for line := range strings.SplitSeq(s, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		out = append(out, line)
+	}
+	return out
 }
 
 func readOptional(path string) string {

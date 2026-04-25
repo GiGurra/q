@@ -1,0 +1,1 @@
+second return is *MyErr; recipes must return T or (T, error) where the second value is the built-in `error`
