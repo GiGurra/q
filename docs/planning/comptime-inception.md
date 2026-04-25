@@ -277,6 +277,40 @@ Picking up Phase 5.2 work cold:
 5. Run existing comptime fixtures: `go test ./internal/preprocessor/ -run TestFixtures/atct_comptime` (Phase 5.1) and `TestFixtures/atct_nested` (Phase 5.2).
 6. Pick the next step from "Implementation plan for Path A" above.
 
+## Path A in-progress state (2026-04-25 session)
+
+Foundation landed but end-to-end harness test is BLOCKED on a cache/env issue that needs fresh-session debugging.
+
+**What works:**
+- `q.NestedComptime[F](impl F) F` surface (identity at runtime).
+- `q.ForkComptime[A,R any](key string, args A) R` runtime helper: cache check → spawn `go run -toolexec=q` → parse JSON → cache write.
+- `q.RegisterComptimeImpl(key, src)` / `q.LookupComptimeImpl(key)` for init() registration of impl source.
+- `q.NestedComptime` decls detected by `collectComptimeBindings` and `scanTopLevelVarSpec` alongside `q.Comptime`. `comptimeBinding.IsNested` flag distinguishes.
+- Synthesis pass in `atcompiletime.go` branches: NestedComptime impls emit a wrapper var (calling `q.ForkComptime`) plus `func init()` registration, whereas Comptime impls inline the impl as before.
+- `monadicFnSignature(funcLit)` extracts the param/return types from the AST for the ForkComptime type instantiation. Restricted to single-arg / single-return for the MVP.
+- `escapeBackticks` for safely splicing impl source into a back-quoted string literal.
+- `qRuntimeHelpers` carve-out extended to skip ForkComptime/RegisterComptimeImpl/LookupComptimeImpl call-site flagging.
+- `runAtCompileTimeProgram` sets `Q_FORK_WORKDIR=<modRoot>` so `q.ForkComptime`'s spawned subprocess inherits the user's go.mod, AND drops any inherited Q_FORK_CHAIN so cycle detection starts fresh.
+- `Q_FORK_CHAIN` env var threads cycle-detection state through nested subprocess invocations.
+
+**What's blocked:**
+- The harness fixture (`atct_nested_comptime_fib_run_ok`, removed before commit) reaches the level-1 synthesis subprocess, which calls `q.ForkComptime("Fib", 5)`, which spawns level 2. Level 2 panics with "cycle detected" claiming args=5 — but level 2's main calls `_qImpl(n)` which decomposes to `_qComptime_Fib(n-1)`, so ForkComptime should be called with args=4 (or 3), not args=5.
+
+  - Manual test (clean GOCACHE, run from q's own module dir with `go run -toolexec=$qBin`) DOES work: level 2 reaches main, calls ForkComptime with args=4. Confirmed the architecture is correct.
+  - Test harness uses TestMain-managed GOCACHE that's hermetic per session. The failing path appears to involve the GOCACHE somehow, or env var propagation.
+  - The "cycle detected" panic stack inside level-2's stderr shows source paths from level-1's `.q-comptime-XXX/main.go` — suggesting the captured "level-2 stderr" might actually be coming from level-1's process or is shared somehow.
+  - No current hypothesis — needs fresh-session investigation.
+
+**Suggested next investigation steps:**
+
+1. Reproduce the issue with `go test -v ./internal/preprocessor/ -run TestFixtures/atct_nested_comptime_fib_run_ok` (after re-creating the fixture).
+2. Add per-process pid logging to ForkComptime AND to the synthesised level-1 main.go so the pid lineage is visible.
+3. Compare env vars between the failing harness invocation and the working manual invocation. Look specifically for: GOCACHE, GOFLAGS, GOPATH, Q_FORK_CHAIN, Q_FORK_WORKDIR.
+4. Try forcing `cmd.Env` in `runAtCompileTimeProgram` to start fresh (drop GOCACHE inheritance? probably not, but worth trying).
+5. Check whether `go run -toolexec=q` inside the harness's GOCACHE is reusing a stale binary built without the toolexec.
+
+**Once fixed:** re-create `atct_nested_comptime_fib_run_ok` fixture (in-package only — cross-package call sites aren't folded by either `q.Comptime` or `q.NestedComptime` today; that's a separate Phase 5.x feature).
+
 ## Path D — Multipass macros (also planned, post-A)
 
 After Path A ships, Path D delivers the original "macros emitting macros" Tier 2 promise. Surface stays the same as today's `q.AtCompileTimeCode`; the rewriter just keeps going past the first splice.

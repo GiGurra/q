@@ -124,11 +124,15 @@ func ForkComptime[A any, R any](key string, args A) R {
 		return r
 	}
 
-	// Cycle detection via env-var chain.
-	chainKey := key + "|" + cacheKey[:16]
+	// Cycle detection via env-var chain. Use the FULL cacheKey, not
+	// a truncated prefix — collisions on a 16-char hex prefix are
+	// rare but possible.
+	chainKey := key + "|" + cacheKey
 	if existing := os.Getenv("Q_FORK_CHAIN"); existing != "" {
-		if strings.Contains(existing, chainKey) {
-			panic(fmt.Sprintf("q.ForkComptime: cycle detected — chain=%q would re-enter %s with the same args", existing, chainKey))
+		for _, k := range strings.Split(existing, ";") {
+			if k == chainKey {
+				panic(fmt.Sprintf("q.ForkComptime: cycle detected — chain=%q would re-enter %s with the same args", existing, chainKey))
+			}
 		}
 	}
 
@@ -248,12 +252,19 @@ func runForkSubprocess[A any, R any](key, src string, args A, chainKey string) R
 	ctx := context.Background()
 	cmd := exec.CommandContext(ctx, "go", "run", "-toolexec="+qBin, progPath)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "Q_FORK_CHAIN="+chainKey+":"+os.Getenv("Q_FORK_CHAIN"))
+	// Pass the chain forward, separated by ';'. The child checks
+	// each field for an exact match against its own chainKey.
+	parentChain := os.Getenv("Q_FORK_CHAIN")
+	newChain := chainKey
+	if parentChain != "" {
+		newChain = parentChain + ";" + chainKey
+	}
+	cmd.Env = append(os.Environ(), "Q_FORK_CHAIN="+newChain)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		panic(fmt.Sprintf("q.ForkComptime[%s]: subprocess failed: %v\nstderr:\n%s", key, err, stderr.String()))
+		panic(fmt.Sprintf("q.ForkComptime[%s]: subprocess failed: %v\nstderr:\n%s\n--- synthesised program (%s) ---\n%s\n--- end synthesised ---", key, err, stderr.String(), progPath, progSrc))
 	}
 
 	var r R
@@ -338,9 +349,9 @@ func buildForkProgram(key, src string, argsJSON []byte) string {
 // recursive references inside any impl resolve to per-recursion
 // subprocess spawns + cache.
 //
-// Wrappers are emitted as the impl-source-pattern detection has not
-// been wired yet (the impl source is a string, not an AST). For MVP
-// we emit a single wrapper for the current key.
+// The wrapper is named `_qComptime_<key>` to match the rewritten
+// impl source (the user-package preprocessor's renderComptimeImpl
+// substitutes self-references to that synthesised name).
 func emitWrappers(b *strings.Builder, emitted *map[string]bool) {
 	comptimeImpls.Range(func(k, v any) bool {
 		ks, _ := k.(string)
@@ -352,17 +363,29 @@ func emitWrappers(b *strings.Builder, emitted *map[string]bool) {
 			return true
 		}
 		(*emitted)[ks] = true
-		// Identify the user-facing name: it's encoded as the prefix
-		// before the underscore in the key (we use `<userName>_<hash>`).
-		// MVP assumption.
-		idx := strings.LastIndex(ks, "_")
-		userName := ks
-		if idx > 0 {
-			userName = ks[:idx]
-		}
-		fmt.Fprintf(b, "var %s = func(n int) int { return q.ForkComptime[int, int](%q, n) }\n", userName, ks)
-		fmt.Fprintf(b, "func init() { q.RegisterComptimeImpl(%q, `%s`) }\n\n", ks, vs)
+		wrapperName := "_qComptime_" + ks
+		fmt.Fprintf(b, "var %s = func(n int) int { return q.ForkComptime[int, int](%q, n) }\n", wrapperName, ks)
+		fmt.Fprintf(b, "func init() { q.RegisterComptimeImpl(%q, `%s`) }\n\n", ks, escapeBackticks(vs))
 		return true
 	})
+}
+
+// escapeBackticks turns a Go source fragment into something safe to
+// splice inside a back-quoted string literal. Go raw strings can't
+// contain backticks; we split on backtick boundaries and concat
+// fragments via "`"-escaped bridges.
+func escapeBackticks(s string) string {
+	if !strings.Contains(s, "`") {
+		return s
+	}
+	parts := strings.Split(s, "`")
+	var b strings.Builder
+	for i, p := range parts {
+		if i > 0 {
+			b.WriteString("` + \"`\" + `")
+		}
+		b.WriteString(p)
+	}
+	return b.String()
 }
 

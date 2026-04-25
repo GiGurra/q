@@ -845,8 +845,50 @@ func synthesizeAtCompileTimeMain(fset *token.FileSet, calls []*atCallInfo, info 
 		implNames = append(implNames, name)
 	}
 	sort.Strings(implNames)
+	// Detect whether any impl is NestedComptime — those need pkg/q
+	// imported in the synthesis program (for ForkComptime +
+	// RegisterComptimeImpl), and the wrapper-form emission.
+	anyNested := false
+	for _, userName := range implNames {
+		if comptimeImpls[userName].Binding.IsNested {
+			anyNested = true
+			break
+		}
+	}
+	if anyNested {
+		// Re-render the import block to include pkg/q.
+		// The block was already written above; instead we'll splice
+		// `import _ "github.com/GiGurra/q/pkg/q"`-style fallback by
+		// adding the import here. But the cleaner path is to add the
+		// import to importSet BEFORE rendering. Since that already
+		// happened, we re-emit the import block by appending a fresh
+		// import declaration; Go accepts multiple `import (...)`
+		// blocks in the same file.
+		b.WriteString("import qq \"github.com/GiGurra/q/pkg/q\"\n\n")
+	}
 	for _, userName := range implNames {
 		impl := comptimeImpls[userName]
+		if impl.Binding.IsNested {
+			implSrc := renderComptimeImpl(fset, impl, comptimeImpls, info, userPkgPath, effectiveAlias)
+			argType, retType, ok := monadicFnSignature(fset, impl.Binding.Impl)
+			if !ok {
+				declPath := fset.Position(impl.Binding.Decl.Pos()).Filename
+				return "", nil, []Diagnostic{diagAt(fset, declPath, impl.Binding.Decl.Pos(),
+					fmt.Sprintf("q.NestedComptime[%s]: only single-arg single-return impls supported in this version (impl signature %s)", userName, impl.FnType))}
+			}
+			// Wrapper var: every recursive call routes through
+			// q.ForkComptime, which spawns a per-recursion subprocess
+			// (cached on disk). The wrapper var name matches `impl.Name`
+			// (`_qComptime_<userName>`); recursive references in the
+			// rendered impl source are rewritten to that same name by
+			// renderComptimeImpl, so they resolve to the wrapper.
+			key := userName
+			fmt.Fprintf(&b, "var %s = func(_qArg %s) %s { return qq.ForkComptime[%s, %s](%q, _qArg) }\n",
+				impl.Name, argType, retType, argType, retType, key)
+			fmt.Fprintf(&b, "func init() { qq.RegisterComptimeImpl(%q, `%s`) }\n\n",
+				key, escapeBackticks(implSrc))
+			continue
+		}
 		implSrc := renderComptimeImpl(fset, impl, comptimeImpls, info, userPkgPath, effectiveAlias)
 		fmt.Fprintf(&b, "var %s %s\n", impl.Name, impl.FnType)
 		fmt.Fprintf(&b, "var _ = func() bool { %s = %s; return true }()\n\n", impl.Name, implSrc)
@@ -1137,6 +1179,87 @@ type comptimeImpl struct {
 	FnType  string // signature text, e.g. `func(int) int`
 }
 
+// monadicFnSignature extracts the single parameter type and return
+// type text from a FuncLit's AST. Returns ok=false unless the impl
+// has exactly one parameter and exactly one return value — the
+// q.NestedComptime MVP only supports monadic impls.
+func monadicFnSignature(fset *token.FileSet, lit *ast.FuncLit) (argT, retT string, ok bool) {
+	if lit == nil || lit.Type == nil {
+		return "", "", false
+	}
+	ft := lit.Type
+	if ft.Params == nil || ft.Results == nil {
+		return "", "", false
+	}
+	// Count parameters as individual variables (a single Field
+	// like `a, b int` declares two parameters).
+	paramCount := 0
+	var paramTypeExpr ast.Expr
+	for _, f := range ft.Params.List {
+		n := len(f.Names)
+		if n == 0 {
+			n = 1
+		}
+		paramCount += n
+		paramTypeExpr = f.Type
+	}
+	if paramCount != 1 {
+		return "", "", false
+	}
+	// Single return value.
+	resultCount := 0
+	var resultTypeExpr ast.Expr
+	for _, f := range ft.Results.List {
+		n := len(f.Names)
+		if n == 0 {
+			n = 1
+		}
+		resultCount += n
+		resultTypeExpr = f.Type
+	}
+	if resultCount != 1 {
+		return "", "", false
+	}
+	argT = formatExpr(fset, paramTypeExpr)
+	retT = formatExpr(fset, resultTypeExpr)
+	if argT == "" || retT == "" {
+		return "", "", false
+	}
+	return argT, retT, true
+}
+
+// formatExpr prints the given expression to its source-text form.
+// Distinct from rewriter.go's existing exprText (which takes srcBytes).
+func formatExpr(fset *token.FileSet, e ast.Expr) string {
+	if e == nil {
+		return ""
+	}
+	var sb strings.Builder
+	if err := printer.Fprint(&sb, fset, e); err != nil {
+		return ""
+	}
+	return sb.String()
+}
+
+// escapeBackticks turns a Go source fragment into something safe to
+// splice inside a back-quoted string literal. Go raw strings can't
+// contain backticks; we split on backtick boundaries and concat
+// fragments via ```-quoted bridges.
+func escapeBackticks(s string) string {
+	if !strings.Contains(s, "`") {
+		return s
+	}
+	parts := strings.Split(s, "`")
+	var b strings.Builder
+	for i, p := range parts {
+		if i > 0 {
+			b.WriteString("` + \"`\" + `")
+		}
+		b.WriteString(p)
+	}
+	return b.String()
+}
+
 // renderComptimeArgs renders each comptime call argument to source
 // text, substituting cross-call captured variables with their
 // `_qCt<N>` references and same-package symbols with the userAlias
@@ -1423,9 +1546,21 @@ func runAtCompileTimeProgram(modRoot, pkgPath, mainSrc string) ([]byte, Diagnost
 		if strings.HasPrefix(e, "GOFLAGS=") {
 			continue
 		}
+		// Drop any inherited Q_FORK_CHAIN — the level-1 subprocess
+		// always starts a fresh chain, so cycle detection at deeper
+		// levels works on this build's own state, not whatever
+		// happened in the parent's env.
+		if strings.HasPrefix(e, "Q_FORK_CHAIN=") {
+			continue
+		}
 		filtered = append(filtered, e)
 	}
 	filtered = append(filtered, "GOFLAGS=")
+	// Tell q.ForkComptime (if invoked from inside the synthesis
+	// program) to use the user's module root as its tempdir parent.
+	// That way the sub-subprocess `go run` inherits the user's
+	// go.mod and can resolve module deps including pkg/q itself.
+	filtered = append(filtered, "Q_FORK_WORKDIR="+modRoot)
 	cmd.Env = filtered
 	out, err := cmd.CombinedOutput()
 	if err != nil {

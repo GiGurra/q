@@ -521,6 +521,11 @@ var qRuntimeHelpers = map[string]bool{
 	"WithPar":          true,
 	"WithParUnbounded": true,
 	"GetPar":           true,
+	// q.NestedComptime runtime helpers — called from synthesized
+	// programs the preprocessor itself emits.
+	"ForkComptime":          true,
+	"RegisterComptimeImpl":  true,
+	"LookupComptimeImpl":    true,
 }
 
 // scanFile walks one parsed source file and returns the list of
