@@ -708,8 +708,8 @@ func renderSubCall(fset *token.FileSet, src []byte, sh callShape, subIdx int, su
 		text, err := renderPanicMarker(fset, src, sh, sub, "q.Unreachable", subs, subTexts)
 		return text, false, false, false, err
 	case familyRequire:
-		text, err := renderRequire(fset, src, sh, sub, counter, subs, subTexts)
-		return text, false, true, false, err
+		text, err := renderRequire(fset, src, sh, sub, counter, alias, subs, subTexts)
+		return text, true, false, false, err
 	case familyRecv:
 		text, err := renderRecv(fset, src, sh, sub, counter, alias, subs, subTexts)
 		return text, false, false, false, err
@@ -1214,10 +1214,12 @@ func renderPanicMarker(fset *token.FileSet, src []byte, sh callShape, sub qSubCa
 
 // renderRequire produces the replacement for q.Require. Bubbles an
 // error to the enclosing function's error return when cond is false;
-// the error message uses the same file:line prefix convention as
-// TODO/Unreachable but wraps the prefix in errors.New rather than
-// panicking. Statement-only.
-func renderRequire(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, counter int, subs []qSubCall, subTexts []string) (string, error) {
+// the bubble is `fmt.Errorf("<file:line>[: <msg>]: %w", q.ErrRequireFailed)`
+// so callers can `errors.Is(err, q.ErrRequireFailed)` to detect a
+// require failure. The user-supplied message (if any) is %s-spliced
+// between the location prefix and the wrapped sentinel.
+// Statement-only.
+func renderRequire(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, counter int, alias string, subs []qSubCall, subTexts []string) (string, error) {
 	if sh.Form != formDiscard {
 		return "", fmt.Errorf("q.Require must be an expression statement (no LHS, no return position); the call returns no value")
 	}
@@ -1227,15 +1229,15 @@ func renderRequire(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, 
 	}
 	condText := exprTextSubst(fset, src, sub.InnerExpr, subs, subTexts)
 	prefix := tracePrefix(fset, sub.OuterCall.Pos())
-	base := "q.Require failed " + prefix
-	var msgExpr string
+	sentinel := alias + ".ErrRequireFailed"
+	var bubbleExpr string
 	if len(sub.MethodArgs) == 1 {
 		userMsg := exprTextSubst(fset, src, sub.MethodArgs[0], subs, subTexts)
-		msgExpr = fmt.Sprintf("%s + (%s)", strconv.Quote(base+": "), userMsg)
+		bubbleExpr = fmt.Sprintf("fmt.Errorf(%s, %s, %s)", strconv.Quote(prefix+": %s: %w"), userMsg, sentinel)
 	} else {
-		msgExpr = strconv.Quote(base)
+		bubbleExpr = fmt.Sprintf("fmt.Errorf(%s, %s)", strconv.Quote(prefix+": %w"), sentinel)
 	}
-	zeros[len(zeros)-1] = fmt.Sprintf("errors.New(%s)", msgExpr)
+	zeros[len(zeros)-1] = bubbleExpr
 	var b bytes.Buffer
 	fmt.Fprintf(&b, "if !(%s) {\n", condText)
 	fmt.Fprintf(&b, "%s\treturn %s\n", indent, joinWith(zeros, ", "))
@@ -1500,7 +1502,7 @@ func renderAs(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, count
 		return "", err
 	}
 	bindLine, okVar := okBindLineFromInner(fset, src, sh, counter, asInnerText(fset, src, sub, subs, subTexts))
-	zeros[len(zeros)-1] = alias + ".ErrBadAssert"
+	zeros[len(zeros)-1] = alias + ".ErrBadTypeAssert"
 	return assembleOkBlock(bindLine, okVar, indent, zeros), nil
 }
 

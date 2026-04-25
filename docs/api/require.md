@@ -20,15 +20,17 @@ rewrites to (say, `codec.go` line 88, in a function returning `error`):
 
 ```go
 if !(len(buf) >= 16) {
-    return errors.New("q.Require failed codec.go:88: " + ("header too short"))
+    return fmt.Errorf("codec.go:88: %s: %w", "header too short", q.ErrRequireFailed)
 }
 ```
+
+The bubbled error reads `codec.go:88: header too short: q.Require failed`, and `errors.Is(err, q.ErrRequireFailed)` returns true (the sentinel is wrapped via `%w`).
 
 In a function returning `(T, error)`:
 
 ```go
 if !(len(buf) >= 16) {
-    return *new(T), errors.New("q.Require failed codec.go:88: " + ("header too short"))
+    return *new(T), fmt.Errorf("codec.go:88: %s: %w", "header too short", q.ErrRequireFailed)
 }
 ```
 
@@ -36,8 +38,20 @@ Without a message:
 
 ```go
 q.Require(len(buf) >= 16)
-// → if !(len(buf) >= 16) { return …, errors.New("q.Require failed codec.go:88") }
+// → if !(len(buf) >= 16) { return …, fmt.Errorf("codec.go:88: %w", q.ErrRequireFailed) }
+// reads as: "codec.go:88: q.Require failed"
 ```
+
+## Sentinel identity
+
+```go
+err := encode(badBuf)
+if errors.Is(err, q.ErrRequireFailed) {
+    // came from a q.Require call somewhere down the stack
+}
+```
+
+`q.ErrRequireFailed` is the sentinel every q.Require bubble wraps via `%w`. The wrapping fmt.Errorf prefixes the file:line and any user-supplied message before the sentinel, so `err.Error()` carries the location and `errors.Is` carries the identity.
 
 ## Why a bubble, not a panic
 

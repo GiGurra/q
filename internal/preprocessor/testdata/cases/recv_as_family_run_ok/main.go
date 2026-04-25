@@ -86,10 +86,10 @@ func main() {
 	n, err = asInt(42)
 	report("as.int", n, err)
 
-	// As — non-matching type bubbles ErrBadAssert.
+	// As — non-matching type bubbles ErrBadTypeAssert.
 	n, err = asInt("not an int")
 	report("as.bad", n, err)
-	fmt.Printf("as.is: %v\n", errors.Is(err, q.ErrBadAssert))
+	fmt.Printf("as.is: %v\n", errors.Is(err, q.ErrBadTypeAssert))
 
 	// AsE.Wrapf — non-matching type with formatted message.
 	n, err = asWrap("hello")

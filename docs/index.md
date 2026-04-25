@@ -39,7 +39,7 @@ Around that core sit a handful of orthogonal helpers — context cancellation, f
 
 | Helper | What it does |
 |--------|--------------|
-| [`q.As` / `q.AsE`](api/as.md) | Comma-ok specialised to type assertion; bubbles `q.ErrBadAssert` on miss. |
+| [`q.As` / `q.AsE`](api/as.md) | Comma-ok specialised to type assertion; bubbles `q.ErrBadTypeAssert` on miss. |
 | [`q.Async`, `q.Await` / `q.AwaitE`](api/async.md) | JS-flavour promises on top of goroutines + channels. |
 | [`q.AwaitAll` / `q.AwaitAny`](api/await_multi.md) | Fan-in over many futures: gather all (`[]T`) or first-success-wins (`T`). |
 | [`q.AwaitCtx` / `q.AwaitCtxE`](api/await_ctx.md) | ctx-aware future await — bubble on cancel. |

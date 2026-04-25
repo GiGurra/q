@@ -10,6 +10,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/GiGurra/q/pkg/q"
@@ -101,4 +102,9 @@ func main() {
 	}
 
 	report("requireDynamicMsg", requireDynamicMsg(""))
+
+	// Sentinel identity: every q.Require bubble wraps q.ErrRequireFailed
+	// via %w, so errors.Is succeeds across the wrap.
+	err = requireFailsErr(0)
+	fmt.Printf("require.is: %v\n", errors.Is(err, q.ErrRequireFailed))
 }

@@ -1,6 +1,7 @@
 requirePassesErr: ok
-requireFailsErr: q.Require failed main.go:N: n must be positive
-requireNoMsgErr: q.Require failed main.go:N
+requireFailsErr: main.go:N: n must be positive: q.Require failed
+requireNoMsgErr: main.go:N: q.Require failed
 requirePassesT: ok=14
-requireFailsT: q.Require failed main.go:N: n must be positive
-requireDynamicMsg: q.Require failed main.go:N: name =  (must be non-empty)
+requireFailsT: main.go:N: n must be positive: q.Require failed
+requireDynamicMsg: main.go:N: name =  (must be non-empty): q.Require failed
+require.is: true

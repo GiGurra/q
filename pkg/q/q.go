@@ -60,10 +60,17 @@ var ErrNotOk = errors.New("q: not ok")
 // is false). Use q.RecvE to supply a richer error.
 var ErrChanClosed = errors.New("q: channel closed")
 
-// ErrBadAssert is the sentinel error the bare q.As bubble produces
+// ErrBadTypeAssert is the sentinel error the bare q.As bubble produces
 // when the type assertion's ok flag is false. Use q.AsE to supply a
 // richer error.
-var ErrBadAssert = errors.New("q: type assertion failed")
+var ErrBadTypeAssert = errors.New("q: type assertion failed")
+
+// ErrRequireFailed is wrapped (via %w) into the bubble produced by
+// q.Require when its condition is false. Callers can errors.Is the
+// resulting error against this sentinel to detect "this came from a
+// q.Require call". The wrapping fmt.Errorf prefixes the call-site
+// file:line and any user-supplied message before the sentinel.
+var ErrRequireFailed = errors.New("q.Require failed")
 
 // _qLink is the bodyless link-gate symbol. //go:linkname binds it to
 // the external _q_atCompileTime symbol that only the q preprocessor's
@@ -647,7 +654,7 @@ func RecvE[T any](ch <-chan T) OkResult[T] {
 
 // As asserts x holds a T and forwards it; the preprocessor rewrites
 // the call site into the inlined `v, _ok := x.(T); if !_ok { return
-// zero, q.ErrBadAssert }` shape. Use q.AsE to supply a richer error.
+// zero, q.ErrBadTypeAssert }` shape. Use q.AsE to supply a richer error.
 func As[T any](x any) T {
 	panicUnrewritten("q.As")
 	var zero T

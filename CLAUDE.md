@@ -38,11 +38,11 @@
   - `TraceE[T any](v T, err error) TraceResult[T]` — chain variant; every method composes over the location prefix.
   - `Recv[T any](ch <-chan T) T` — channel receive that bubbles `q.ErrChanClosed` on closed channel.
   - `RecvE[T any](ch <-chan T) OkResult[T]` — chain variant (reuses OkResult).
-  - `As[T any](x any) T` — type assertion that bubbles `q.ErrBadAssert` on failure. Explicit type arg required (`q.As[User](x)`).
+  - `As[T any](x any) T` — type assertion that bubbles `q.ErrBadTypeAssert` on failure. Explicit type arg required (`q.As[User](x)`).
   - `AsE[T any](x any) OkResult[T]` — chain variant.
   - `Lock(l sync.Locker)` — statement-only; emits `_qLockN := l; _qLockN.Lock(); defer _qLockN.Unlock()`.
   - `TODO(msg ...string)` / `Unreachable(msg ...string)` — statement-only panics with file:line-prefixed messages.
-  - `Require(cond bool, msg ...string)` — statement-only; bubbles `errors.New("q.Require failed <file>:<line>[: <msg>]")` to the enclosing function's error return when cond is false. Replaces the previous panic-shaped `q.Assert`; q's stance is that the library produces errors, not panics.
+  - `Require(cond bool, msg ...string)` — statement-only; bubbles `fmt.Errorf("<file>:<line>[: <msg>]: %w", q.ErrRequireFailed)` to the enclosing function's error return when cond is false. The %w-wrapped sentinel makes `errors.Is(err, q.ErrRequireFailed)` work across the wrap. Replaces the previous panic-shaped `q.Assert`; q's stance is that the library produces errors, not panics.
   - `DebugPrintln[T any](v T) T` — panic stub; the preprocessor rewrites each call site to `q.DebugPrintlnAt("<file>:<line> <src-text>", v)`. Pass-through, usable mid-expression. Renamed from the original `q.Debug`.
   - `DebugPrintlnAt[T any](label string, v T) T` — runtime helper paired with DebugPrintln. Writes to `q.DebugWriter` (default `os.Stderr`, reassignable for test capture).
   - `DebugSlogAttr[T any](v T) slog.Attr` — panic stub; the preprocessor rewrites each call site directly to `slog.Any("<file>:<line> <src-text>", v)`. No q runtime helper on the value path — expands to stdlib `log/slog`. The rewriter detects this family at the shape level and injects the `log/slog` import.
@@ -86,7 +86,8 @@
   - `ErrNil` sentinel, exposed for `errors.Is` checks against the bare `q.NotNil` bubble.
   - `ErrNotOk` sentinel, exposed for `errors.Is` checks against the bare `q.Ok` bubble.
   - `ErrChanClosed` sentinel, exposed for `errors.Is` checks against the bare `q.Recv` bubble.
-  - `ErrBadAssert` sentinel, exposed for `errors.Is` checks against the bare `q.As` bubble.
+  - `ErrBadTypeAssert` sentinel, exposed for `errors.Is` checks against the bare `q.As` bubble.
+  - `ErrRequireFailed` sentinel, wrapped via `%w` into the `q.Require` bubble; `errors.Is(err, q.ErrRequireFailed)` identifies the failure mode regardless of the prefixed file:line / msg text.
   - `qRuntimeHelpers` carve-out (scanner): `ToErr`, `DebugPrintlnAt`, `Async`, `AwaitRaw`, `AwaitRawCtx`, `AwaitAllRaw`, `AwaitAllRawCtx`, `AwaitAnyRaw`, `AwaitAnyRawCtx`, `RecvRawCtx`, `RecvAnyRaw`, `RecvAnyRawCtx`, `Drain`, `DrainAll`, `DrainRawCtx`, `DrainAllRawCtx`, `Recover`, `RecoverE`. These are NOT rewritten and run at runtime.
   - `ToErr[T any, E any, P interface{ *E; error }](v T, e P) (T, error)` — runtime helper (NOT rewritten, real body executes) that adapts a `(T, *E)` callee into `(T, error)` while collapsing a typed-nil `*E` into a literal nil `error`. Satisfies the typed-nil guard (its return type is literally `error`). Usable standalone, not tied to the rest of q.
   - `_qLink` plus `func init() { _qLink() }` — the package-level link gate.

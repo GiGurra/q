@@ -150,9 +150,13 @@ func (s *Store) Set(k, v string) {
 ```go
 func encode(buf []byte) (Frame, error) {
     q.Require(len(buf) >= 16, "header too short")
-    // bubble: errors.New("q.Require failed codec.go:42: header too short")
+    // bubble: fmt.Errorf("codec.go:42: %s: %w", "header too short", q.ErrRequireFailed)
+    // reads as: "codec.go:42: header too short: q.Require failed"
     ...
 }
+
+// callers can identify the failure mode:
+if errors.Is(err, q.ErrRequireFailed) { ... }
 ```
 
 Validations bubble like every other failure — no `defer recover()` on the caller's side.

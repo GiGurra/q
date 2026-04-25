@@ -8,7 +8,7 @@ Type assertion with a bubble on failure — the comma-ok pattern specialised to 
 func As[T any](x any) T
 func AsE[T any](x any) OkResult[T]
 
-var ErrBadAssert = errors.New("q: type assertion failed")
+var ErrBadTypeAssert = errors.New("q: type assertion failed")
 ```
 
 The type parameter `T` must be supplied explicitly — Go can't infer it from the single `any` argument. Both bare and chain forms use `q.As[T](x)` / `q.AsE[T](x)`.
@@ -24,7 +24,7 @@ rewrites to:
 ```go
 n, _qOk1 := (x).(int)
 if !_qOk1 {
-    return /* zeros */, q.ErrBadAssert
+    return /* zeros */, q.ErrBadTypeAssert
 }
 ```
 
