@@ -56,6 +56,26 @@ q.SQL("INSERT INTO audit (event, payload) VALUES ({event}, {json.RawMessage(payl
 
 The expression's runtime value lands in `Args` as `any`. Drivers handle the type-specific bind (string, int, time.Time, json.RawMessage, …) the same way they would for hand-written placeholders.
 
+## What `q.SQL` is (and isn't)
+
+`q.SQL` produces a `(string, []any)` pair — the parameterised query text and the corresponding values. It **does not execute anything**, **does not create a `*sql.Stmt`**, and **does not touch a database**. What happens next is your driver's call:
+
+```go
+s := q.SQL("SELECT * FROM users WHERE id = {id}")
+// s.Query = "SELECT * FROM users WHERE id = ?"
+// s.Args  = []any{42}
+
+// Most drivers prepare/cache/bind/execute internally:
+row := db.QueryRowContext(ctx, s.Query, s.Args...)
+
+// Or you prepare explicitly and reuse:
+stmt, _ := db.PrepareContext(ctx, s.Query)
+defer stmt.Close()
+row := stmt.QueryRowContext(ctx, s.Args...)
+```
+
+The injection-safety guarantee comes from the **parameterised** form — your values flow through the driver's bind path, never through string concatenation. Whether the driver uses a real prepared statement, a one-shot bind, statement-cache reuse, or something else is a driver-level concern that q stays out of.
+
 ## Why a struct return?
 
 A `(string, []any)` tuple return would pair nicely with Go's f(g()) rule (`db.QueryRow(q.SQL("..."))` would auto-spread)... except `db.QueryRow` takes `(string, ...any)`, and the variadic spread doesn't compose with multi-value return — Go's spec restricts `f(g())` to single-arg-position uses. So an explicit struct + `s.Args...` spread is the cleanest shape:
