@@ -125,6 +125,8 @@ const (
 	familyMatch     // q.Match(v, q.Case(...), q.Default(...)) — value-returning switch
 	familyAtCompileTime     // q.AtCompileTime(func() R { ... }, codec...) — comptime evaluation
 	familyAtCompileTimeCode // q.AtCompileTimeCode[R](func() string { ... }) — comptime code generation
+	familyComptimeDecl      // var X = q.Comptime(impl) — package-level comptime function declaration
+	familyComptimeCall      // X(args) where X is a comptime-marked var — comptime call site
 )
 
 // form is the syntactic position of a recognised q.* call:
@@ -319,6 +321,18 @@ type qSubCall struct {
 	// pass; used by the rewriter when emitting `_qCt<N>_value`
 	// references for the non-inline path.
 	AtCTIndex int
+
+	// ComptimeFnExpr is the comptime function being invoked at this
+	// call site (familyComptimeCall only). For example in `fib(10)`
+	// where fib was declared via `var fib = q.Comptime(impl)`,
+	// ComptimeFnExpr is the `fib` *ast.Ident.
+	ComptimeFnExpr ast.Expr
+
+	// ComptimeArgs are the arguments at the comptime call site
+	// (familyComptimeCall only). Each must be compile-time
+	// resolvable — literals, package-level constants, or other
+	// q.AtCompileTime / q.Comptime results.
+	ComptimeArgs []ast.Expr
 }
 
 // matchCase is one arm of a q.Match expression — either a
@@ -578,6 +592,83 @@ func scanFile(fset *token.FileSet, path string, file *ast.File) ([]callShape, []
 // walkFuncLits + collectQCalls to short-circuit descent.
 var atCTSkipFuncLits map[*ast.FuncLit]bool
 
+// comptimeBinding describes a `var X = q.Comptime(impl)` declaration.
+// The scanner records one per detected decl in the comptimeBindings
+// map; call-site detection looks up call expression Funs in this map.
+type comptimeBinding struct {
+	// Ident is the LHS variable name (e.g. `fib`).
+	Ident *ast.Ident
+	// Impl is the function-literal expression handed to q.Comptime.
+	// Must be a *ast.FuncLit; non-literal arguments are rejected at
+	// scan time.
+	Impl *ast.FuncLit
+	// Decl is the GenDecl span; used by the rewriter to substitute
+	// the q.Comptime(...) call with just the impl literal.
+	Decl *ast.GenDecl
+	// MarkerCall is the q.Comptime(...) call expression. The
+	// rewriter replaces this span with Impl's span so the runtime
+	// var ends up as `var X = func(...) { ... }`.
+	MarkerCall *ast.CallExpr
+}
+
+// comptimeBindings is the package-wide set of comptime-marked
+// identifiers, keyed by name. Populated by collectComptimeBindings
+// (a pre-pass over all package files) before scanFile runs on
+// individual files. Per-file scanning consults this map to recognise
+// call sites of comptime-marked functions across file boundaries.
+var comptimeBindings map[string]*comptimeBinding
+
+// collectComptimeBindings walks every file in the package looking for
+// `var X = q.Comptime(implFuncLit)` shapes and returns a map from
+// the bound identifier name to the binding info. Cross-file: a
+// comptime function declared in fileA is reachable from fileB's
+// call sites within the same package.
+func collectComptimeBindings(files []*ast.File) map[string]*comptimeBinding {
+	out := map[string]*comptimeBinding{}
+	for _, f := range files {
+		alias := qImportAlias(f)
+		if alias == "" {
+			continue
+		}
+		for _, decl := range f.Decls {
+			gd, ok := decl.(*ast.GenDecl)
+			if !ok || gd.Tok != token.VAR {
+				continue
+			}
+			for _, spec := range gd.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				if len(vs.Names) != 1 || len(vs.Values) != 1 {
+					continue
+				}
+				call, ok := vs.Values[0].(*ast.CallExpr)
+				if !ok {
+					continue
+				}
+				if !isSelector(call.Fun, alias, "Comptime") {
+					continue
+				}
+				if len(call.Args) != 1 {
+					continue
+				}
+				lit, ok := call.Args[0].(*ast.FuncLit)
+				if !ok {
+					continue
+				}
+				out[vs.Names[0].Name] = &comptimeBinding{
+					Ident:      vs.Names[0],
+					Impl:       lit,
+					Decl:       gd,
+					MarkerCall: call,
+				}
+			}
+		}
+	}
+	return out
+}
+
 // scanTopLevelVarSpec recognises the package-level directive shape
 //
 //	var _ = q.GenX[T]()
@@ -617,13 +708,37 @@ func scanTopLevelVarSpec(fset *token.FileSet, path string, gd *ast.GenDecl, alia
 				}
 			}
 		}
-		// q.AtCompileTime / q.AtCompileTimeCode at package level:
-		//   var X = q.AtCompileTime[T](...)
-		//   var X = q.AtCompileTimeCode[T](...)
-		// Each ValueSpec can declare multiple names, but for this
-		// shape we require single-name, single-value pairs.
+		// q.AtCompileTime / q.AtCompileTimeCode / q.Comptime at package
+		// level. Each ValueSpec can declare multiple names, but for
+		// this shape we require single-name, single-value pairs.
 		if len(vs.Names) == 1 && len(vs.Values) == 1 {
 			if call, ok := vs.Values[0].(*ast.CallExpr); ok {
+				// q.Comptime(impl) — record a familyComptimeDecl
+				// shape so the rewriter unwraps the marker call.
+				if isSelector(call.Fun, alias, "Comptime") {
+					if len(call.Args) != 1 {
+						*diags = append(*diags, diagAt(fset, path, call.Pos(),
+							fmt.Sprintf("q.Comptime takes exactly one argument (the impl func literal); got %d", len(call.Args))))
+						continue
+					}
+					lit, ok := call.Args[0].(*ast.FuncLit)
+					if !ok {
+						*diags = append(*diags, diagAt(fset, path, call.Pos(),
+							"q.Comptime: argument must be a function literal (anonymous function), not a function reference or variable"))
+						continue
+					}
+					*shapes = append(*shapes, callShape{
+						Stmt:    gd,
+						Form:    formDefine,
+						LHSExpr: vs.Names[0],
+						Calls: []qSubCall{{
+							Family:      familyComptimeDecl,
+							AtCTClosure: lit,
+							OuterCall:   call,
+						}},
+					})
+					continue
+				}
 				sub, matched, classifyErr := classifyQCall(call, alias)
 				if classifyErr != nil {
 					*diags = append(*diags, diagAt(fset, path, call.Pos(), classifyErr.Error()))
@@ -1137,6 +1252,22 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
 		return qSubCall{}, false, nil
+	}
+
+	// Comptime call site: fn(args) where fn is a package-level
+	// q.Comptime-marked identifier. The package-wide bindings map is
+	// populated by collectComptimeBindings before scanFile runs.
+	if len(comptimeBindings) > 0 {
+		if ident, ok := call.Fun.(*ast.Ident); ok {
+			if _, isComptime := comptimeBindings[ident.Name]; isComptime {
+				return qSubCall{
+					Family:         familyComptimeCall,
+					ComptimeFnExpr: ident,
+					ComptimeArgs:   call.Args,
+					OuterCall:      call,
+				}, true, nil
+			}
+		}
 	}
 
 	// Bare q.Try / q.NotNil.

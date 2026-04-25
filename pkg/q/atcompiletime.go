@@ -49,6 +49,34 @@ func AtCompileTimeCode[R any](fn func() string) R {
 	return zero
 }
 
+// Comptime marks a function value as comptime-callable: every call
+// site that invokes the marked value is rewritten by the preprocessor
+// into a q.AtCompileTime invocation. Recursion within the impl works
+// — call from inside the impl run as normal Go in the synthesis
+// subprocess; the outer call from the user's package is the comptime
+// boundary.
+//
+// Surface stays plain Go: declare the comptime function as
+//
+//	var fib = q.Comptime(func(n int) int {
+//	    if n < 2 { return n }
+//	    return fib(n-1) + fib(n-2)
+//	})
+//
+// then call sites read like normal function calls:
+//
+//	x := fib(10)  // rewritten to: x := q.AtCompileTime[int](func() int { return _qComptime_fib(10) })
+//	              // the compiler folds it to: x := 55
+//
+// Args must be compile-time-resolvable (literals, package-level
+// constants, or other q.Comptime / q.AtCompileTime results); a
+// runtime variable as an arg is a build error.
+//
+// At runtime, q.Comptime is the identity function — it returns its
+// argument unchanged. Call sites that the preprocessor rewrites
+// never reach this body.
+func Comptime[F any](impl F) F { return impl }
+
 // AtCompileTime evaluates fn at preprocessor time and splices the
 // result as a value at the call site.
 //

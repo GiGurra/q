@@ -334,6 +334,10 @@ func renderShape(fset *token.FileSet, src []byte, sh callShape, counter *int, al
 			subTexts[i] = buildMatchReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts)
 		case familyAtCompileTime, familyAtCompileTimeCode:
 			subTexts[i] = buildAtCompileTimeReplacement(sh.Calls[i])
+		case familyComptimeDecl:
+			subTexts[i] = buildComptimeDeclReplacement(fset, src, sh.Calls[i])
+		case familyComptimeCall:
+			subTexts[i] = buildAtCompileTimeReplacement(sh.Calls[i])
 		}
 	}
 
@@ -692,6 +696,16 @@ func buildFileLineReplacement(fset *token.FileSet, sub qSubCall) string {
 	return strconv.Quote(fmt.Sprintf("%s:%d", filepath.Base(pos.Filename), pos.Line))
 }
 
+// buildComptimeDeclReplacement returns the rewrite text for a
+// `var X = q.Comptime(impl)` call. The synthesis pass populates
+// AtCTResolved with an IIFE that defers self-binding via a local
+// var (`func() T { var _qfn T; _qfn = <impl with X→_qfn>; return _qfn }()`)
+// so the var initialiser doesn't trigger Go's init-cycle detector
+// when the impl recursively references X.
+func buildComptimeDeclReplacement(_ *token.FileSet, _ []byte, sub qSubCall) string {
+	return sub.AtCTResolved
+}
+
 // buildAtCompileTimeReplacement is the per-sub replacement for
 // q.AtCompileTime — either an inline Go literal (primitive R + default
 // JSONCodec) or an identifier reference like `_qCtValue3` for the
@@ -735,7 +749,8 @@ func isInPlaceFamily(f family) bool {
 		familyGenStringer, familyGenEnumJSONStrict, familyGenEnumJSONLax,
 		familyFields, familyAllFields, familyTypeName, familyTag,
 		familyMatch,
-		familyAtCompileTime, familyAtCompileTimeCode:
+		familyAtCompileTime, familyAtCompileTimeCode,
+		familyComptimeDecl, familyComptimeCall:
 		return true
 	}
 	return false
@@ -930,7 +945,8 @@ func renderSubCall(fset *token.FileSet, src []byte, sh callShape, subIdx int, su
 		familyFile, familyLine, familyFileLine, familyExpr,
 		familyEnumValues, familyEnumNames, familyEnumName,
 		familyEnumValid, familyEnumOrdinal,
-		familyAtCompileTime, familyAtCompileTimeCode:
+		familyAtCompileTime, familyAtCompileTimeCode,
+		familyComptimeDecl, familyComptimeCall:
 		// In-place expression transforms — the replacement text
 		// lives in subTexts[subIdx] and is applied when
 		// substituteSpans rebuilds the final stmt. No bind/check

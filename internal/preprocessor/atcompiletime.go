@@ -53,6 +53,11 @@ type atCallInfo struct {
 	LHSObj     types.Object
 	DepIdx     []int // indices of AtCompileTime calls captured by this closure
 	OrderIdx   int   // post-topo-sort index (also the _qCt<N> suffix)
+
+	// Comptime-call specific (familyComptimeCall):
+	ComptimeFnIdent *ast.Ident       // the fn name at the call site (e.g. `fib`)
+	ComptimeArgs    []ast.Expr       // call args
+	ComptimeBinding *comptimeBinding // the decl backing this call
 }
 
 // atCTOutcome is the outcome of resolveAtCompileTimeCalls.
@@ -90,6 +95,15 @@ func resolveAtCompileTimeCalls(
 	shapes []callShape,
 	info *types.Info,
 ) (atCTOutcome, []Diagnostic, error) {
+	// 0. Process q.Comptime decls: generate the IIFE-wrapped rewrite
+	//    text for each, so `var X = q.Comptime(impl)` becomes a
+	//    self-referential closure without triggering Go's init-cycle
+	//    detector. This runs before the synthesis pass proper because
+	//    the decl rewrites are pure AST manipulation (no subprocess
+	//    needed) and the comptime call sites depend on knowing which
+	//    bindings are valid.
+	populateComptimeDeclRewrites(fset, shapes, info, pkgPath)
+
 	// 1. Gather q.AtCompileTime calls.
 	calls := collectAtCallInfos(fset, files, shapes, info)
 	if len(calls) == 0 {
@@ -216,6 +230,34 @@ func collectAtCallInfos(fset *token.FileSet, files []*ast.File, shapes []callSha
 	for i := range shapes {
 		for j := range shapes[i].Calls {
 			sc := &shapes[i].Calls[j]
+			// Comptime call sites: fn(args) where fn is q.Comptime-marked.
+			if sc.Family == familyComptimeCall {
+				ident, ok := sc.ComptimeFnExpr.(*ast.Ident)
+				if !ok || comptimeBindings == nil {
+					continue
+				}
+				binding, ok := comptimeBindings[ident.Name]
+				if !ok {
+					continue
+				}
+				ci := &atCallInfo{
+					Sub:             sc,
+					Shape:           &shapes[i],
+					File:            fileByPos(sc.OuterCall.Pos()),
+					ComptimeFnIdent: ident,
+					ComptimeArgs:    sc.ComptimeArgs,
+					ComptimeBinding: binding,
+				}
+				if shapes[i].Form == formDefine && shapes[i].LHSExpr != nil {
+					if id, ok := shapes[i].LHSExpr.(*ast.Ident); ok {
+						if obj := info.Defs[id]; obj != nil {
+							ci.LHSObj = obj
+						}
+					}
+				}
+				calls = append(calls, ci)
+				continue
+			}
 			if sc.AtCTClosure == nil {
 				continue
 			}
@@ -267,6 +309,56 @@ func buildAtCompileTimeDeps(fset *token.FileSet, calls []*atCallInfo, info *type
 
 	var diags []Diagnostic
 	for i, c := range calls {
+		// Comptime call site — walk the args, not a closure body.
+		// Each arg may reference other AtCompileTime LHS bindings
+		// (cross-call captures); other free idents must be
+		// package-level / builtins.
+		if c.Sub.Family == familyComptimeCall {
+			seen := map[int]bool{}
+			for _, arg := range c.ComptimeArgs {
+				ast.Inspect(arg, func(n ast.Node) bool {
+					id, ok := n.(*ast.Ident)
+					if !ok {
+						return true
+					}
+					obj := info.Uses[id]
+					if obj == nil {
+						return true
+					}
+					if obj.Pkg() == nil {
+						return true
+					}
+					if _, isPkg := obj.(*types.PkgName); isPkg {
+						return true
+					}
+					if isPackageLevelObject(obj) {
+						return true
+					}
+					if v, isVar := obj.(*types.Var); isVar && v.IsField() {
+						return true
+					}
+					if depIdx, ok := objToIdx[obj]; ok {
+						if depIdx == i {
+							return true
+						}
+						if !seen[depIdx] {
+							seen[depIdx] = true
+							c.DepIdx = append(c.DepIdx, depIdx)
+						}
+						return true
+					}
+					pos := fset.Position(id.Pos())
+					diags = append(diags, Diagnostic{
+						File: pos.Filename,
+						Line: pos.Line,
+						Col:  pos.Column,
+						Msg:  fmt.Sprintf("q: q.Comptime call site argument references local variable %q which is neither a package-level value nor another q.AtCompileTime / q.Comptime result — comptime args must be compile-time-resolvable", id.Name),
+					})
+					return false
+				})
+			}
+			continue
+		}
 		// Walk the closure body. Any *ast.Ident whose resolved object
 		// is not declared inside the closure must either be:
 		//   - a package-level decl (allowed), or
@@ -575,6 +667,13 @@ func synthesizeAtCompileTimeMain(fset *token.FileSet, calls []*atCallInfo, info 
 		if c.Sub.Family == familyAtCompileTimeCode {
 			continue
 		}
+		if c.Sub.Family == familyComptimeCall {
+			// R = the call expression's result type from go/types.
+			if tv, ok := info.Types[c.Sub.OuterCall]; ok && tv.Type != nil {
+				c.ResultType = types.TypeString(tv.Type, qualifier)
+			}
+			continue
+		}
 		if c.Sub.AsType != nil {
 			if tv, ok := info.Types[c.Sub.AsType]; ok && tv.Type != nil {
 				c.ResultType = types.TypeString(tv.Type, qualifier)
@@ -589,20 +688,67 @@ func synthesizeAtCompileTimeMain(fset *token.FileSet, calls []*atCallInfo, info 
 		}
 	}
 
-	// Per-call closure body source text (with captures rewritten).
+	// Per-call expression text — the RHS of `_qCt<N> := <expr>`. For
+	// AtCompileTime / AtCompileTimeCode this is `func() R { ... }()`;
+	// for Comptime calls it's `<implName>(<args>)`.
 	// Also collect all imports referenced across all closures and
 	// per-file keep-alive snippets so the rewriter can preserve
 	// imports used only inside AtCompileTime closures.
 	importSet := map[string]string{} // import path → alias ("" for default)
-	var bodySrcs []string
+	callExprs := make([]string, len(calls))
 	var diags []Diagnostic
 	keepAlives := map[string]map[string]bool{} // file path → set of <alias>.<sym> snippets
 	usesUserPkg := false
-	// Re-resolution (above) only marks a call as user-pkg-using if R
-	// is a same-package named type. Closures may still reference
-	// same-package symbols inside their bodies — track that during
-	// renderClosureBody.
-	for _, c := range calls {
+	// Track unique comptime bindings referenced across all comptime
+	// calls. Each gets one impl-declaration emitted in the synthesized
+	// program.
+	comptimeImpls := map[string]*comptimeImpl{}
+	for i, c := range calls {
+		if c.Sub.Family == familyComptimeCall {
+			implName := "_qComptime_" + c.ComptimeFnIdent.Name
+			if _, exists := comptimeImpls[c.ComptimeFnIdent.Name]; !exists {
+				// Resolve impl's function type via types.
+				fnTypeText := "func()"
+				if tv, ok := info.Types[c.ComptimeBinding.Impl]; ok && tv.Type != nil {
+					fnTypeText = types.TypeString(tv.Type, qualifier)
+				}
+				comptimeImpls[c.ComptimeFnIdent.Name] = &comptimeImpl{
+					Binding: c.ComptimeBinding,
+					Name:    implName,
+					FnType:  fnTypeText,
+				}
+			}
+			// Render each arg with cross-call captures substituted.
+			argTexts, argImports, argSels, argUsesUser, argDiag := renderComptimeArgs(fset, c, captureNames, info, userPkgPath, effectiveAlias)
+			if argUsesUser {
+				usesUserPkg = true
+			}
+			if argDiag.Msg != "" {
+				diags = append(diags, argDiag)
+				continue
+			}
+			callExprs[i] = implName + "(" + strings.Join(argTexts, ", ") + ")"
+			for path, alias := range argImports {
+				if existing, ok := importSet[path]; ok && existing != "" && alias != "" && existing != alias {
+					continue
+				}
+				if alias != "" {
+					importSet[path] = alias
+				} else if _, ok := importSet[path]; !ok {
+					importSet[path] = ""
+				}
+			}
+			if c.File != nil {
+				path := fset.Position(c.File.Pos()).Filename
+				if keepAlives[path] == nil {
+					keepAlives[path] = map[string]bool{}
+				}
+				for snippet := range argSels {
+					keepAlives[path][snippet] = true
+				}
+			}
+			continue
+		}
 		body, imports, sels, usedUser, diag := renderClosureBody(fset, c, captureNames, info, userPkgPath, effectiveAlias)
 		if usedUser {
 			usesUserPkg = true
@@ -611,7 +757,7 @@ func synthesizeAtCompileTimeMain(fset *token.FileSet, calls []*atCallInfo, info 
 			diags = append(diags, diag)
 			continue
 		}
-		bodySrcs = append(bodySrcs, body)
+		callExprs[i] = "func() " + c.ResultType + " {\n" + indentBlock(body, "\t\t") + "\n\t}()"
 		for path, alias := range imports {
 			if existing, ok := importSet[path]; ok && existing != "" && alias != "" && existing != alias {
 				// Conflicting aliases — pick the first.
@@ -686,10 +832,28 @@ func synthesizeAtCompileTimeMain(fset *token.FileSet, calls []*atCallInfo, info 
 		}
 	}
 	b.WriteString(")\n\n")
+	// Emit one impl declaration per unique comptime function used.
+	// Self-references to the user's name (`fib` inside the closure
+	// referring to the package-level `fib` var) are rewritten to the
+	// synthesised name (`_qComptime_fib`) so the recursion resolves
+	// inside the synthesis program rather than chasing the user
+	// package's symbol.
+	implNames := make([]string, 0, len(comptimeImpls))
+	for name := range comptimeImpls {
+		implNames = append(implNames, name)
+	}
+	sort.Strings(implNames)
+	for _, userName := range implNames {
+		impl := comptimeImpls[userName]
+		implSrc := renderComptimeImpl(fset, impl, comptimeImpls, info, userPkgPath, effectiveAlias)
+		fmt.Fprintf(&b, "var %s %s\n", impl.Name, impl.FnType)
+		fmt.Fprintf(&b, "var _ = func() bool { %s = %s; return true }()\n\n", impl.Name, implSrc)
+	}
 	b.WriteString("func main() {\n")
-	for i, body := range bodySrcs {
+	for i, expr := range callExprs {
 		c := calls[i]
-		fmt.Fprintf(&b, "\t_qCt%d := func() %s {\n%s\n\t}()\n", c.OrderIdx, c.ResultType, indentBlock(body, "\t\t"))
+		fmt.Fprintf(&b, "\t_qCt%d := %s\n", c.OrderIdx, expr)
+		_ = c
 	}
 	b.WriteString("\tout := make([]json.RawMessage, 0, ")
 	fmt.Fprintf(&b, "%d)\n", len(calls))
@@ -875,6 +1039,335 @@ func renderClosureBody(fset *token.FileSet, c *atCallInfo, captureNames map[type
 	bodyText = strings.TrimSuffix(bodyText, "}")
 	bodyText = strings.TrimSpace(bodyText)
 	return bodyText, importsUsed, keepAliveSnippets, usedUserPkg, Diagnostic{}
+}
+
+// populateComptimeDeclRewrites walks the per-package shapes for
+// q.Comptime var decls and computes the IIFE-wrapped rewrite text
+// for each. The rewriter consults the resulting AtCTResolved field
+// when substituting the q.Comptime(...) call span.
+//
+// Why IIFE-wrap: a `var Fib = q.Comptime(func(n int) int { ... Fib(...) ... })`
+// would trigger Go's init-cycle detector because Fib's initializer
+// transitively references Fib via the closure body. We rewrite it to
+// `var Fib = func() T { var _qfn T; _qfn = <impl with Fib→_qfn>; return _qfn }()`
+// — a self-referential closure constructed inside an IIFE, so the
+// outer Fib is set to a fully-bound function value with no init-time
+// dependency on Fib itself.
+func populateComptimeDeclRewrites(fset *token.FileSet, shapes []callShape, info *types.Info, pkgPath string) {
+	for i := range shapes {
+		sh := &shapes[i]
+		for j := range sh.Calls {
+			sc := &sh.Calls[j]
+			if sc.Family != familyComptimeDecl || sc.AtCTClosure == nil {
+				continue
+			}
+			lhsIdent, ok := sh.LHSExpr.(*ast.Ident)
+			if !ok {
+				continue
+			}
+			// Resolve T (the function type) from info.Types on the
+			// FuncLit. Fall back to printer for the type expression.
+			fnType := ""
+			if tv, ok := info.Types[sc.AtCTClosure]; ok && tv.Type != nil {
+				fnType = types.TypeString(tv.Type, func(p *types.Package) string {
+					if p == nil || p.Path() == pkgPath {
+						return ""
+					}
+					return p.Name()
+				})
+			}
+			if fnType == "" {
+				var sb strings.Builder
+				_ = printer.Fprint(&sb, fset, sc.AtCTClosure.Type)
+				fnType = sb.String()
+			}
+			// Read the FuncLit source from disk; substitute references
+			// to the LHS binding ident with `_qfn`.
+			path := fset.Position(sc.AtCTClosure.Pos()).Filename
+			data, err := os.ReadFile(path)
+			if err != nil {
+				continue
+			}
+			litStart := fset.Position(sc.AtCTClosure.Pos()).Offset
+			litEnd := fset.Position(sc.AtCTClosure.End()).Offset
+			litText := string(data[litStart:litEnd])
+			bindObj := info.Defs[lhsIdent]
+			if bindObj != nil {
+				type span struct {
+					start, end int
+				}
+				var spans []span
+				ast.Inspect(sc.AtCTClosure, func(n ast.Node) bool {
+					id, ok := n.(*ast.Ident)
+					if !ok {
+						return true
+					}
+					if obj := info.Uses[id]; obj == bindObj {
+						spans = append(spans, span{
+							start: fset.Position(id.Pos()).Offset,
+							end:   fset.Position(id.End()).Offset,
+						})
+					}
+					return true
+				})
+				sort.Slice(spans, func(i, j int) bool { return spans[i].start > spans[j].start })
+				for _, sp := range spans {
+					rs := sp.start - litStart
+					re := sp.end - litStart
+					if rs < 0 || re > len(litText) {
+						continue
+					}
+					litText = litText[:rs] + "_qfn" + litText[re:]
+				}
+			}
+			sc.AtCTResolved = "func() " + fnType + " { var _qfn " + fnType + "; _qfn = " + litText + "; return _qfn }()"
+		}
+	}
+}
+
+// comptimeImpl pairs a user-side comptime binding with its
+// synthesised name + function-type text. The synthesis pass tracks
+// one entry per unique comptime function referenced across all
+// comptime call sites in the package.
+type comptimeImpl struct {
+	Binding *comptimeBinding
+	Name    string // _qComptime_<userName>
+	FnType  string // signature text, e.g. `func(int) int`
+}
+
+// renderComptimeArgs renders each comptime call argument to source
+// text, substituting cross-call captured variables with their
+// `_qCt<N>` references and same-package symbols with the userAlias
+// qualifier (when applicable).
+func renderComptimeArgs(fset *token.FileSet, c *atCallInfo, captureNames map[types.Object]string, info *types.Info, userPkgPath, userAlias string) ([]string, map[string]string, map[string]bool, bool, Diagnostic) {
+	importsUsed := map[string]string{}
+	keepAliveSnippets := map[string]bool{}
+	usedUserPkg := false
+	var srcBytes []byte
+	if c.File != nil {
+		path := fset.Position(c.File.Pos()).Filename
+		data, err := os.ReadFile(path)
+		if err == nil {
+			srcBytes = data
+		}
+	}
+	out := make([]string, len(c.ComptimeArgs))
+	for argIdx, arg := range c.ComptimeArgs {
+		if srcBytes == nil {
+			var sb strings.Builder
+			_ = printer.Fprint(&sb, fset, arg)
+			out[argIdx] = sb.String()
+			continue
+		}
+		argStart := fset.Position(arg.Pos()).Offset
+		argEnd := fset.Position(arg.End()).Offset
+		type span struct {
+			start, end int
+			text       string
+		}
+		var spans []span
+		skipIdent := map[*ast.Ident]bool{}
+		ast.Inspect(arg, func(n ast.Node) bool {
+			switch nn := n.(type) {
+			case *ast.SelectorExpr:
+				skipIdent[nn.Sel] = true
+			case *ast.CompositeLit:
+				for _, elt := range nn.Elts {
+					if kv, ok := elt.(*ast.KeyValueExpr); ok {
+						if id, ok := kv.Key.(*ast.Ident); ok {
+							skipIdent[id] = true
+						}
+					}
+				}
+			}
+			return true
+		})
+		ast.Inspect(arg, func(n ast.Node) bool {
+			switch nn := n.(type) {
+			case *ast.Ident:
+				if skipIdent[nn] {
+					return true
+				}
+				if obj := info.Uses[nn]; obj != nil {
+					if name, ok := captureNames[obj]; ok {
+						s := fset.Position(nn.Pos()).Offset
+						e := fset.Position(nn.End()).Offset
+						spans = append(spans, span{start: s, end: e, text: name})
+						return true
+					}
+					if userAlias != "" && obj.Pkg() != nil && obj.Pkg().Path() == userPkgPath {
+						if isPackageLevelObject(obj) {
+							s := fset.Position(nn.Pos()).Offset
+							e := fset.Position(nn.End()).Offset
+							spans = append(spans, span{start: s, end: e, text: userAlias + "." + nn.Name})
+							usedUserPkg = true
+							return true
+						}
+					}
+				}
+			case *ast.SelectorExpr:
+				if x, ok := nn.X.(*ast.Ident); ok {
+					if obj := info.Uses[x]; obj != nil {
+						if pkgName, isPkg := obj.(*types.PkgName); isPkg {
+							p := pkgName.Imported().Path()
+							alias := pkgName.Name()
+							lastSeg := p
+							if i := strings.LastIndex(lastSeg, "/"); i >= 0 {
+								lastSeg = lastSeg[i+1:]
+							}
+							if alias == lastSeg {
+								alias = ""
+							}
+							importsUsed[p] = alias
+							if p == qPkgImportPath {
+								return true
+							}
+							selObj := info.Uses[nn.Sel]
+							if fn, isFunc := selObj.(*types.Func); isFunc {
+								if sig, ok := fn.Type().(*types.Signature); ok {
+									if sig.RecvTypeParams() != nil || sig.TypeParams() != nil {
+										return true
+									}
+								}
+							}
+							snippet := x.Name + "." + nn.Sel.Name
+							if _, isType := selObj.(*types.TypeName); isType {
+								keepAliveSnippets["T:"+snippet] = true
+							} else {
+								keepAliveSnippets["V:"+snippet] = true
+							}
+						}
+					}
+				}
+			}
+			return true
+		})
+		sort.Slice(spans, func(i, j int) bool { return spans[i].start > spans[j].start })
+		argText := string(srcBytes[argStart:argEnd])
+		for _, sp := range spans {
+			rs := sp.start - argStart
+			re := sp.end - argStart
+			if rs < 0 || re > len(argText) {
+				continue
+			}
+			argText = argText[:rs] + sp.text + argText[re:]
+		}
+		out[argIdx] = argText
+	}
+	return out, importsUsed, keepAliveSnippets, usedUserPkg, Diagnostic{}
+}
+
+// renderComptimeImpl renders the impl func literal source for a
+// comptime function, with self-references rewritten to the
+// synthesised name (so recursion resolves inside the synthesis
+// program). Cross-comptime-fn references (one comptime fn calling
+// another) are rewritten to the corresponding synthesised name.
+// Same-package decls are qualified with userAlias.
+func renderComptimeImpl(fset *token.FileSet, impl *comptimeImpl, allImpls map[string]*comptimeImpl, info *types.Info, userPkgPath, userAlias string) string {
+	lit := impl.Binding.Impl
+	if lit == nil {
+		return "nil"
+	}
+	var srcBytes []byte
+	implPath := fset.Position(lit.Pos()).Filename
+	if implPath != "" {
+		if data, err := os.ReadFile(implPath); err == nil {
+			srcBytes = data
+		}
+	}
+	if srcBytes == nil {
+		var sb strings.Builder
+		_ = printer.Fprint(&sb, fset, lit)
+		return sb.String()
+	}
+	litStart := fset.Position(lit.Pos()).Offset
+	litEnd := fset.Position(lit.End()).Offset
+	type span struct {
+		start, end int
+		text       string
+	}
+	var spans []span
+	skipIdent := map[*ast.Ident]bool{}
+	ast.Inspect(lit, func(n ast.Node) bool {
+		switch nn := n.(type) {
+		case *ast.SelectorExpr:
+			skipIdent[nn.Sel] = true
+		case *ast.CompositeLit:
+			for _, elt := range nn.Elts {
+				if kv, ok := elt.(*ast.KeyValueExpr); ok {
+					if id, ok := kv.Key.(*ast.Ident); ok {
+						skipIdent[id] = true
+					}
+				}
+			}
+		}
+		return true
+	})
+	// Resolve the user's binding ident object so we can detect
+	// self-references via *types.Object identity (more robust than
+	// name matching in case of shadowing).
+	var bindObj types.Object
+	if d := info.Defs[impl.Binding.Ident]; d != nil {
+		bindObj = d
+	}
+	// Map of other-comptime-fn user-name → synthesised name.
+	otherImplsByObj := map[types.Object]string{}
+	for userName, ci := range allImpls {
+		if userName == impl.Binding.Ident.Name {
+			continue
+		}
+		if d := info.Defs[ci.Binding.Ident]; d != nil {
+			otherImplsByObj[d] = ci.Name
+		}
+	}
+	ast.Inspect(lit, func(n ast.Node) bool {
+		id, ok := n.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		if skipIdent[id] {
+			return true
+		}
+		obj := info.Uses[id]
+		if obj == nil {
+			return true
+		}
+		// Self-reference to this impl's binding.
+		if bindObj != nil && obj == bindObj {
+			s := fset.Position(id.Pos()).Offset
+			e := fset.Position(id.End()).Offset
+			spans = append(spans, span{start: s, end: e, text: impl.Name})
+			return true
+		}
+		// Reference to another comptime fn's binding.
+		if name, ok := otherImplsByObj[obj]; ok {
+			s := fset.Position(id.Pos()).Offset
+			e := fset.Position(id.End()).Offset
+			spans = append(spans, span{start: s, end: e, text: name})
+			return true
+		}
+		// Same-package package-level decl: qualify with userAlias.
+		if userAlias != "" && obj.Pkg() != nil && obj.Pkg().Path() == userPkgPath {
+			if isPackageLevelObject(obj) {
+				s := fset.Position(id.Pos()).Offset
+				e := fset.Position(id.End()).Offset
+				spans = append(spans, span{start: s, end: e, text: userAlias + "." + id.Name})
+				return true
+			}
+		}
+		return true
+	})
+	sort.Slice(spans, func(i, j int) bool { return spans[i].start > spans[j].start })
+	implText := string(srcBytes[litStart:litEnd])
+	for _, sp := range spans {
+		rs := sp.start - litStart
+		re := sp.end - litStart
+		if rs < 0 || re > len(implText) {
+			continue
+		}
+		implText = implText[:rs] + sp.text + implText[re:]
+	}
+	return implText
 }
 
 // indentBlock prepends indent to each line of text.
