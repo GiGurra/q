@@ -167,7 +167,19 @@ if errors.Is(err, q.ErrRequireFailed) { ... }
 
 Validations bubble like every other failure — no `defer recover()` on the caller's side.
 
-### Mid-expression debug print + auto-keyed slog
+### Production-grade slog attrs
+
+```go
+slog.Info("request handled",
+    q.SlogAttr(reqID),     // → slog.Any("reqID", reqID)
+    q.SlogAttr(elapsed),   // → slog.Any("elapsed", elapsed)
+    q.SlogFile(),          // → slog.Any("file", "main.go")
+    q.SlogLine())          // → slog.Any("line", 42)
+```
+
+Auto-derives keys from the source text / file / line at compile time. No runtime stack walk; everything's a constant the compiler folds in.
+
+### Dev-time `dbg!` and stderr-flavored slog
 
 ```go
 u := loadUser(q.DebugPrintln(id))
@@ -177,7 +189,7 @@ slog.Info("loaded", q.DebugSlogAttr(userID))
 // → slog.Info("loaded", slog.Any("main.go:42 userID", userID))
 ```
 
-Both auto-capture the source text and `file:line` at compile time — no retyping the variable name as a key.
+The `Debug*` family carries `file:line` *inside the key text* — easy to spot in scrolling stderr, but noisy in shipping logs. Pull these out before merging; reach for `q.SlogAttr` / `q.SlogFile` / `q.SlogLine` for permanent logging.
 
 ### Trace a bubble back to its call site
 

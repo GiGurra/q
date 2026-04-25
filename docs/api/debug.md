@@ -1,6 +1,10 @@
 # `q.DebugPrintln`, `q.DebugPrintlnAt`, `q.DebugSlogAttr`
 
-Two debug-time helpers that auto-capture the source text and `file:line` of their argument at compile time, so you don't have to retype it as a label:
+The **Debug** family is for **dev-time / temporary** instrumentation — quick `dbg!`-style probes you sprinkle into code while figuring something out, then pull back out before shipping. The keys / labels include the call-site `file:line` to make the output unambiguous when a print or slog attr ends up on stderr without surrounding context.
+
+> **For production logging, reach for [`q.SlogAttr` / `q.SlogFile` / `q.SlogLine`](#production-counterparts) instead.** Those produce clean attr keys (just the source text — no `file:line` prefix), suitable for the structured logs your service actually ships.
+
+The Debug family auto-captures the source text and `file:line` of their argument at compile time, so you don't have to retype it as a label:
 
 - **`q.DebugPrintln`** — Go's missing `dbg!` / `println!`. Prints the value with its source text and call site, returns it unchanged so the call can sit mid-expression.
 - **`q.DebugSlogAttr`** — produces a `slog.Attr` keyed by the same auto-generated label. Use inside `slog.Info` / `slog.Error` / etc. to attach a labelled value to a structured-log call.
@@ -54,18 +58,32 @@ slog.Info("loaded", slog.Any("main.go:17 userID", userID))
 //   label `main.go:17 userID` mapping to the userID's value.
 ```
 
-Use it whenever you want a structured-log line that includes a *value* without retyping the variable name as the slog key. Several of these can sit alongside each other:
-
-```go
-slog.Info("step done",
-    q.DebugSlogAttr(input),
-    q.DebugSlogAttr(processed),
-    q.DebugSlogAttr(elapsed))
-```
-
-The handler sees three `slog.Attr`s with auto-generated keys `main.go:42 input`, `main.go:42 processed`, `main.go:42 elapsed` — visible in JSON / text / any other slog format.
+Use it whenever you want a *temporary* structured-log line that includes a value with location info baked into the key. For permanent / production-grade slog calls, prefer `q.SlogAttr` (clean key without the `file:line` prefix) — see below.
 
 `q.DebugSlogAttr` does not pass the value through (it returns `slog.Attr`, not `T`). If you want mid-expression instrumentation, use `q.DebugPrintln`.
+
+## Production counterparts
+
+These are documented at [q.SlogAttr / q.SlogFile / q.SlogLine](slog.md):
+
+- **`q.SlogAttr(v)`** — `slog.Any("v", v)`. Just the source text as the key. No file:line. Drop into shipping code.
+- **`q.SlogFile()`** — `slog.Any("file", "main.go")`.
+- **`q.SlogLine()`** — `slog.Any("line", 42)`.
+
+The split is deliberate: Debug-flavored helpers carry call-site identity in the *key text* itself (which is noisy in production logs but unmistakable in stderr scrolling); the Slog-flavored helpers keep keys clean and let you attach location info as separate attrs only when you want it.
+
+```go
+// dev-time, while figuring out a bug:
+slog.Info("step", q.DebugSlogAttr(intermediate))
+// → key: "main.go:42 intermediate"
+
+// production-grade equivalent:
+slog.Info("step",
+    q.SlogAttr(intermediate),
+    q.SlogFile(),
+    q.SlogLine())
+// → keys: "intermediate", "file", "line"
+```
 
 ## Configurable destination for `q.DebugPrintln`
 
@@ -96,5 +114,6 @@ Prints `id`, then passes the same value into `loadUser`, then bubbles whatever `
 
 ## See also
 
+- [q.SlogAttr / q.SlogFile / q.SlogLine](slog.md) — production-grade slog helpers (clean keys, no file:line prefix).
 - [q.Try](try.md) — the most common mid-expression neighbour.
 - [q.Trace](trace.md) — file:line prefix on bubbled errors (vs. q.DebugPrintln's print + pass-through).

@@ -46,6 +46,9 @@
   - `DebugPrintln[T any](v T) T` — panic stub; the preprocessor rewrites each call site to `q.DebugPrintlnAt("<file>:<line> <src-text>", v)`. Pass-through, usable mid-expression. Renamed from the original `q.Debug`.
   - `DebugPrintlnAt[T any](label string, v T) T` — runtime helper paired with DebugPrintln. Writes to `q.DebugWriter` (default `os.Stderr`, reassignable for test capture).
   - `DebugSlogAttr[T any](v T) slog.Attr` — panic stub; the preprocessor rewrites each call site directly to `slog.Any("<file>:<line> <src-text>", v)`. No q runtime helper on the value path — expands to stdlib `log/slog`. The rewriter detects this family at the shape level and injects the `log/slog` import.
+  - `SlogAttr[T any](v T) slog.Attr` — panic stub; rewrites to `slog.Any("<src-text>", v)` (no file:line prefix — the production-grade slog helper, vs DebugSlogAttr's dev-time flavor).
+  - `SlogFile() slog.Attr` — panic stub; rewrites to `slog.Any("file", "<basename>")` from the call site's source position.
+  - `SlogLine() slog.Attr` — panic stub; rewrites to `slog.Any("line", <line>)` from the call site's source position.
   - `DebugWriter io.Writer = os.Stderr` — user-reassignable destination for DebugPrintlnAt output.
   - `Async[T any](fn func() (T, error)) Future[T]` — runtime helper; spawns `fn` in a goroutine, returns a `Future[T]` backed by a buffered channel.
   - `AwaitRaw[T any](f Future[T]) (T, error)` — runtime helper; blocks on the Future and returns the tuple.
@@ -115,6 +118,7 @@
 - `internal/preprocessor/testdata/cases/recv_as_family_run_ok/` — fixture for `q.Recv` / `q.RecvE` and `q.As[T]` / `q.AsE[T]`. Both bare sentinels, Wrap/Wrapf/Err/Catch on both paths, errors.Is identity for both sentinels.
 - `internal/preprocessor/testdata/cases/debug_run_ok/` — fixture for `q.DebugPrintln`. Captures DebugWriter into a bytes.Buffer, line-number-normalises output, asserts pass-through semantics for int/string/arithmetic + direct DebugPrintlnAt call.
 - `internal/preprocessor/testdata/cases/debug_slog_run_ok/` — fixture for `q.DebugSlogAttr`. Builds a slog.TextHandler with a bytes.Buffer destination and a ReplaceAttr that drops the time attr; asserts the rewritten `slog.Any("<file>:<line> <src>", v)` calls produce the expected key=value text-handler output across `slog.Info` / `slog.Error` / multi-attr calls.
+- `internal/preprocessor/testdata/cases/slog_attr_run_ok/` — fixture for `q.SlogAttr` / `q.SlogFile` / `q.SlogLine`. Captures slog.TextHandler output, asserts SlogAttr's keys are clean source-text (no file:line prefix), SlogFile emits the basename, SlogLine emits the line number, and they compose freely with each other in `slog.Info` varargs.
 - `internal/preprocessor/testdata/cases/async_await_run_ok/` — fixture for q.Async + q.Await + q.AwaitE. Ok/err/wrap paths for Await, AwaitE.Catch recover+bubble.
 - `internal/preprocessor/testdata/cases/checkctx_run_ok/` — fixture for q.CheckCtx + q.CheckCtxE. Covers bare checkpoint (both `error`-only and `(T, error)` signatures) plus every CheckCtxE chain method (Err/ErrF/Wrap/Wrapf/Catch-suppress/Catch-bubble) on live + cancelled ctx. Asserts `errors.Is(err, context.Canceled)` survives a Wrap.
 - `internal/preprocessor/testdata/cases/recv_await_ctx_run_ok/` — fixture for q.RecvCtx / q.RecvCtxE / q.AwaitCtx / q.AwaitCtxE. Covers happy path, channel close (ErrChanClosed), ctx cancel (Canceled / DeadlineExceeded), chain Wrap, chain Catch recover, and chain Err-replacement with sentinel identity check.

@@ -127,8 +127,11 @@ func rewriteFile(fset *token.FileSet, file *ast.File, src []byte, shapes []callS
 	needsSlog := false
 	for _, sh := range shapes {
 		for _, c := range sh.Calls {
-			if c.Family == familyDebugSlogAttr {
+			switch c.Family {
+			case familyDebugSlogAttr, familySlogAttr, familySlogFile, familySlogLine:
 				needsSlog = true
+			}
+			if needsSlog {
 				break
 			}
 		}
@@ -230,6 +233,12 @@ func renderShape(fset *token.FileSet, src []byte, sh callShape, counter *int, al
 			subTexts[i] = buildDebugPrintlnReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts, alias)
 		case familyDebugSlogAttr:
 			subTexts[i] = buildDebugSlogAttrReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts)
+		case familySlogAttr:
+			subTexts[i] = buildSlogAttrReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts)
+		case familySlogFile:
+			subTexts[i] = buildSlogFileReplacement(fset, sh.Calls[i])
+		case familySlogLine:
+			subTexts[i] = buildSlogLineReplacement(fset, sh.Calls[i])
 		}
 	}
 
@@ -527,13 +536,47 @@ func buildDebugSlogAttrReplacement(fset *token.FileSet, src []byte, sub qSubCall
 	return fmt.Sprintf("slog.Any(%s, %s)", debugLabel(fset, src, sub), innerText)
 }
 
+// buildSlogAttrReplacement is the per-sub replacement for q.SlogAttr:
+// `slog.Any("<src>", <innerText>)` — keyed by the argument's literal
+// source text only, no file:line prefix. Use it for production-style
+// structured logging where the call site location isn't part of the
+// log record.
+func buildSlogAttrReplacement(fset *token.FileSet, src []byte, sub qSubCall, subs []qSubCall, subTexts []string) string {
+	innerStart := fset.Position(sub.InnerExpr.Pos()).Offset
+	innerEnd := fset.Position(sub.InnerExpr.End()).Offset
+	srcText := string(src[innerStart:innerEnd])
+	innerText := substituteSpans(fset, src, innerStart, innerEnd, subs, subTexts)
+	return fmt.Sprintf("slog.Any(%s, %s)", strconv.Quote(srcText), innerText)
+}
+
+// buildSlogFileReplacement is the per-sub replacement for q.SlogFile:
+// `slog.Any("file", "<basename>")`. The basename is captured from
+// OuterCall's source position at compile time.
+func buildSlogFileReplacement(fset *token.FileSet, sub qSubCall) string {
+	pos := fset.Position(sub.OuterCall.Pos())
+	return fmt.Sprintf("slog.Any(%s, %s)", strconv.Quote("file"), strconv.Quote(filepath.Base(pos.Filename)))
+}
+
+// buildSlogLineReplacement is the per-sub replacement for q.SlogLine:
+// `slog.Any("line", <line-int>)`. The line is captured from
+// OuterCall's source position at compile time.
+func buildSlogLineReplacement(fset *token.FileSet, sub qSubCall) string {
+	pos := fset.Position(sub.OuterCall.Pos())
+	return fmt.Sprintf("slog.Any(%s, %d)", strconv.Quote("line"), pos.Line)
+}
+
 // isInPlaceFamily reports whether a family rewrites the call
 // expression in place (no bind/check block, no return) so the
 // substituted statement body is the entire output. Used to short-
 // circuit block-emission and to decide between the bind-then-stmt
 // shape and the substitute-only shape.
 func isInPlaceFamily(f family) bool {
-	return f == familyDebugPrintln || f == familyDebugSlogAttr
+	switch f {
+	case familyDebugPrintln, familyDebugSlogAttr,
+		familySlogAttr, familySlogFile, familySlogLine:
+		return true
+	}
+	return false
 }
 
 // orderInnermostFirst returns indices into subs ordered so that
@@ -722,7 +765,7 @@ func renderSubCall(fset *token.FileSet, src []byte, sh callShape, subIdx int, su
 	case familyAsE:
 		text, fmtUsed, errorsUsed, err := renderAsE(fset, src, sh, sub, counter, subs, subTexts)
 		return text, fmtUsed, errorsUsed, false, err
-	case familyDebugPrintln, familyDebugSlogAttr:
+	case familyDebugPrintln, familyDebugSlogAttr, familySlogAttr, familySlogFile, familySlogLine:
 		// In-place expression transforms — the replacement text
 		// lives in subTexts[subIdx] and is applied when
 		// substituteSpans rebuilds the final stmt. No bind/check

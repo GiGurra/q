@@ -737,6 +737,53 @@ func DebugSlogAttr[T any](v T) slog.Attr {
 	return slog.Attr{}
 }
 
+// SlogAttr returns a slog.Attr keyed by the source text of v
+// (captured at compile time), with v as the value. Use it to
+// attach a labelled value to a structured-log call without
+// retyping the variable name as the slog key:
+//
+//	slog.Info("loaded", q.SlogAttr(userID))
+//	// → slog.Info("loaded", slog.Any("userID", userID))
+//
+// Unlike q.DebugSlogAttr, q.SlogAttr does NOT include the call-site
+// file:line in the key — it's the production-grade slog helper for
+// attaching named values, and a clean key matches typical slog
+// output expectations. Pair with q.SlogFile / q.SlogLine when you
+// want location info as separate attrs.
+//
+// The preprocessor rewrites every q.SlogAttr call site directly to
+// slog.Any at compile time; no q runtime helper sits on the value
+// path. The log/slog import is auto-injected when this family
+// appears.
+func SlogAttr[T any](v T) slog.Attr {
+	panicUnrewritten("q.SlogAttr")
+	return slog.Attr{}
+}
+
+// SlogFile returns a slog.Attr with key "file" and the basename of
+// the call site's source file as value (e.g. "main.go"). Captured
+// at compile time. Pair with q.SlogLine for "log this with where
+// it was emitted" without writing the location info by hand:
+//
+//	slog.Info("processed", q.SlogFile(), q.SlogLine())
+//	// → slog.Info("processed", slog.Any("file", "main.go"), slog.Any("line", 42))
+//
+// Production-friendly counterpart to runtime.Caller / debug.Stack:
+// the location is constant per call site, evaluated once at
+// compile time, and shows up as ordinary slog attrs in your log
+// output.
+func SlogFile() slog.Attr {
+	panicUnrewritten("q.SlogFile")
+	return slog.Attr{}
+}
+
+// SlogLine returns a slog.Attr with key "line" and the integer line
+// number of the call site as value. See q.SlogFile.
+func SlogLine() slog.Attr {
+	panicUnrewritten("q.SlogLine")
+	return slog.Attr{}
+}
+
 // Recv receives from ch and forwards the value; the preprocessor
 // rewrites the call site into the inlined `v, _ok := <-ch; if !_ok
 // { return zero, q.ErrChanClosed }` shape. Use q.RecvE to supply a

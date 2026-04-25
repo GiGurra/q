@@ -1,0 +1,6 @@
+--- slog ---
+level=INFO msg=loaded id=7
+level=INFO msg=doubled id*2=14
+level=INFO msg=pair id=7 name=alice
+level=INFO msg=located file=main.go line=N
+level=INFO msg=mixed id=7 file=main.go line=N

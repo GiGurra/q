@@ -59,6 +59,9 @@ const (
 	familyAsE         // q.AsE[T](x).<method> — chain variant
 	familyDebugPrintln  // q.DebugPrintln(v) — in-place rewrite to q.DebugPrintlnAt("label", v)
 	familyDebugSlogAttr // q.DebugSlogAttr(v) — in-place rewrite to slog.Any("label", v)
+	familySlogAttr      // q.SlogAttr(v) — in-place rewrite to slog.Any("<src>", v)
+	familySlogFile      // q.SlogFile() — in-place rewrite to slog.Any("file", "<basename>")
+	familySlogLine      // q.SlogLine() — in-place rewrite to slog.Any("line", <line-int>)
 	familyAwait       // q.Await(f) — Try-like bubble using q.AwaitRaw as the source
 	familyAwaitE      // q.AwaitE(f).<method> — TryE-like chain over q.AwaitRaw
 	familyRecoverAuto  // defer q.Recover()       — inject &err from enclosing sig
@@ -782,6 +785,32 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 			return qSubCall{}, false, fmt.Errorf("q.DebugSlogAttr must take exactly one argument (the value to wrap as a slog.Attr); got %d", len(call.Args))
 		}
 		return qSubCall{Family: familyDebugSlogAttr, InnerExpr: call.Args[0], OuterCall: expr}, true, nil
+	}
+	// Bare q.SlogAttr — in-place rewrite to slog.Any keyed by the
+	// argument's source text only (no file:line prefix). The
+	// production-grade slog helper.
+	if isSelector(call.Fun, alias, "SlogAttr") {
+		if len(call.Args) != 1 {
+			return qSubCall{}, false, fmt.Errorf("q.SlogAttr must take exactly one argument (the value to wrap as a slog.Attr); got %d", len(call.Args))
+		}
+		return qSubCall{Family: familySlogAttr, InnerExpr: call.Args[0], OuterCall: expr}, true, nil
+	}
+	// Bare q.SlogFile — zero-arg in-place rewrite to
+	// slog.Any("file", "<basename>"). The file basename is captured
+	// at compile time from OuterCall's position.
+	if isSelector(call.Fun, alias, "SlogFile") {
+		if len(call.Args) != 0 {
+			return qSubCall{}, false, fmt.Errorf("q.SlogFile takes no arguments; got %d", len(call.Args))
+		}
+		return qSubCall{Family: familySlogFile, OuterCall: expr}, true, nil
+	}
+	// Bare q.SlogLine — zero-arg in-place rewrite to
+	// slog.Any("line", <line-int>).
+	if isSelector(call.Fun, alias, "SlogLine") {
+		if len(call.Args) != 0 {
+			return qSubCall{}, false, fmt.Errorf("q.SlogLine takes no arguments; got %d", len(call.Args))
+		}
+		return qSubCall{Family: familySlogLine, OuterCall: expr}, true, nil
 	}
 	// Bare q.Recv — channel receive with close bubble.
 	if isSelector(call.Fun, alias, "Recv") {

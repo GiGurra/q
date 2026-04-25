@@ -55,6 +55,7 @@ Around that core sit a handful of orthogonal helpers — context cancellation, f
 | [`q.RecvAny` / `q.Drain` / `q.DrainAll`](api/channel_multi.md) | Multi-channel select / drain-until-close / per-channel drain-all. |
 | [`q.RecvCtx` / `q.RecvCtxE`](api/recv_ctx.md) | ctx-aware channel receive — bubble on close or cancel. |
 | [`q.Require`](api/require.md) | Runtime precondition — bubble an error when `cond` is false. |
+| [`q.SlogAttr` / `q.SlogFile` / `q.SlogLine`](api/slog.md) | Production-grade `slog.Attr` builders with auto-derived keys (source text, file, line). |
 | [`q.Timeout` / `q.Deadline`](api/timeout.md) | Derive a child ctx with an auto-`defer cancel()`. |
 | [`q.TODO` / `q.Unreachable`](api/todo.md) | Rust-style panic markers with file:line. |
 | [`q.Trace` / `q.TraceE`](api/trace.md) | Try-shape with a compile-time `file:line:` prefix on the bubble. |
