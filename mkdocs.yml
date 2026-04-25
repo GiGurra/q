@@ -39,6 +39,7 @@ nav:
   - Home: index.md
   - Getting Started: getting-started.md
   - API:
+    - q.AtCompileTime / AtCompileTimeCode (compile-time evaluation + macros): api/atcompiletime.md
     - q.As:                    api/as.md
     - q.Async:                 api/async.md
     - q.AwaitAll / AwaitAny:   api/await_multi.md
