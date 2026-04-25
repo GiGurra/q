@@ -28,51 +28,135 @@ Use cases that motivate it:
 ```go
 // Pure runtime stub — body panics if reached. Preprocessor rewrites
 // every legitimate call site away.
-func AtCompileTime[R any](fn func() R) R
+//
+// The optional codec controls how the result is serialized between
+// the preprocessor-time subprocess and the runtime user-package
+// init. Default is q.JSONCodec[R](). Other built-ins:
+// q.GobCodec[R](), q.BinaryCodec[R]() (for fixed-size types).
+// Users can implement Codec[R] for custom encodings.
+func AtCompileTime[R any](fn func() R, codec ...Codec[R]) R
+
+// Codec encodes/decodes T to/from bytes. Used by q.AtCompileTime
+// to pass values from preprocessor-time to runtime.
+type Codec[T any] interface {
+    Encode(v T) ([]byte, error)
+    Decode(data []byte, v *T) error
+}
+
+func JSONCodec[T any]() Codec[T]   // encoding/json — text, lossy on unexported fields
+func GobCodec[T any]() Codec[T]    // encoding/gob — handles unexported fields when registered
+func BinaryCodec[T any]() Codec[T] // encoding/binary — fixed-size structs only, smallest output
 ```
+
+Codecs are pure runtime — `Codec[T]` is a real interface, the constructors return real values, no preprocessor magic on the codec path. The preprocessor only needs to know which codec to invoke in the synthesized program (extracted from the call's second arg's source text).
 
 **Restrictions enforced at compile time:**
 
 1. The argument MUST be a `*ast.FuncLit` literal (not a named function reference, not a variable). Diagnostic: `q.AtCompileTime: argument must be a function literal (anonymous function), not a function reference or variable`.
-2. The closure MUST have no captures from the enclosing scope, EXCEPT other `q.AtCompileTime` results (Phase 3). Phase 1 rejects all captures. Diagnostic: `q.AtCompileTime: closure body references local variable %s — comptime closures must be self-contained`.
-3. R MUST be JSON-encodable in Phase 2+. Phase 1 limits R to primitives. Diagnostic: `q.AtCompileTime: return type %s is not JSON-encodable (functions, channels, complex types are unsupported)`.
+2. The closure MUST have no captures from the enclosing scope, EXCEPT other `q.AtCompileTime` results — these ARE allowed (the result is constant by then; we splice it into the synthesized program). Captures of mutable / runtime values are rejected. Diagnostic: `q.AtCompileTime: closure body references local variable %s that is not itself a q.AtCompileTime result — comptime closures must be self-contained`.
+3. R must round-trip through the chosen codec (default JSON). Codec validation at typecheck time uses go/types to walk R recursively and check encodability. Diagnostic: `q.AtCompileTime: return type %s is not encodable by %s codec (fields/elements that the codec can't handle: ...)`.
 4. The closure body MUST NOT call `q.*` in Phase 1+2 (preprocessor doesn't run on synthesized comptime programs). Phase 3 lifts this. Diagnostic: `q.AtCompileTime: closure body uses q.%s — q.* calls inside comptime closures are not supported in this version`.
 5. Standard library + user's own module imports allowed (Phase 1 stdlib-only; Phase 2+ adds module).
+6. Recursive AtCompileTime references (A captures B captures A) are rejected at topo-sort time. Diagnostic: `q.AtCompileTime: cyclic dependency between AtCompileTime values: A → B → A`.
+
+## Core architecture: one synthesis program per package
+
+This is the load-bearing decision — call out at the top of every phase plan.
+
+**Principle:** for each user-package compile that contains `q.AtCompileTime` calls, the preprocessor builds **one** synthesized program that evaluates **all** of those calls together, in topological order. The result is a single subprocess invocation per package compile, not one per call site.
+
+**Why:**
+- Cross-call captures: an AtCompileTime closure can reference another AtCompileTime result as a free variable. With one combined program, the dependent call simply uses the producing call's output as a Go-source-level constant.
+- Subprocess startup cost: amortised across all calls. One `go run` instead of N.
+- Cache locality: hash the combined program; cache hit reuses every value at once.
+
+**Synthesized program shape:**
+
+```go
+package main
+
+import (
+    "encoding/json"
+    "fmt"
+    "os"
+    qPkg "github.com/GiGurra/q/pkg/q"
+    // ... user-module imports needed by any closure body
+)
+
+func main() {
+    // Topo-ordered: A is computed before B if B captures A.
+    _qCt0 := func() <R0> { /* closure body 0 */ }()
+    _qCt1 := func() <R1> { /* closure body 1, may reference _qCt0 */ }()
+    _qCt2 := func() <R2> { /* closure body 2, may reference _qCt0 or _qCt1 */ }()
+
+    // Single output: a JSON array of per-call results, encoded by
+    // each call's chosen codec, then wrapped in JSON for transport.
+    out := []json.RawMessage{
+        encodeWith(_qCt0, codec0),
+        encodeWith(_qCt1, codec1),
+        encodeWith(_qCt2, codec2),
+    }
+    data, err := json.Marshal(out)
+    if err != nil { fmt.Fprintln(os.Stderr, err); os.Exit(1) }
+    fmt.Println(string(data))
+}
+
+func encodeWith[T any](v T, codec qPkg.Codec[T]) json.RawMessage {
+    raw, err := codec.Encode(v)
+    if err != nil { panic(err) }
+    // Wrap as JSON-quoted string so binary codecs survive transport.
+    quoted, _ := json.Marshal(string(raw))
+    return quoted
+}
+```
+
+The rewriter then parses the top-level JSON array, decodes each element with `json.Unmarshal` to recover the inner bytes, and emits the per-call init+var pair (or inline-literal for primitives).
+
+**Topological sort:** standard. Build a graph where edges go from a call to each AtCompileTime variable it captures. Reject cycles. Produce a flat order suitable for sequential execution. The captured-variable detection happens during typecheck — walk each closure body for `*ast.Ident` whose resolved object is the LHS of another AtCompileTime call site.
+
+**Cross-call capture mechanics:** when call B's closure references variable `x` that was bound by call A's `x := q.AtCompileTime(...)`:
+- In the synthesized program, A's call binds `_qCt<A> := <closure A>()` first.
+- B's synthesized closure body has `x` rewritten to `_qCt<A>` before being spliced in.
+- This is a per-package source-text rewrite limited to the synthesized program; the user's source stays untouched.
 
 ## Phasing
 
 Each phase is independently shippable. Don't merge phases.
 
-### Phase 1 — primitives + stdlib only (1-2 sessions)
+### Phase 1 — single-pass core, primitives + stdlib (2-3 sessions)
 
 **Scope:**
+- One synthesized program per user-package compile (the core architecture above).
+- Cross-call captures of other AtCompileTime values supported from day one (closures can reference earlier-resolved AtCompileTime variables; topo-sort enforces ordering).
 - R limited to primitive types: `string`, `int`, `int8`, `int16`, `int32`, `int64`, `uint`, `uint8`, `uint16`, `uint32`, `uint64`, `uintptr`, `byte`, `rune`, `float32`, `float64`, `bool`.
-- Closure body uses only stdlib imports + Go builtins.
-- No captures from enclosing scope.
-- Synthesize a self-contained Go file in $TMPDIR (no go.mod needed — stdlib only).
-- Splice result as an inline Go literal at the call site (no JSON, no init() var).
+- Codec interface defined and `JSONCodec[T]` implemented (the only built-in for Phase 1).
+- Closure body uses only stdlib imports + Go builtins. No user-module imports yet (Phase 2).
+- $TMPDIR holds the synthesized main.go; no go.mod needed for Phase 1 (stdlib resolves via GOROOT).
+- Output: each call's primitive result spliced as inline Go literal at the call site. No init()/var synthesis yet — just literal substitution.
 
-**Deliverable:** Working q.AtCompileTime for the math / hash / string-precompute use cases. Multi-call-per-file works. Errors in the closure body produce build diagnostics.
+**Deliverable:** Working q.AtCompileTime for math / hash / string-precompute use cases, with cross-call composition: `b := q.AtCompileTime(func() string { return strings.Repeat("a", a*2) })` works when `a` is itself an AtCompileTime int.
 
-### Phase 2 — JSON pass-through + module access (2-3 sessions)
+### Phase 2 — Codec-based encoding + module access (3-4 sessions)
 
 **Scope:**
-- R extended to JSON-encodable types: structs (exported fields), slices, maps, pointers, time.Time.
+- R extended to any type the chosen codec accepts (default JSON: structs with exported fields, slices, maps, pointers, time.Time).
+- Built-in codecs: `q.GobCodec[T]` and `q.BinaryCodec[T]` added alongside `JSONCodec`.
+- Codec parameter resolved at call site; subprocess uses the same codec for encoding.
 - Closure body can import the user's module (any package within it).
 - $TMPDIR module setup with `replace` directive pointing to user's module root.
-- For complex R: synthesize package-level `var _qCtN_value R` + `init()` doing `json.Unmarshal(<embedded JSON>, &_qCtN_value)`. Call site becomes the variable reference.
-- For primitive R: still inline-literal splice (Phase 1 path).
+- For non-primitive R: synthesize a companion file (`_q_atcomptime.go`) at the package level with one `var _qCtN_value R` + `init()` per call. The init() decodes the embedded bytes via the call's codec. Call site rewrites to `_qCtN_value`.
+- For primitive R: still inline-literal splice (Phase 1 path) when the codec is JSONCodec; for other codecs, fall back to var/init() shape.
 
-**Deliverable:** Compile-time loading of arbitrary structured data — config files, parser tables, embedded resources.
+**Deliverable:** Compile-time loading of arbitrary structured data via the user's module. User can specify gob (for unexported fields) or binary (for fixed structs) instead of JSON.
 
-### Phase 3 — chained AtCompileTime + q.* in closures (1-2 sessions)
+### Phase 3 — q.* in closures + caching + custom codecs (1-2 sessions)
 
 **Scope:**
-- AtCompileTime values can be referenced inside another AtCompileTime closure (topo-sort + substitute as literals).
 - Closure body can use q.* (subprocess `go run` invoked with `-toolexec=q`).
-- Caching: hash the (body source + module version + captured AtCompileTime values) and skip re-running on cache hit.
+- Custom user-defined codecs (any type implementing `q.Codec[T]`).
+- Caching: hash the synthesized program (closure source + captured values + codec choices + Go version + module version) and skip re-running on cache hit. Cache lives next to `$GOCACHE`.
 
-**Deliverable:** Full graph of compile-time computations. Useful for layered precomputes (load schema → derive lookup table → derive validators).
+**Deliverable:** Full graph of compile-time computations with arbitrary domain-specific encoders. Production-grade build cost.
 
 ## Implementation architecture
 
@@ -119,95 +203,142 @@ Add to the existing pass-2 loop in `checkErrorSlots` (alongside `validateExhaust
 
 ### 4. `internal/preprocessor/atcompiletime.go` (new file — the synthesis pass)
 
-This is the bulk of the work. Architecture:
+This is the bulk of the work. The pass is **per-package, single subprocess invocation, all calls resolved together** (the core architecture above).
 
 ```go
-// Phase 1: per-package, after typecheck and before rewrite.
-// Collects all q.AtCompileTime call sites and resolves each one
-// via subprocess. Returns a map[*qSubCall]string of resolved value
-// literals (Go-source text), which the rewriter splices in.
+// Per-package, after typecheck and before rewrite. Collects every
+// q.AtCompileTime call site, topo-sorts by inter-call captures,
+// builds one synthesized program, runs it, and returns the
+// resolved values keyed by qSubCall.
 func resolveAtCompileTimeCalls(
     fset *token.FileSet,
-    pkgPath string,    // user's package import path (for Phase 2 module import)
-    modRoot string,    // user's module root on disk (for Phase 2 replace dir)
+    pkgPath string,    // user's package import path (Phase 2 module import)
+    modRoot string,    // user's module root on disk (Phase 2 replace dir)
     shapes []callShape,
-) (map[*qSubCall]string, []Diagnostic, error)
+) (map[*qSubCall]resolvedValue, []Diagnostic, error)
+
+type resolvedValue struct {
+    Literal     string  // Go-source text for inline-splice (primitive + JSONCodec only)
+    EncodedRaw  []byte  // raw codec output for var+init() embedding (every other case)
+    CodecExpr   string  // user's codec expression source (for the init's decode call)
+    UseInline   bool    // pick the route at rewriter time
+}
 ```
 
-For each shape with `Family == familyAtCompileTime`:
+**Pipeline per package:**
 
-1. **Extract closure body source.** The FuncLit AST node has a `Body *ast.BlockStmt`. Use `printer.Fprint` to render the body to source text. Also extract:
-   - R's source text (from the call's index expression — already captured in scanner)
-   - The closure's parameter list (should be empty for `func() R`)
-2. **Extract referenced imports.** Walk the FuncLit body for `*ast.SelectorExpr` of form `<pkgAlias>.<name>`; resolve `<pkgAlias>` against the file's `*ast.File.Imports`. Collect the unique set.
-3. **Synthesize main.go.** Template:
+1. **Collect.** Filter shapes for `Family == familyAtCompileTime`. Build per-call records: closure FuncLit, R's type-text, codec arg's source text, the LHS binding name (if any) for cross-call capture detection.
+2. **Build dep graph.** For each call, walk its closure body for `*ast.Ident` whose resolved object is the LHS of another AtCompileTime call. Edge from this call to the producing call.
+3. **Topo-sort.** Kahn's algorithm. Cycle → diagnostic.
+4. **Extract imports.** Per-call FuncLit body: walk for `*ast.SelectorExpr`; resolve aliases against the file's imports. Union into a single dedup-ed import set.
+5. **Synthesize main.go.** Template:
 
-```
+```go
 package main
 
 import (
     "encoding/json"
     "fmt"
-    {{ range .Imports }}{{ . }}
+    "os"
+    qPkg "github.com/GiGurra/q/pkg/q"
+    {{ range .ExtraImports }}{{ . }}
     {{ end }}
 )
 
 func main() {
-    result := func() {{ .ResultType }} {
-        {{ .ClosureBody }}
+    {{ range $i, $c := .Calls }}
+    _qCt{{ $i }} := func() {{ $c.ResultType }} {
+        {{ $c.ClosureBody }}
     }()
-    {{ if .UsePrintf }}
-    fmt.Printf("%#v", result)
-    {{ else }}
-    data, err := json.Marshal(result)
+    {{ end }}
+
+    out := []json.RawMessage{
+        {{ range $i, $c := .Calls }}
+        encodeWith(_qCt{{ $i }}, {{ $c.CodecExpr }}),
+        {{ end }}
+    }
+    data, err := json.Marshal(out)
     if err != nil { fmt.Fprintln(os.Stderr, err); os.Exit(1) }
     fmt.Println(string(data))
-    {{ end }}
+}
+
+func encodeWith[T any](v T, codec qPkg.Codec[T]) json.RawMessage {
+    raw, err := codec.Encode(v)
+    if err != nil { panic(err) }
+    quoted, _ := json.Marshal(string(raw))
+    return quoted
 }
 ```
 
-4. **Phase 1: write to $TMPDIR/q-comptime-<hash>/main.go.** No go.mod needed — stdlib-only resolves via GOROOT.
-5. **Phase 2: write go.mod alongside main.go:**
+Cross-call capture rewrite: when call B's closure body references variable `x` and `x` resolves to call A's LHS binding, rewrite the spliced body to use `_qCt<A-index>` instead of `x`. Done by walking B's FuncLit AST and substituting source spans during template emission.
+
+6. **Phase 1: write to $TMPDIR/q-comptime-<pkgHash>/main.go.** No go.mod (stdlib only).
+7. **Phase 2: write go.mod alongside main.go:**
 
 ```
 module q-comptime
 go 1.26
-require <userModule> v0.0.0
+require <userModule> v0.0.0-comptime
 replace <userModule> => <userModuleAbsPath>
 ```
 
-`<userModule>` from the toolexec compile's `-importcfg` lookup (or `go env GOMOD` parsed). `<userModuleAbsPath>` from the dir of that go.mod.
+`<userModule>` from `go env GOMOD` parsed (run from the toolexec's compile cwd). `<userModuleAbsPath>` from the dir containing that go.mod.
 
-6. **Run `go run main.go` (or `go run .` for Phase 2).** Capture stdout. Set a hard timeout (30s? configurable later).
-7. **Parse stdout.** Phase 1: stdout is the `%#v` output, validate it parses as a Go literal via `parser.ParseExpr`. Phase 2 primitive R: same. Phase 2 complex R: stdout is JSON; encode it as a Go byte slice literal embedded in a generated `init()` (see #5 below).
-8. **Return map of qSubCall → resolved literal text.**
+8. **Run `go run .`** in the synthesized dir. Hard timeout (configurable; default ~60s). Capture stdout + stderr. Strip toolexec-related env so the subprocess doesn't recurse:
+
+```go
+cmd.Env = filterEnv(os.Environ(), []string{"GOFLAGS"})
+```
+
+Phase 3: invoke with `-toolexec=<argv0>` so q.* in closure bodies works.
+
+9. **Parse stdout.** Top-level JSON array. Each element is a JSON-quoted string carrying the codec's raw bytes. For each call, build a resolvedValue:
+   - If R is primitive AND codec is JSONCodec: parse the JSON value (which is the primitive itself), format as a Go literal, set `UseInline=true`.
+   - Otherwise: store the raw bytes + codec expression, set `UseInline=false`.
+10. **Return map.**
 
 ### 5. `internal/preprocessor/rewriter.go`
 
-Add `buildAtCompileTimeReplacement` similar to `buildExprReplacement`:
+Add `buildAtCompileTimeReplacement(sub qSubCall, resolved map[*qSubCall]resolvedValue) string`:
+
+- If `resolved[sub].UseInline`: return `resolved[sub].Literal` directly. No companion file needed.
+- Otherwise: return `_qCt<N>_value` (the package-level var the synthesis pass arranges). The call site becomes a plain identifier reference.
+
+For non-inline calls, the rewriter coordinates with a synthesis pass (similar to `gen.go`'s `_q_gen.go` shape) that emits a single companion file `_q_atcomptime.go` per package containing all the var + init() pairs:
 
 ```go
-func buildAtCompileTimeReplacement(sub qSubCall, resolved map[*qSubCall]string) string {
-    return resolved[&sub]  // Phase 1 inline literal
-}
-```
+//go:build !ignore_q_atcompiletime
 
-For Phase 2 complex R, the rewriter generates a NEW file in $TMPDIR (synthesized companion file via `gen.go`-style mechanism) containing:
-
-```go
 package <pkg>
 
-import "encoding/json"
+import (
+    "github.com/GiGurra/q/pkg/q"
+    {{ range .ExtraImports }}{{ . }}
+    {{ end }}
+)
 
 var _qCt0_value SomeType
+var _qCt1_value AnotherType
+
 func init() {
-    if err := json.Unmarshal([]byte(`{...JSON...}`), &_qCt0_value); err != nil {
-        panic("q.AtCompileTime[N] decode failed: " + err.Error())
+    {
+        data := []byte("<\\x-escaped-bytes>")
+        codec := q.JSONCodec[SomeType]()  // user's codec expr
+        if err := codec.Decode(data, &_qCt0_value); err != nil {
+            panic("q.AtCompileTime[0] decode failed: " + err.Error())
+        }
+    }
+    {
+        data := []byte("<\\x-escaped-bytes>")
+        codec := userPkg.MyCodec[AnotherType]()
+        if err := codec.Decode(data, &_qCt1_value); err != nil {
+            panic("q.AtCompileTime[1] decode failed: " + err.Error())
+        }
     }
 }
 ```
 
-And the call site rewrites to `_qCt0_value`. Reference the synthesized file via the existing rewrittenFiles plumbing.
+One `init()` body holds all decodes (separate `{}` blocks for variable scoping). Reference the synthesized file via the existing rewrittenFiles plumbing (same pattern as `gen.go`).
 
 ### 6. `internal/preprocessor/userpkg.go`
 
@@ -284,33 +415,61 @@ if err := cmd.Run(); err != nil {
 
 6. **Phase 3:** add `-toolexec=<qBin>` to the `go run` to allow q.* in the closure body. The `qBin` path: argv[0] of the current process (we're running as toolexec, so we know our own path).
 
-## JSON encoding / decoding for complex R (Phase 2)
+## Codec-based encoding / decoding (Phase 2)
 
-The synthesized main.go encodes via `json.Marshal`. The rewriter parses the output and either:
+The Codec interface (defined in `pkg/q/atcompiletime.go`):
 
-- **Primitive R:** generate `var _qCtN_value R = <inline-literal>` at the call site. Replace the call with `_qCtN_value` (or just inline the literal).
-- **Complex R:** generate a companion file with:
+```go
+type Codec[T any] interface {
+    Encode(v T) ([]byte, error)
+    Decode(data []byte, v *T) error
+}
+```
+
+Built-in implementations live alongside (in the same file):
+- `JSONCodec[T any]() Codec[T]` — encoding/json wrapper. Default. Lossy on unexported fields.
+- `GobCodec[T any]() Codec[T]` — encoding/gob wrapper. Handles unexported fields when `gob.Register(T{})` is called once. Larger output than JSON.
+- `BinaryCodec[T any]() Codec[T]` — encoding/binary wrapper. Fixed-size types only (no slices, maps, strings). Smallest output.
+
+**Transport.** The synthesized program runs each call's encoder, then wraps the resulting `[]byte` as a JSON-quoted string so binary outputs survive stdout transport:
+
+```go
+encoded, err := codec0.Encode(_qCt0)
+if err != nil { panic(err) }
+encodedQuoted, _ := json.Marshal(string(encoded))  // "\"...\""
+// All N calls' quoted strings go into a single top-level []json.RawMessage.
+```
+
+The rewriter parses the top-level JSON array, decodes each `json.RawMessage` into a Go string (recovering the raw bytes), and embeds those bytes in the user's package via Go's `\x`-escape string literal syntax (compact, supports arbitrary bytes):
 
 ```go
 //go:build !ignore_q_atcompiletime
 
 package <pkg>
 
-import "encoding/json"
-
-var _qCtN_value <R>
+var _qCt0_value <R>
 
 func init() {
-    raw := []byte(`<JSON-text>`)
-    if err := json.Unmarshal(raw, &_qCtN_value); err != nil {
-        panic("q.AtCompileTime[N] decode failed: " + err.Error())
+    data := []byte("<\\x-escaped-bytes>")
+    codec := q.JSONCodec[<R>]()
+    if err := codec.Decode(data, &_qCt0_value); err != nil {
+        panic("q.AtCompileTime[0] decode failed: " + err.Error())
     }
 }
 ```
 
-The JSON text must be embedded as a Go raw string literal — but JSON containing backticks needs escaping. Use `strconv.Quote` instead and embed as a regular string literal, or use Go's ``` escape for backticks.
+The codec construction in init() is the source text of the user's codec arg (e.g. `q.JSONCodec[Config]()` or `customCodec()`) — same expression as written at the call site. This guarantees encode/decode symmetry.
 
-Cost analysis: one json.Unmarshal per call site at init() time. For typical config-file-sized data (kilobytes), this is sub-millisecond. Acceptable.
+**Inline literals (primitive R + JSONCodec):** for cheapness, still emit a Go literal at the call site instead of embedding-and-decoding:
+
+```go
+// Source:
+n := q.AtCompileTime(func() int { return fib(40) })
+// Rewritten:
+n := 102334155
+```
+
+This bypasses the var+init() route. Detection: R is in the primitive set AND codec is JSONCodec (default). For other codecs even on primitive R, fall back to var+init() — keeps the codec-roundtrip symmetric.
 
 ## Caching (Phase 3)
 
