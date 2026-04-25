@@ -86,3 +86,29 @@ func EnumOrdinal[T comparable](v T) int {
 	panicUnrewritten("q.EnumOrdinal")
 	return -1
 }
+
+// Exhaustive marks a `switch` as exhaustively covering every constant
+// of T. The preprocessor recognises the shape
+//
+//	switch q.Exhaustive(v) {
+//	case A: …
+//	case B: …
+//	}
+//
+// at compile time: if any constant of v's defined type is missing
+// from the case clauses, the build fails with a diagnostic naming
+// the missing constants. Adding a `default:` clause opts out — the
+// catch-all covers any unhandled value.
+//
+// The wrapper is removed at rewrite time, so the runtime code is a
+// plain `switch v { … }`. Legal only as the tag of a switch
+// statement; any other position is a build error.
+//
+// Anything declared via `const … T = …` in T's home package counts
+// as a constant. Cross-package T is rejected (the rewriter would
+// otherwise need to write qualified case names — declare a thin
+// wrapper in the enum's home package).
+func Exhaustive[T any](v T) T {
+	panicUnrewritten("q.Exhaustive")
+	return v
+}

@@ -86,6 +86,8 @@ func checkErrorSlots(fset *token.FileSet, pkgPath, importcfgPath string, files [
 	}
 	info := &types.Info{
 		Types: map[ast.Expr]types.TypeAndValue{},
+		Uses:  map[*ast.Ident]types.Object{},
+		Defs:  map[*ast.Ident]types.Object{},
 	}
 	// Best-effort: ignore the returned error. Info.Types is
 	// populated for expressions that did type-check, which is all
@@ -111,9 +113,183 @@ func checkErrorSlots(fset *token.FileSet, pkgPath, importcfgPath string, files [
 					diags = append(diags, d)
 				}
 			}
+			if sc.Family == familyExhaustive {
+				if d, ok := validateExhaustive(fset, &shapes[i], sc, info, pkgPath); ok {
+					diags = append(diags, d)
+				}
+			}
 		}
 	}
 	return diags
+}
+
+// validateExhaustive enforces that every const of T (the inferred
+// type of the expression wrapped by q.Exhaustive) appears in at
+// least one case clause of the enclosing switch statement. A
+// `default:` clause opts out — when present, the catch-all covers
+// any missing constants.
+//
+// Returns a diagnostic when the type can't resolve to a defined
+// named type with constants, or when one or more constants are not
+// referenced by any case clause.
+func validateExhaustive(fset *token.FileSet, sh *callShape, sc *qSubCall, info *types.Info, pkgPath string) (Diagnostic, bool) {
+	if sc.InnerExpr == nil {
+		return Diagnostic{}, false
+	}
+	tv, ok := info.Types[sc.InnerExpr]
+	if !ok || tv.Type == nil {
+		return Diagnostic{}, false
+	}
+	named, ok := tv.Type.(*types.Named)
+	if !ok {
+		pos := fset.Position(sc.OuterCall.Pos())
+		return Diagnostic{
+			File: pos.Filename,
+			Line: pos.Line,
+			Col:  pos.Column,
+			Msg:  fmt.Sprintf("q: q.Exhaustive requires a named type (e.g. `type Color int` with `const Red Color = …`); got %s", tv.Type.String()),
+		}, true
+	}
+	declPkg := named.Obj().Pkg()
+	if declPkg == nil {
+		pos := fset.Position(sc.OuterCall.Pos())
+		return Diagnostic{
+			File: pos.Filename,
+			Line: pos.Line,
+			Col:  pos.Column,
+			Msg:  fmt.Sprintf("q: q.Exhaustive on built-in type %s is not supported; use a defined type", named.String()),
+		}, true
+	}
+	if declPkg.Path() != pkgPath {
+		pos := fset.Position(sc.OuterCall.Pos())
+		return Diagnostic{
+			File: pos.Filename,
+			Line: pos.Line,
+			Col:  pos.Column,
+			Msg:  fmt.Sprintf("q: q.Exhaustive on cross-package type %s is not supported (the rewriter currently checks against the case clauses' source-text, which doesn't qualify foreign constants). Wrap the switch in a thin function declared in %s.", named.String(), declPkg.Name()),
+		}, true
+	}
+
+	// Collect all declared constants of the type.
+	scope := declPkg.Scope()
+	declared := map[string]bool{}
+	for _, name := range scope.Names() {
+		obj := scope.Lookup(name)
+		c, ok := obj.(*types.Const)
+		if !ok {
+			continue
+		}
+		if !types.Identical(c.Type(), named) {
+			continue
+		}
+		declared[c.Name()] = true
+	}
+	if len(declared) == 0 {
+		pos := fset.Position(sc.OuterCall.Pos())
+		return Diagnostic{
+			File: pos.Filename,
+			Line: pos.Line,
+			Col:  pos.Column,
+			Msg:  fmt.Sprintf("q: q.Exhaustive: type %s has no constants declared in package %s", named.Obj().Name(), declPkg.Name()),
+		}, true
+	}
+
+	// Walk the SwitchStmt's body for case clauses. Track which
+	// constants are covered, and whether a default exists.
+	swStmt, ok := sh.Stmt.(*ast.SwitchStmt)
+	if !ok || swStmt.Body == nil {
+		return Diagnostic{}, false
+	}
+	covered := map[string]bool{}
+	hasDefault := false
+	for _, body := range swStmt.Body.List {
+		cc, ok := body.(*ast.CaseClause)
+		if !ok {
+			continue
+		}
+		if cc.List == nil {
+			hasDefault = true
+			continue
+		}
+		for _, expr := range cc.List {
+			caseTV, ok := info.Types[expr]
+			if !ok {
+				continue
+			}
+			// Match a named constant by its declaring object — far
+			// more robust than source-text identity (handles
+			// alias-imports, qualified names, parenthesised
+			// expressions, etc.).
+			if ident, ok := exprAsConstObjName(expr, info); ok && declared[ident] {
+				covered[ident] = true
+				continue
+			}
+			// Fallback: const value identity. If the case expr
+			// types as a constant of the same type, find a
+			// matching declared const by value.
+			if caseTV.Value != nil {
+				for name := range declared {
+					if obj := scope.Lookup(name); obj != nil {
+						if c, isConst := obj.(*types.Const); isConst {
+							if types.Identical(c.Type(), caseTV.Type) &&
+								c.Val().String() == caseTV.Value.String() {
+								covered[name] = true
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	if hasDefault {
+		return Diagnostic{}, false
+	}
+
+	var missing []string
+	for name := range declared {
+		if !covered[name] {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) == 0 {
+		return Diagnostic{}, false
+	}
+	sort.Strings(missing)
+	pos := fset.Position(sc.OuterCall.Pos())
+	return Diagnostic{
+		File: pos.Filename,
+		Line: pos.Line,
+		Col:  pos.Column,
+		Msg:  fmt.Sprintf("q: q.Exhaustive switch on %s is missing case(s) for: %s. Add the missing case(s), or use `default:` to opt out.", named.Obj().Name(), strings.Join(missing, ", ")),
+	}, true
+}
+
+// exprAsConstObjName returns the *types.Const's name if expr resolves
+// to one (handles bare identifiers and selector expressions like
+// `pkg.Name`). Falls back to "", false for anything else.
+func exprAsConstObjName(expr ast.Expr, info *types.Info) (string, bool) {
+	switch e := expr.(type) {
+	case *ast.Ident:
+		if obj := info.Uses[e]; obj != nil {
+			if _, ok := obj.(*types.Const); ok {
+				return obj.Name(), true
+			}
+		}
+		if obj := info.Defs[e]; obj != nil {
+			if _, ok := obj.(*types.Const); ok {
+				return obj.Name(), true
+			}
+		}
+	case *ast.SelectorExpr:
+		if obj := info.Uses[e.Sel]; obj != nil {
+			if _, ok := obj.(*types.Const); ok {
+				return obj.Name(), true
+			}
+		}
+	case *ast.ParenExpr:
+		return exprAsConstObjName(e.X, info)
+	}
+	return "", false
 }
 
 // isEnumFamily reports whether sc's family is one of the q.Enum*

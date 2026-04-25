@@ -107,6 +107,7 @@ const (
 	familySQL      // q.SQL("...{x}...") — placeholder-style parameterised SQL (?, ?...)
 	familyPgSQL    // q.PgSQL("...{x}...") — PostgreSQL-style ($1, $2, ...)
 	familyNamedSQL // q.NamedSQL("...{x}...") — named-param style (:name1, :name2, ...)
+	familyExhaustive // switch q.Exhaustive(v) { ... } — compile-time enforced exhaustiveness
 )
 
 // form is the syntactic position of a recognised q.* call:
@@ -485,6 +486,11 @@ func walkChildBlocks(fset *token.FileSet, path string, stmt ast.Stmt, alias stri
 	case *ast.RangeStmt:
 		walkBlock(fset, path, s.Body, alias, fnType, shapes, diags)
 	case *ast.SwitchStmt:
+		if shape, ok, err := matchExhaustiveSwitch(s, alias, fnType); err != nil {
+			*diags = append(*diags, diagAt(fset, path, s.Pos(), err.Error()))
+		} else if ok {
+			*shapes = append(*shapes, shape)
+		}
 		walkBlock(fset, path, s.Body, alias, fnType, shapes, diags)
 	case *ast.TypeSwitchStmt:
 		walkBlock(fset, path, s.Body, alias, fnType, shapes, diags)
@@ -996,6 +1002,13 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 		}
 		return qSubCall{Family: familyFln, InnerExpr: call.Args[0], OuterCall: expr}, true, nil
 	}
+	// q.Exhaustive(v) — only legal as the tag of a switch statement.
+	// Reaching this path means the call was found in any other
+	// expression position; the dedicated SwitchStmt walker captures
+	// the legitimate placement separately.
+	if isSelector(call.Fun, alias, "Exhaustive") {
+		return qSubCall{}, false, fmt.Errorf("q.Exhaustive can only be used as the tag of a switch statement, e.g. `switch q.Exhaustive(v) { case A: …; case B: … }`")
+	}
 	// q.SQL / q.PgSQL / q.NamedSQL — parameterised SQL builders.
 	// Same placeholder syntax as q.F, different rewrite output.
 	if isSelector(call.Fun, alias, "SQL") {
@@ -1488,6 +1501,42 @@ func classifyOpenChain(call *ast.CallExpr, sel *ast.SelectorExpr, alias string) 
 		ReleaseArg:  releaseArg,
 		NoRelease:   noRelease,
 		AutoRelease: autoRelease,
+	}, true, nil
+}
+
+// matchExhaustiveSwitch detects the
+//
+//	switch q.Exhaustive(v) { case … }
+//
+// shape and returns a callShape that wraps the entire SwitchStmt as
+// its Stmt with a single q.Exhaustive sub-call. Returns
+// (zero, false, nil) when the switch's tag isn't a `q.Exhaustive`
+// call (or when the switch has no tag at all). Returns an error
+// when the tag matches the q.Exhaustive *selector* but the call is
+// malformed (wrong arity), which becomes a diagnostic.
+//
+// The rewriter handles this shape via the existing all-in-place
+// pathway: q.Exhaustive's span gets replaced by the inner expr's
+// source text, and the rest of the switch source survives intact.
+func matchExhaustiveSwitch(s *ast.SwitchStmt, alias string, fnType *ast.FuncType) (callShape, bool, error) {
+	if s.Tag == nil {
+		return callShape{}, false, nil
+	}
+	call, ok := s.Tag.(*ast.CallExpr)
+	if !ok {
+		return callShape{}, false, nil
+	}
+	if !isSelector(call.Fun, alias, "Exhaustive") {
+		return callShape{}, false, nil
+	}
+	if len(call.Args) != 1 {
+		return callShape{}, false, fmt.Errorf("q.Exhaustive must take exactly one argument (the value to switch on); got %d", len(call.Args))
+	}
+	return callShape{
+		Stmt:              s,
+		Form:              formHoist,
+		Calls:             []qSubCall{{Family: familyExhaustive, InnerExpr: call.Args[0], OuterCall: call}},
+		EnclosingFuncType: fnType,
 	}, true, nil
 }
 

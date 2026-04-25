@@ -1,0 +1,12 @@
+Red: warm
+Green: natural
+Blue: cool
+group Red: extreme
+group Green: middle
+group Blue: extreme
+status Pending: wait
+status Done: ok
+status Failed: uh oh
+default red: red only
+default green: anything else
+from init: init/green

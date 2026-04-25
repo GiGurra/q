@@ -257,6 +257,18 @@ both `int`-backed and `string`-backed enums (any const-able comparable
 type). Constants are discovered by walking the package's
 `*types.Const` set at compile time.
 
+### Exhaustive switches
+
+```go
+switch q.Exhaustive(c) {        // build fails if any const of c's type is uncovered
+case Red:    return "warm"
+case Green:  return "natural"
+case Blue:   return "cool"
+}
+```
+
+`q.Exhaustive` is only legal as a switch tag; anywhere else is a diagnostic. Default clauses opt out of the check. The wrapper is stripped at rewrite time — zero runtime overhead.
+
 ### Get the goroutine ID Go won't give you
 
 ```go

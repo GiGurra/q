@@ -174,6 +174,44 @@ name := other.ColorName(other.Red)
 
 This restriction exists because the rewriter currently writes unqualified constant names; lifting it requires the rewriter to emit qualified identifiers, tracked as a future improvement.
 
+## Exhaustive switches
+
+Wrap the switch tag in `q.Exhaustive` to enforce at compile time that every constant of T appears in some case clause:
+
+```go
+switch q.Exhaustive(c) {
+case Red:
+    return "warm"
+case Green:
+    return "natural"
+case Blue:
+    return "cool"
+}
+```
+
+If you forget a case (say, `Blue`), the build fails with:
+
+```
+main.go:42:12: q: q.Exhaustive switch on Color is missing case(s) for: Blue. Add the missing case(s), or use `default:` to opt out.
+```
+
+A `default:` clause opts out — the catch-all covers anything missing:
+
+```go
+switch q.Exhaustive(c) {
+case Red:
+    return "red only"
+default:
+    return "anything else"
+}
+```
+
+Multi-value cases work: `case Red, Blue:` covers two constants. Switch-with-init works: `switch c := pick(); q.Exhaustive(c) { … }`. The wrapper is stripped at rewrite time, leaving a plain `switch v { … }` — zero runtime overhead.
+
+`q.Exhaustive` is **only** legal as the tag of a switch statement. Found anywhere else (assignment RHS, function arg, return value, …) the scanner surfaces a diagnostic explaining the correct placement.
+
+Cross-package T is rejected for the same reason `q.EnumName` is — declare a thin local wrapper in the enum's home package.
+
 ## Statement forms
 
 Every helper works in any expression position the rest of q supports — define, assign, discard, return, hoist:

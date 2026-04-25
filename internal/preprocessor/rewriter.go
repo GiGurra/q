@@ -285,6 +285,8 @@ func renderShape(fset *token.FileSet, src []byte, sh callShape, counter *int, al
 				return "", false, false, false, ferr
 			}
 			subTexts[i] = text
+		case familyExhaustive:
+			subTexts[i] = exprTextSubst(fset, src, sh.Calls[i].InnerExpr, sh.Calls, subTexts)
 		}
 	}
 
@@ -665,7 +667,8 @@ func isInPlaceFamily(f family) bool {
 		familyEnumValues, familyEnumNames, familyEnumName,
 		familyEnumParse, familyEnumValid, familyEnumOrdinal,
 		familyF, familyFerr, familyFln,
-		familySQL, familyPgSQL, familyNamedSQL:
+		familySQL, familyPgSQL, familyNamedSQL,
+		familyExhaustive:
 		return true
 	}
 	return false
@@ -887,6 +890,11 @@ func renderSubCall(fset *token.FileSet, src []byte, sh callShape, subIdx int, su
 		// composite literal that references types in pkg/q itself —
 		// no fmt/errors/context imports needed beyond what the
 		// `var _ = q.ErrNil` keep-alive already does.
+		return "", false, false, false, nil
+	case familyExhaustive:
+		// q.Exhaustive in switch tag — the wrapper is removed,
+		// leaving a plain switch on the inner expression. No
+		// imports needed.
 		return "", false, false, false, nil
 	case familyAwait:
 		text, err := renderAwait(fset, src, sh, sub, counter, alias, subs, subTexts)
