@@ -15,3 +15,7 @@ s7.Args: []
 s8.Query: SELECT * FROM events WHERE user_id = $1 AND created_at > NOW() - INTERVAL '$2 days'
 s8.Args: [7 84]
 dump: [query="DELETE FROM cache WHERE key = ?" args=[alice'; DROP TABLE users; --]]
+s9: SELECT * FROM x WHERE y = ? [1]
+s10: SELECT * FROM x WHERE z = ? AND active = ? [3.14 true]
+s11: SELECT * FROM x WHERE label = ? [hello]
+s12: SELECT * FROM x WHERE tag = ANY($1) [[a b]]

@@ -23,9 +23,11 @@ _(All of #21–#30 and #32 shipped — see the Done ledger. Open list is now emp
 
 ### Next up — rejected-Go-proposal expansion
 
-The features below all fit q's model: parse as valid Go, rewrite at compile time, zero runtime overhead, IDE-native. Numbered in the order they came up; pick #68 (enums) first, then #69 (string interpolation), then the rest in any order. Each entry specs the surface, the Go-validity check, the rewriter sketch, and any tradeoffs we already worked through.
+The features below all fit q's model: parse as valid Go, rewrite at compile time, zero runtime overhead, IDE-native. Numbered in the order they came up. Each entry specs the surface, the Go-validity check, the rewriter sketch, and any tradeoffs we already worked through.
 
-- [ ] **#68 — Enums (a serious attempt to make Go enums useful).** Go's `const X = iota` pattern is the de facto enum, but it ships with nothing — no String, no Parse, no list-all, no validity check, no JSON. The plan is to keep the existing declaration shape (so the user's source still reads as plain Go) and layer compile-time helpers + opt-in method synthesis on top.
+**Shipped from this batch (see Done ledger):** #68 (q.Enum* helpers), #69 (q.F / q.Ferr / q.Fln), #77 (q.SQL / q.PgSQL / q.NamedSQL).
+
+- [x] **#68 — Enums (a serious attempt to make Go enums useful).** Go's `const X = iota` pattern is the de facto enum, but it ships with nothing — no String, no Parse, no list-all, no validity check, no JSON. The plan is to keep the existing declaration shape (so the user's source still reads as plain Go) and layer compile-time helpers + opt-in method synthesis on top.
 
   **Helper surface (call-site rewrite, cheapest first):**
   - `q.EnumValues[T]() []T` → literal slice of all const values of type T in declaration order
@@ -51,7 +53,7 @@ The features below all fit q's model: parse as valid Go, rewrite at compile time
 
   **Bitset/flag variant (later wave):** `q.EnumFlagsString[T](v T) string` returns `"Read|Write"`; `q.EnumFlagsParse[T](s string) (T, error)` reverses. Detect via opt-in `var _ = q.GenFlags[T]()` rather than guessing from values.
 
-- [ ] **#69 — String interpolation `q.F`.** `q.F("hi {name}, age {age+1}")` rewrites to `fmt.Sprintf("hi %v, age %v", name, age+1)`. The string parses as plain Go (it's just an opaque literal), so IDE doesn't choke on the placeholders.
+- [x] **#69 — String interpolation `q.F`.** `q.F("hi {name}, age {age+1}")` rewrites to `fmt.Sprintf("hi %v, age %v", name, age+1)`. The string parses as plain Go (it's just an opaque literal), so IDE doesn't choke on the placeholders.
 
   **Surface:**
   - `q.F(format string, …) string` — base form, returns the formatted string
@@ -145,7 +147,7 @@ The features below all fit q's model: parse as valid Go, rewrite at compile time
 
   Tradeoff: thunks are syntactic noise. Probably skip until a use case justifies it.
 
-- [ ] **#77 — Injection-safe SQL via `q.SQL`.** A specialised cousin of `q.F` (#69): same `{name}` interpolation surface, but rewrites to placeholder-style parameterised SQL — never inlines user values into the query string. The point is to make the safe form as ergonomic as f-string-style concatenation, so devs reach for it by reflex.
+- [x] **#77 — Injection-safe SQL via `q.SQL`.** A specialised cousin of `q.F` (#69): same `{name}` interpolation surface, but rewrites to placeholder-style parameterised SQL — never inlines user values into the query string. The point is to make the safe form as ergonomic as f-string-style concatenation, so devs reach for it by reflex.
 
   **Surface:**
   ```go
@@ -246,6 +248,14 @@ The features below all fit q's model: parse as valid Go, rewrite at compile time
 ## Done
 
 A short ledger of what's shipped — newest first. Look at `git log` for the full story.
+
+- **General q.* composition: drop self-substitution exclusion + broaden direct-bind check.** Two fixes that together make any combination of q.* expressions compose without per-shape carve-outs. (1) `substituteSpans` no longer excludes exact-match spans — that was preventing legitimate composition like `q.Try(q.EnumParse[Color](s))` where the outer's InnerExpr equals an inner sub's OuterCall span. (2) `hasQRefInSub` now walks every user-supplied expression field — InnerExpr, MethodArgs, OkArgs, ReleaseArg, AsType, RecoverSteps' MatchArg/ValueArg — so the direct-bind path can't green-light a sub with nested q.*s in fields it didn't check. Verified by the enum_helpers fixture's deep composition cases (q.Try → q.EnumParse, q.TryE.Wrapf → q.EnumParse, q.EnumName → q.Try → q.EnumParse, q.EnumName nested in fmt.Sprintf).
+
+- **#77 — q.SQL / q.PgSQL / q.NamedSQL (injection-safe parameterised SQL).** Each call site rewrites to a `q.SQLQuery{Query, Args}` composite literal. `{expr}` placeholders lift out as `?` (SQL), `$N` (PgSQL), or `:nameN` (NamedSQL) driver-appropriate placeholders, with the corresponding Go expressions in `Args []any`. Reuses q.F's `parseFFormat` brace-tracking parser via a `parseSQLFormat` twin. The rewriter physically cannot inline a user value into the Query string — every `{expr}` becomes a placeholder + Args entry, so the parameterised guarantee is structural. Format must be a Go string literal (validated at scan time); allowing a dynamic format would re-open the injection hole the helper exists to close. Fixture `sql_run_ok` covers all three families plus injection-attempt parameterisation, brace escapes, no-placeholder constants, complex expressions, and composition.
+
+- **#69 — q.F / q.Ferr / q.Fln (compile-time string interpolation).** Each call site rewrites to `fmt.Sprintf` / `errors.New` / `fmt.Errorf` / `fmt.Fprintln(q.DebugWriter, …)` with `{expr}` placeholders extracted as positional `%v` args. Format must be a Go string literal (scan-time validated). Brace-escape `{{` / `}}`. Inside placeholders, Go string and rune literals are honoured so braces inside them don't terminate the placeholder. Each placeholder is `parser.ParseExpr`-validated; malformed placeholders abort the build with a diagnostic. `q.Ferr` without placeholders folds to `errors.New` to skip `fmt.Errorf` overhead. `q.Fln` routes through `q.DebugWriter` so fixtures can capture output. Fixture `f_format_run_ok`. Tradeoff documented: identifiers inside the format literal aren't IDE-visible (rename / go-to-def don't see them); compiler still catches typos via the rewritten Sprintf args.
+
+- **#68 — q.Enum* family (helpers for the de-facto Go enum pattern).** Six new helpers: `EnumValues[T]() []T`, `EnumNames[T]() []string`, `EnumName[T](v) string`, `EnumParse[T](s) (T, error)`, `EnumValid[T](v) bool`, `EnumOrdinal[T](v) int`. All rewrite at compile time — literal slices for the zero-arg forms, IIFE-wrapped switches for the value-taking forms. Constants are discovered by the typecheck pass walking T's `*types.Named` declaring package for `*types.Const` of type T (in source declaration order). Same-package T only — cross-package T surfaces a diagnostic. Works for any const-able comparable type (int- and string-backed both). Plus `q.ErrEnumUnknown` sentinel wrapped via `%w` into the `q.EnumParse` bubble. NAME-based parsing semantics (matches the constant identifier, not the underlying value) — pairs cleanly with EnumName as a round-trip. Fixture `enum_helpers_run_ok`.
 
 - **Zero-arg auto form for q.Recover / q.RecoverE.** `defer q.Recover()` / `defer q.RecoverE().<Method>(args)` now auto-wire the `&err` argument from the enclosing function's error return. Scanner adds `familyRecoverAuto` / `familyRecoverEAuto` and a new DeferStmt case in `matchStatement` that recognises zero-arg entry calls. Rewriter body path splices `&<errName>` into the deferred call. New signature-rewrite pass runs per-file, deduped per `*ast.FuncType`, and when the error slot is unnamed it rewrites the entire Results to give every slot a name (Go's all-or-nothing rule) — `_qErr` for the error slot, `_qRet0`/`_qRet1`/… for other unnamed slots. Enforces last return is the builtin `error` (rejects concrete `*MyErr` types since `&err` of a different type would mismatch q.Recover's `*error` parameter). Existing explicit `defer q.Recover(&err)` form continues to work unchanged — scanner only matches the zero-arg shape. Fixture `recover_auto_run_ok` covers: named-err reuse, unnamed single-return signature rewrite, unnamed pair `(int, error)` signature rewrite (with the non-error slot getting `_qRet0`), RecoverE.Map/.Wrap/.Err, multiple deferred auto-Recover calls in one function (signature rewritten once), and a regression guard that explicit `&err` still works.
 

@@ -58,6 +58,17 @@ func main() {
 	// Composition: q.SQL nested in another expression.
 	dump := dumpQuery(q.SQL("DELETE FROM cache WHERE key = {name}"))
 	fmt.Println("dump:", dump)
+
+	// Typed Go literals as placeholders — anything parser.ParseExpr
+	// accepts works: int / float / bool / string / composite literals.
+	s9 := q.SQL("SELECT * FROM x WHERE y = {1}")
+	fmt.Println("s9:", s9.Query, s9.Args)
+	s10 := q.SQL("SELECT * FROM x WHERE z = {3.14} AND active = {true}")
+	fmt.Println("s10:", s10.Query, s10.Args)
+	s11 := q.SQL("SELECT * FROM x WHERE label = {\"hello\"}")
+	fmt.Println("s11:", s11.Query, s11.Args)
+	s12 := q.PgSQL("SELECT * FROM x WHERE tag = ANY({[]string{\"a\", \"b\"}})")
+	fmt.Println("s12:", s12.Query, s12.Args)
 }
 
 func dumpQuery(s q.SQLQuery) string {
