@@ -101,6 +101,9 @@ const (
 	familyEnumParse   // q.EnumParse[T](s) (T, error) — switch on string, return value
 	familyEnumValid   // q.EnumValid[T](v) bool — membership check
 	familyEnumOrdinal // q.EnumOrdinal[T](v) int — declaration-order index
+	familyF    // q.F("hi {name}") — compile-time string interpolation
+	familyFerr // q.Ferr("err: {x}") — interpolation + errors.New / fmt.Errorf
+	familyFln  // q.Fln("dbg: {v}") — interpolation + fmt.Fprintln to DebugWriter
 )
 
 // form is the syntactic position of a recognised q.* call:
@@ -970,6 +973,26 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 		}
 		return qSubCall{Family: familyEnumOrdinal, InnerExpr: call.Args[0], AsType: typeArg, OuterCall: expr}, true, nil
 	}
+	// q.F / q.Ferr / q.Fln — compile-time string interpolation. Each
+	// takes a single string-literal format with `{expr}` placeholders.
+	if isSelector(call.Fun, alias, "F") {
+		if err := validateFLiteral("q.F", call.Args); err != nil {
+			return qSubCall{}, false, err
+		}
+		return qSubCall{Family: familyF, InnerExpr: call.Args[0], OuterCall: expr}, true, nil
+	}
+	if isSelector(call.Fun, alias, "Ferr") {
+		if err := validateFLiteral("q.Ferr", call.Args); err != nil {
+			return qSubCall{}, false, err
+		}
+		return qSubCall{Family: familyFerr, InnerExpr: call.Args[0], OuterCall: expr}, true, nil
+	}
+	if isSelector(call.Fun, alias, "Fln") {
+		if err := validateFLiteral("q.Fln", call.Args); err != nil {
+			return qSubCall{}, false, err
+		}
+		return qSubCall{Family: familyFln, InnerExpr: call.Args[0], OuterCall: expr}, true, nil
+	}
 	// Bare q.CheckCtx — ctx.Err() checkpoint. Statement-only (discard).
 	if isSelector(call.Fun, alias, "CheckCtx") {
 		if len(call.Args) != 1 {
@@ -1443,6 +1466,21 @@ func classifyOpenChain(call *ast.CallExpr, sel *ast.SelectorExpr, alias string) 
 		NoRelease:   noRelease,
 		AutoRelease: autoRelease,
 	}, true, nil
+}
+
+// validateFLiteral enforces that q.F / q.Ferr / q.Fln have a single
+// string-literal argument. Dynamic format strings would defeat
+// compile-time placeholder extraction (and, for q.SQL, re-open the
+// injection hole the helper exists to close).
+func validateFLiteral(name string, args []ast.Expr) error {
+	if len(args) != 1 {
+		return fmt.Errorf("%s takes exactly one argument (the format string literal); got %d", name, len(args))
+	}
+	lit, ok := args[0].(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return fmt.Errorf("%s's argument must be a Go string literal; dynamic format strings are not supported (use fmt.Sprintf for those)", name)
+	}
+	return nil
 }
 
 // validateOkArgs enforces Ok / OkE's two valid arg shapes: one

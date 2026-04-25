@@ -261,6 +261,24 @@ func renderShape(fset *token.FileSet, src []byte, sh callShape, counter *int, al
 			subTexts[i] = buildEnumValidReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts)
 		case familyEnumOrdinal:
 			subTexts[i] = buildEnumOrdinalReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts)
+		case familyF:
+			text, ferr := buildFReplacement(sh.Calls[i])
+			if ferr != nil {
+				return "", false, false, false, ferr
+			}
+			subTexts[i] = text
+		case familyFerr:
+			text, _, _, ferr := buildFerrReplacement(sh.Calls[i])
+			if ferr != nil {
+				return "", false, false, false, ferr
+			}
+			subTexts[i] = text
+		case familyFln:
+			text, ferr := buildFlnReplacement(sh.Calls[i], alias)
+			if ferr != nil {
+				return "", false, false, false, ferr
+			}
+			subTexts[i] = text
 		}
 	}
 
@@ -639,7 +657,8 @@ func isInPlaceFamily(f family) bool {
 		familySlogAttr, familySlogFile, familySlogLine, familySlogFileLine,
 		familyFile, familyLine, familyFileLine, familyExpr,
 		familyEnumValues, familyEnumNames, familyEnumName,
-		familyEnumParse, familyEnumValid, familyEnumOrdinal:
+		familyEnumParse, familyEnumValid, familyEnumOrdinal,
+		familyF, familyFerr, familyFln:
 		return true
 	}
 	return false
@@ -844,6 +863,18 @@ func renderSubCall(fset *token.FileSet, src []byte, sh callShape, subIdx int, su
 		// expression contains `fmt.Errorf(...)` for the unknown-name
 		// branch, so we flip fmtUsed to trigger the import injection.
 		return "", true, false, false, nil
+	case familyF, familyFln:
+		// q.F / q.Fln rewrite to fmt.Sprintf / fmt.Fprintln — fmt
+		// import always needed (even for the no-{expr} case where
+		// q.Fln still uses Fprintln).
+		return "", true, false, false, nil
+	case familyFerr:
+		// q.Ferr rewrites to errors.New (no exprs) or fmt.Errorf
+		// (with exprs). Both imports are flagged here; the
+		// pre-pass already validated which one was emitted but it's
+		// cheap to inject both, and importcfg extension is keyed by
+		// presence not arity.
+		return "", true, true, false, nil
 	case familyAwait:
 		text, err := renderAwait(fset, src, sh, sub, counter, alias, subs, subTexts)
 		return text, false, false, false, err

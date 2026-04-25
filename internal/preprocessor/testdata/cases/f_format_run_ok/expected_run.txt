@@ -1,0 +1,17 @@
+hello world
+you are 42
+hi world, 43 next year
+user Alice aged 30
+upper: WORLD
+got: [world]
+literal { and } braces
+{name} stays literal but world expands
+100% complete, 42% done
+constant
+bad input: world
+plain
+debug: world=42
+plain debug
+processed abc <nil>
+YELLING AT WORLD
+false

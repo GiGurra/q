@@ -205,6 +205,20 @@ slog.Info("loaded", q.DebugSlogAttr(userID))
 
 The `Debug*` family carries `file:line` *inside the key text* — easy to spot in scrolling stderr, but noisy in shipping logs. Pull these out before merging; reach for `q.SlogAttr` / `q.SlogFile` / `q.SlogLine` for permanent logging.
 
+### Compile-time string interpolation
+
+```go
+name := "world"
+age  := 42
+
+q.F("hi {name}, {age+1} next year")           // → fmt.Sprintf("hi %v, %v next year", name, age+1)
+q.F("upper: {strings.ToUpper(name)}")         // → fmt.Sprintf("upper: %v", strings.ToUpper(name))
+q.Ferr("user {id} not found")                 // → fmt.Errorf("user %v not found", id)  (type error)
+q.Fln("processing {len(items)} items")        // → fmt.Fprintln(q.DebugWriter, …)
+```
+
+`{{` / `}}` escape literal braces. The format must be a Go string literal — dynamic formats are rejected at scan time. Inside `{…}`, anything that parses as a Go expression goes (selectors, function calls, arithmetic, even nested string literals). Tradeoff: identifiers inside the literal aren't IDE-visible — go-to-definition / rename don't see them.
+
 ### Compile-time enum helpers
 
 ```go
