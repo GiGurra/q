@@ -39,7 +39,7 @@ A short ledger of what's shipped — newest first. Look at `git log` for the ful
 
 - **#27 — q.Lock (Lock + defer Unlock).** Rewrites to `_qLockN := <locker>; _qLockN.Lock(); defer _qLockN.Unlock()`. Accepts any `sync.Locker` — covers `*sync.Mutex`, `*sync.RWMutex`, `rwm.RLocker()`. Statement-only. Same fixture as #25/#26/#28.
 
-- **#26 — q.Assert (panic-on-false).** Rewrites to `if !(<cond>) { panic("q.Assert failed <file>:<line>: <msg>") }`. Statement-only. Optional message via variadic. Same fixture as above. Build-tag compile-out (`-tags=qrelease`) deferred — current implementation always emits the check.
+- **#26 — q.Require (bubble-on-false), originally landed as q.Assert (panic-on-false).** Rewrites to `if !(<cond>) { return …, errors.New("q.Require failed <file>:<line>[: <msg>]") }`. Statement-only. Optional message via variadic. Subsequently refactored from panic-shaped `q.Assert` into a bubble-shaped `q.Require`: q's purpose is producing errors, not generating panics. Fixture `require_run_ok`. Build-tag compile-out (`-tags=qrelease`) deferred — current implementation always emits the check.
 
 - **#25 — q.TODO / q.Unreachable (panic markers).** Rewrite to `panic("q.TODO <file>:<line>[: <msg>]")` / `"q.Unreachable ..."`. Statement-only, optional message. Same fixture as above. Build-time aggregation (TODO count summary) deferred.
 

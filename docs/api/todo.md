@@ -55,4 +55,4 @@ Stmt-only — both return nothing.
 
 ## See also
 
-- [q.Assert](assert.md) — for conditional invariants.
+- [q.Require](require.md) — bubble (not panic) when a runtime precondition fails.

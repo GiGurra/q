@@ -40,7 +40,6 @@ nav:
   - Getting Started: getting-started.md
   - API:
     - q.As:                    api/as.md
-    - q.Assert:                api/assert.md
     - q.Async:                 api/async.md
     - q.AwaitAll / AwaitAny:   api/await_multi.md
     - q.AwaitCtx:              api/await_ctx.md
@@ -55,6 +54,7 @@ nav:
     - q.Recv:                  api/recv.md
     - q.RecvAny / Drain:       api/channel_multi.md
     - q.RecvCtx:               api/recv_ctx.md
+    - q.Require:               api/require.md
     - q.Timeout / Deadline:    api/timeout.md
     - q.TODO / Unreachable:    api/todo.md
     - q.Trace:                 api/trace.md

@@ -40,7 +40,6 @@ Around that core sit a handful of orthogonal helpers — context cancellation, f
 | Helper | What it does |
 |--------|--------------|
 | [`q.As` / `q.AsE`](api/as.md) | Comma-ok specialised to type assertion; bubbles `q.ErrBadAssert` on miss. |
-| [`q.Assert`](api/assert.md) | Runtime assertion — panic on false. |
 | [`q.Async`, `q.Await` / `q.AwaitE`](api/async.md) | JS-flavour promises on top of goroutines + channels. |
 | [`q.AwaitAll` / `q.AwaitAny`](api/await_multi.md) | Fan-in over many futures: gather all (`[]T`) or first-success-wins (`T`). |
 | [`q.AwaitCtx` / `q.AwaitCtxE`](api/await_ctx.md) | ctx-aware future await — bubble on cancel. |
@@ -55,6 +54,7 @@ Around that core sit a handful of orthogonal helpers — context cancellation, f
 | [`q.Recv` / `q.RecvE`](api/recv.md) | Comma-ok specialised to channel receive; bubbles `q.ErrChanClosed` on close. |
 | [`q.RecvAny` / `q.Drain` / `q.DrainAll`](api/channel_multi.md) | Multi-channel select / drain-until-close / per-channel drain-all. |
 | [`q.RecvCtx` / `q.RecvCtxE`](api/recv_ctx.md) | ctx-aware channel receive — bubble on close or cancel. |
+| [`q.Require`](api/require.md) | Runtime precondition — bubble an error when `cond` is false. |
 | [`q.Timeout` / `q.Deadline`](api/timeout.md) | Derive a child ctx with an auto-`defer cancel()`. |
 | [`q.TODO` / `q.Unreachable`](api/todo.md) | Rust-style panic markers with file:line. |
 | [`q.Trace` / `q.TraceE`](api/trace.md) | Try-shape with a compile-time `file:line:` prefix on the bubble. |
@@ -72,7 +72,7 @@ return q.Try(call()), nil                // return-position
 x := f(q.Try(call()), q.NotNil(p))       // hoist — q.* nested inside any expression
 ```
 
-`q.Check`, `q.CheckE`, `q.Lock`, `q.Bubble`, `q.TODO`, `q.Unreachable`, `q.Assert`, and `q.Timeout` / `q.Deadline` are statement-only by design.
+`q.Check`, `q.CheckE`, `q.Lock`, `q.Bubble`, `q.TODO`, `q.Unreachable`, `q.Require`, and `q.Timeout` / `q.Deadline` are statement-only by design.
 
 ## Where to go next
 

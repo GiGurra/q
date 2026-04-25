@@ -1,6 +1,8 @@
 // Fixture: statement-only panic/defer helpers — q.Lock, q.TODO,
-// q.Unreachable, q.Assert. All return nothing; the preprocessor
-// rewrites them into their conventional defer/panic shapes.
+// q.Unreachable. All return nothing; the preprocessor rewrites them
+// into their conventional defer/panic shapes. (q.Require has its own
+// fixture under require_run_ok since it bubbles an error rather than
+// panics.)
 package main
 
 import (
@@ -64,8 +66,7 @@ func stripLineNumber(s string) string {
 }
 
 // catchPanic runs body and recovers, returning the panic value as a
-// string. Used to exercise q.TODO / q.Unreachable / q.Assert which
-// all panic.
+// string. Used to exercise q.TODO / q.Unreachable which both panic.
 func catchPanic(name string, body func()) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -74,20 +75,6 @@ func catchPanic(name string, body func()) {
 		}
 	}()
 	body()
-}
-
-// assertPasses / assertFails exercise q.Assert in both branches.
-func assertPasses() {
-	q.Assert(1+1 == 2, "arithmetic holds")
-	fmt.Println("assertPasses: survived")
-}
-
-func assertFails() {
-	q.Assert(false, "forced fail")
-}
-
-func assertNoMsg() {
-	q.Assert(false)
 }
 
 func todoNoMsg() {
@@ -116,9 +103,6 @@ func main() {
 	fmt.Printf("Get(b)=%d\n", s.Get("b"))
 	fmt.Printf("CacheRead(x)=%d\n", s.CacheRead("x"))
 
-	assertPasses()
-	catchPanic("assertFails", assertFails)
-	catchPanic("assertNoMsg", assertNoMsg)
 	catchPanic("todoNoMsg", todoNoMsg)
 	catchPanic("todoWithMsg", todoWithMsg)
 

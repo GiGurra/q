@@ -654,9 +654,9 @@ func renderSubCall(fset *token.FileSet, src []byte, sh callShape, subIdx int, su
 	case familyUnreachable:
 		text, err := renderPanicMarker(fset, src, sh, sub, "q.Unreachable", subs, subTexts)
 		return text, false, false, false, err
-	case familyAssert:
-		text, err := renderAssert(fset, src, sh, sub, subs, subTexts)
-		return text, false, false, false, err
+	case familyRequire:
+		text, err := renderRequire(fset, src, sh, sub, counter, subs, subTexts)
+		return text, false, true, false, err
 	case familyRecv:
 		text, err := renderRecv(fset, src, sh, sub, counter, alias, subs, subTexts)
 		return text, false, false, false, err
@@ -1159,17 +1159,22 @@ func renderPanicMarker(fset *token.FileSet, src []byte, sh callShape, sub qSubCa
 	return fmt.Sprintf("panic(%s)", msgExpr), nil
 }
 
-// renderAssert produces the replacement for q.Assert. Panics when
-// cond is false; the panic message uses the same file:line prefix
-// convention as TODO/Unreachable.
-func renderAssert(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, subs []qSubCall, subTexts []string) (string, error) {
+// renderRequire produces the replacement for q.Require. Bubbles an
+// error to the enclosing function's error return when cond is false;
+// the error message uses the same file:line prefix convention as
+// TODO/Unreachable but wraps the prefix in errors.New rather than
+// panicking. Statement-only.
+func renderRequire(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, counter int, subs []qSubCall, subTexts []string) (string, error) {
 	if sh.Form != formDiscard {
-		return "", fmt.Errorf("q.Assert must be an expression statement (no LHS, no return position); the call returns no value")
+		return "", fmt.Errorf("q.Require must be an expression statement (no LHS, no return position); the call returns no value")
 	}
-	indent := indentOf(src, fset.Position(sh.Stmt.Pos()).Offset)
+	zeros, indent, _, _, err := commonRenderInputs(fset, src, sh, sub, counter, subs, subTexts)
+	if err != nil {
+		return "", err
+	}
 	condText := exprTextSubst(fset, src, sub.InnerExpr, subs, subTexts)
 	prefix := tracePrefix(fset, sub.OuterCall.Pos())
-	base := "q.Assert failed " + prefix
+	base := "q.Require failed " + prefix
 	var msgExpr string
 	if len(sub.MethodArgs) == 1 {
 		userMsg := exprTextSubst(fset, src, sub.MethodArgs[0], subs, subTexts)
@@ -1177,9 +1182,10 @@ func renderAssert(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, s
 	} else {
 		msgExpr = strconv.Quote(base)
 	}
+	zeros[len(zeros)-1] = fmt.Sprintf("errors.New(%s)", msgExpr)
 	var b bytes.Buffer
 	fmt.Fprintf(&b, "if !(%s) {\n", condText)
-	fmt.Fprintf(&b, "%s\tpanic(%s)\n", indent, msgExpr)
+	fmt.Fprintf(&b, "%s\treturn %s\n", indent, joinWith(zeros, ", "))
 	fmt.Fprintf(&b, "%s}", indent)
 	return b.String(), nil
 }

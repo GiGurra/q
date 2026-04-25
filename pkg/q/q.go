@@ -665,12 +665,17 @@ func Unreachable(msg ...string) {
 	panicUnrewritten("q.Unreachable")
 }
 
-// Assert panics with "q.Assert failed <file>:<line>[: <msg>]" when
-// cond is false. Always an expression statement. Use for internal
-// invariants — preconditions that should never be violated by
-// correctly-written callers.
-func Assert(cond bool, msg ...string) {
-	panicUnrewritten("q.Assert")
+// Require returns when cond is true; otherwise the preprocessor
+// rewrites the call site to bubble an error of the form
+//
+//	errors.New("q.Require failed <file>:<line>[: <msg>]")
+//
+// to the enclosing function's error return. Always an expression
+// statement. Use for runtime preconditions where reporting via
+// error is preferable to crashing the process — q's stance is that
+// the library's job is returning errors, not generating panics.
+func Require(cond bool, msg ...string) {
+	panicUnrewritten("q.Require")
 }
 
 // Trace forwards v when err is nil; otherwise the preprocessor

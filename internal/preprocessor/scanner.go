@@ -52,7 +52,7 @@ const (
 	familyLock        // q.Lock(l) — Lock + defer Unlock
 	familyTODO        // q.TODO([msg]) — panic with file:line prefix
 	familyUnreachable // q.Unreachable([msg]) — panic with file:line prefix
-	familyAssert      // q.Assert(cond, [msg]) — panic when cond is false
+	familyRequire     // q.Require(cond, [msg]) — bubble an error when cond is false
 	familyRecv        // q.Recv(ch) — channel receive with close bubble
 	familyRecvE       // q.RecvE(ch).<method> — chain variant
 	familyAs          // q.As[T](x) — type assertion with failure bubble
@@ -827,11 +827,11 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 		}
 		return qSubCall{Family: familyUnreachable, MethodArgs: call.Args, OuterCall: expr}, true, nil
 	}
-	if isSelector(call.Fun, alias, "Assert") {
+	if isSelector(call.Fun, alias, "Require") {
 		if len(call.Args) < 1 || len(call.Args) > 2 {
-			return qSubCall{}, false, fmt.Errorf("q.Assert takes 1 or 2 arguments (cond, [msg]); got %d", len(call.Args))
+			return qSubCall{}, false, fmt.Errorf("q.Require takes 1 or 2 arguments (cond, [msg]); got %d", len(call.Args))
 		}
-		return qSubCall{Family: familyAssert, InnerExpr: call.Args[0], MethodArgs: call.Args[1:], OuterCall: expr}, true, nil
+		return qSubCall{Family: familyRequire, InnerExpr: call.Args[0], MethodArgs: call.Args[1:], OuterCall: expr}, true, nil
 	}
 	// Bare q.Trace — Try-shape with file:line-prefixed bubble.
 	if isSelector(call.Fun, alias, "Trace") {
