@@ -212,6 +212,8 @@ Multi-value cases work: `case Red, Blue:` covers two constants. Switch-with-init
 
 Cross-package T is rejected for the same reason `q.EnumName` is — declare a thin local wrapper in the enum's home package.
 
+See **[`q.Exhaustive`](exhaustive.md)** for the full reference: how the check resolves constants, what gets enforced, why this shape, and how `default:` opts out.
+
 ## Statement forms
 
 Every helper works in any expression position the rest of q supports — define, assign, discard, return, hoist:

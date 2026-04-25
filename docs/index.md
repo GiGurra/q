@@ -45,6 +45,7 @@ Around that core sit a handful of orthogonal helpers — context cancellation, f
 | [`q.Check` / `q.CheckE`](api/check.md) | Bubble on `error` alone — for `db.Ping`, `file.Close`, `validate(x)`. Statement-only. |
 | [`q.DebugPrintln` / `q.DebugSlogAttr`](api/debug.md) | Go's missing `dbg!` — prints `file:line src = value` mid-expression, or produces an auto-keyed `slog.Attr`. |
 | [`q.EnumValues` / `EnumName` / `EnumParse` / `EnumValid` / `EnumOrdinal`](api/enums.md) | Compile-time helpers for Go's `const X = iota` enum pattern — list all values, name lookup, parse from name, membership, ordinal. Int- and string-backed. |
+| [`q.Exhaustive`](api/exhaustive.md) | `switch q.Exhaustive(v) { … }` — build fails if any constant of `v`'s type is missing from the case clauses (unless a `default:` opts out). Wrapper stripped at rewrite time, zero runtime cost. |
 | [`q.F` / `q.Ferr` / `q.Fln`](api/format.md) | Compile-time `{expr}` string interpolation. `q.F("hi {name}")` → `fmt.Sprintf(...)`. Format must be a string literal. |
 | [`q.SQL` / `q.PgSQL` / `q.NamedSQL`](api/sql.md) | Injection-safe parameterised SQL. `{expr}` placeholders lift out as `?` / `$N` / `:nameN` driver binds. |
 | [`q.GoroutineID`](api/goroutine_id.md) | Returns the runtime goid Go deliberately hides — via runtime-package injection. ~1ns. |
