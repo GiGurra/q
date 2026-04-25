@@ -23,15 +23,6 @@ The persistent backlog for `q`. A cold-state reader can pick up here without re-
 
   **Why now-ish vs much later:** sum types are the headline rejected proposal. Even a runtime-boxed version with exhaustiveness checking would be high-impact for users.
 
-- **#75 — Phantom types / brands `q.Tagged[Underlying, Tag]`.** Compile-time distinct types over the same underlying type, no runtime cost.
-
-  **Surface:**
-  - `type UserID = q.Tagged[int, struct{ _userID }]` — `q.Tagged[U, T]` is a generic struct or alias chosen so the underlying ops still work
-  - `q.UnTag[U, T any](v Tagged[U, T]) U` — unwrap
-  - `q.MkTag[U, T any](v U) Tagged[U, T]` — wrap
-
-  **Tradeoff:** without operator support, you can't write `userID + 1` directly. The rewriter could rewrite `q.MkTag[int, T](q.UnTag(x) + 1)` automatically for arithmetic, but it's clunky. Maybe just expose the unwrap/wrap and accept the verbosity.
-
 - **#76 — Conditional expression `q.Ternary`.** Two shapes considered, only the thunked one is acceptable.
 
   **Eager form (rejected):** `q.Ternary(cond, a, b)` — both `a` and `b` evaluate as Go arguments before the call. The rewriter would have to lazily drop the unchosen arg, which silently changes the semantics from what plain-Go interpretation would suggest. Violates the principle that the rewrite is consistent with what the source-as-Go would mean.
