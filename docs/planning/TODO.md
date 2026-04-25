@@ -25,6 +25,42 @@ _(All of #21–#30 and #32 shipped — see the Done ledger. Open list is now emp
 
 - [ ] **#11 — `q.<X>` for is-nil-as-failure / comma-ok / etc.** Umbrella ticket — superseded by #20, #24. Keep open as the catch-all for any additional bubble triggers that surface later (e.g. `q.IfNil(x)` for error-less nil checks that don't want to spell `q.NotNilE(…).Err(ErrSomething)`).
 
+- [ ] **#67 — Goroutine-local storage with auto-cleanup on goroutine death.** `q.GoroutineLocalStorage() map[any]any` keyed by `q.GoroutineID()`, with entries removed automatically when the owning goroutine exits. The motivating use case is Java-`ThreadLocal`-style "set once, fire-and-forget" storage that doesn't leak across long-running programs that have spawned and reaped many transient goroutines.
+
+  **Why parked.** A working end-to-end prototype was built in this session and reverted before merge — see commit history around `cae6ca7`. The mechanism works, but a few design choices need to settle before it ships.
+
+  **Mechanism (the proven part).** Two pieces are injected into the stdlib `runtime` compile by q's preprocessor:
+
+  1. A companion file declaring `qGLSMap map[uint64]map[any]any` plus `qGetOrCreateGLS()` (linkname-exposed for pkg/q to pull) and `qDeleteGLS(id uint64)` (package-internal call site).
+  2. A one-line AST patch at the top of `runtime.goexit0`: `qDeleteGLS(uint64(gp.goid))`. The patcher walks `proc.go` with `go/parser`, finds `goexit0` by name, reads the parameter name from the AST (so we don't hardcode `gp`), prepends an `ast.ExprStmt`, and prints back through `go/printer`. No textual line manipulation.
+
+  pkg/q exposes `q.GoroutineLocalStorage() map[any]any` (lazy on first call, returns the live map so the caller can mutate directly) and a diagnostic `q.GLSEntryCount() int`.
+
+  **Open design questions.**
+
+  - **Concurrency primitive.** `runtime` cannot import `sync` (sync depends on runtime). Two paths:
+    - *Use `runtime.mutex`* (the runtime-internal mutex used everywhere in the scheduler). Simple, all state lives in runtime, briefly locks on every Get/Delete. Each goroutine reads/writes its own key so there's no per-key contention; the lock is purely for map structure integrity. Microseconds we won't measure.
+    - *Move storage to pkg/q, link from runtime.* Real `sync.Map` in pkg/q; runtime's injected file has bodyless declarations linkname-pulling pkg/q's bodies. The patched `goexit0` calls `qDeleteGLS` which the linker resolves to pkg/q's body. Adds three linkname directives, an extra file boundary, and exercises runtime → third-party linkname pulls (less tested than the third-party → runtime path we already use for `GoroutineID`). For the access pattern (each goroutine reads/writes its own key, infrequently), sync.Map's lock-free-read advantage doesn't materialise.
+    - *Lean:* `runtime.mutex`. The complexity of routing through pkg/q buys nothing observable.
+
+  - **Inheritance to child goroutines.** Currently each goroutine gets its own map (no inheritance from the parent that spawned it). Java's ThreadLocal works similarly. Alternative: copy parent's map into child's on first child access, like rewire's pprof-labels-pointer trick where labels propagate automatically. Adds complexity (where to hook the copy?) and surprise (mutations from child don't reflect to parent). Lean: no inheritance — explicit propagation via `context.Context` is what we already have.
+
+  - **Type safety.** `map[any]any` is type-untyped by design — q doesn't introspect what users want to store. A future `q.GoroutineLocal[T]` typed wrapper layered on top is cheap if needed.
+
+  - **Test for the cleanup invariant.** The fixture spawns N goroutines that each touch GLS, joins them, then polls `GLSEntryCount()` until it returns to baseline. Works in practice; relies on `runtime.Gosched()` + brief sleep to give `goexit0` a chance to run for every dead goroutine. Reliable enough for a fixture; would feel slightly flaky at scale.
+
+  - **Patching runtime is a real escalation.** We were previously *appending* one file to runtime's compile. With GLS we'd also be *modifying* an existing runtime file (`proc.go`). That moves us from "runtime sees one extra file" to "runtime sees one of its own files rewritten". The AST-based patch is robust to comment / whitespace changes but breaks if Go renames `goexit0` (rare; it's load-bearing for the scheduler) or restructures it enough that "prepend at body top" is no longer a safe insertion point.
+
+  - **Cross-Go-version stability.** Currently tested only on Go 1.26.2. Goexit0's signature has been `func goexit0(gp *g)` for years, but a bigger rework (e.g., merge with `gdestroy`) would invalidate the parameter-extraction path. Mitigation: when the patcher fails to find `goexit0`, fall back to omitting the cleanup hook — the GLS still works, just leaks. Behaviour-degraded rather than build-broken.
+
+  **Resume steps when picking this up.**
+
+  1. Pick the concurrency primitive (recommended: `runtime.mutex`).
+  2. Re-add `pkg/q/gls.go` + the GLS pieces in `runtimestub.go` (the `patchProcGoExit0` function from the prototype is in the conversation log around 2026-04-25).
+  3. Add `GoroutineLocalStorage` and `GLSEntryCount` to `qRuntimeHelpers` in `scanner.go`.
+  4. Restore the `goroutine_local_storage_run_ok` fixture.
+  5. Document in README + dedicated docs page (model after `docs/api/goroutine_id.md`); call out the proc.go-patch escalation explicitly.
+
 - [ ] **#16 — Multi-LHS from a single q.\*** (deferred). `v, w := q.Try(call())` where we'd want q.Try to split a multi-result producer. Requires new runtime helpers `q.Try2[T1, T2]` / `q.Try3` and matching rewrite templates. The hoist infrastructure already handles *incidental* multi-LHS (where the RHS call itself returns multi, and a q.* is nested in its args — see `multiLHS` in the hoist fixture). This parking-lot item is strictly the shape where q.* IS the multi-result producer; deprioritised in favour of #15 / #17.
 
 ## Done

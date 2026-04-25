@@ -190,6 +190,14 @@ Future / deferred:
 - Multi-LHS where q.* itself produces multiple T values (`v, w := q.Try2(call())`) — needs new runtime helpers. Incidental multi-LHS (where q.* is nested inside a multi-result RHS call) already works via hoist. Tracked as TODO #16, parked.
 - Optimisations like length-preserving rewrites if the position-drift impact in editors / CI becomes annoying.
 
+## 5b. Runtime-package injection
+
+q's preprocessor injects companion files into the stdlib `runtime` package compile to expose runtime-internal information that Go's public API hides. As of writing, one such injection is shipped (`q.GoroutineID()` exposes `g.goid`); a goroutine-local-storage feature using the same mechanism plus an AST patch of `goexit0` is parked — see [`docs/planning/TODO.md`](planning/TODO.md) #67 for the design discussion and the resume-point.
+
+The mechanism: when toolexec dispatches the `runtime` package compile, q's `planRuntimeStub` synthesizes one or more companion files and substitutes/appends them into the compile argv. The injected file uses single-arg `//go:linkname` directives to opt symbols into being externally linkable (Go 1.23+ blocks third-party linkname pulls into runtime unless the runtime side has explicitly declared the symbol so). pkg/q then `//go:linkname`-pulls those symbols.
+
+Additions that need a *call site* inside an existing runtime function (e.g. a goroutine-death cleanup hook) require modifying that runtime file in place, not just appending a new one. The patcher walks the file with `go/parser`, finds the target function by name, manipulates the AST, and prints the result to a tempdir. This is materially riskier than appending — a bug in the patcher breaks runtime — and we keep this kind of change behind a planning doc and a fixture before shipping.
+
 ## 6. Non-goals
 
 - **No general monad library.** `q` is the Rust-`?` analogue; it is not `for { x <- … }` from Scala. If the project ever needed a wider effect surface, that is a separate project, not a feature of `q`.
