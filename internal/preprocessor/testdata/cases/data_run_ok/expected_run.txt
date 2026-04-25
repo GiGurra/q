@@ -1,0 +1,47 @@
+Map: [2 4 6]
+MapErr ok: [1 2 3] <nil>
+MapErr fail: true
+q.Try(MapErr) ok: [10 20 30]
+q.Try(MapErr) fail: strconv.Atoi: parsing "x": invalid syntax
+q.TryE(MapErr).Wrap fail: parsing: strconv.Atoi: parsing "x": invalid syntax
+FlatMap: [1 10 2 20 3 30]
+FlatMapErr ok: [1 10 2 20]
+FlatMapErr fail: flat-fail
+Filter: [2 4]
+FilterErr ok: [1 3]
+FilterErr fail: true
+GroupBy[a]=[{a 1} {a 3} {a 5}]
+GroupBy[b]=[{b 2} {b 4}]
+Exists yes: true
+Exists no: false
+ExistsErr yes: true
+ExistsErr fail: true
+ForAll true: true
+ForAll false: false
+ForAll empty: true
+ForAllErr true: true
+Find found: 20
+Find missing
+q.Ok(Find) fail: true
+q.OkE(Find).Wrap fail: no admin
+Fold: 10
+FoldErr ok: 6
+FoldErr fail: true
+Reduce max: 9
+Reduce empty: 0
+Reduce one: 42
+Reduce concat: abc
+Distinct ints: [1 2 3 4]
+Distinct strs: [a b c]
+Distinct empty: []
+Partition yes: [2 4]
+Partition no: [1 3 5]
+Chunk 2: [[1 2] [3 4] [5]]
+Chunk 5: [[1 2 3]]
+Count: 3
+Take 3: [1 2 3]
+Take 99: [1 2]
+Take 0: []
+Drop 2: [3 4 5]
+Drop 99: []
+Pipeline: 50

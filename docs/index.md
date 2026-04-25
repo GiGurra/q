@@ -41,6 +41,7 @@ Around that core sit a handful of orthogonal helpers — context cancellation, f
 | [`q.Async`, `q.Await` / `q.AwaitE`](api/async.md) | JS-flavour promises on top of goroutines + channels. |
 | [`q.AwaitAll` / `q.AwaitAny`](api/await_multi.md) | Fan-in over many futures: gather all (`[]T`) or first-success-wins (`T`). |
 | [`q.AwaitCtx` / `q.AwaitCtxE`](api/await_ctx.md) | ctx-aware future await — bubble on cancel. |
+| [`q.Map` / `Filter` / `Fold` / `Reduce` / `GroupBy` / …](api/data.md) | Functional data ops over slices — Scala / samber/lo-style. Bare + `…Err` flavours; pure runtime, compose with `q.Try` / `q.Ok`. |
 | [`q.CheckCtx` / `q.CheckCtxE`](api/bubble.md) | `ctx.Err()` cancellation checkpoint as a statement. |
 | [`q.Check` / `q.CheckE`](api/check.md) | Bubble on `error` alone — for `db.Ping`, `file.Close`, `validate(x)`. Statement-only. |
 | [`q.DebugPrintln` / `q.DebugSlogAttr`](api/debug.md) | Go's missing `dbg!` — prints `file:line src = value` mid-expression, or produces an auto-keyed `slog.Attr`. |

@@ -6,6 +6,8 @@ The persistent backlog for `q`. Mirrors the in-session task list so a fresh conv
 
 **As of commit `6203ec7` (2026-04-25):** the rejected-Go-proposal expansion is well underway. Shipped this session: `q.Enum*`, `q.Exhaustive`, `q.F`/`Ferr`/`Fln`, `q.SQL`/`PgSQL`/`NamedSQL`, `q.GenStringer`/`GenEnumJSONStrict`/`GenEnumJSONLax`, `q.Upper`/`Lower`/`Snake`/`Kebab`/`Camel`/`Pascal`/`Title`, `q.Fields`/`AllFields`/`TypeName`/`Tag`, `q.Match`/`Case`/`CaseFn`/`Default`/`DefaultFn`, plus a generalisation pass on the rewriter (drop self-substitution exclusion + broaden direct-bind check + walk container-statement headers + line-preserving rewrites skip the //line directive). Open from the proposal expansion: `#72` named args, `#74` sum types, `#75` phantom types, `#76` ternary, `#78` embed rewire/proven. Plus #67 (GLS) parked with full design notes, and a stretch goal: enforce `q.Exhaustive` / `q.Match` require `default:` when V is opted into `q.GenEnumJSONLax`.
 
+**Next-up addition (2026-04-25):** Scala/lo-style functional data ops added to the backlog — `#80` (sequential `q.Map`/`FlatMap`/`Filter`/`GroupBy`/`Exists`/`ForAll`/`Find`/`Reduce`/`Distinct`/etc., each with bare + `…Err` + `…E` flavours), then `#81` (`q.ParMap`/`ParFlatMap`/etc., parallel via `runtime.NumCPU()` default with ctx-carried `q.WithPar(ctx, n)` override). Pure runtime helpers (no rewriter), so they slot under `qRuntimeHelpers`. **Order is settled: ship #80 first to lock the surface, then #81 layers on the same naming.**
+
 The big-picture trajectory: q is becoming a Scala-style compile-time macro toolkit for Go — every shipped helper folds at the AST level, runtime cost is zero, IDE sees ordinary Go. Each new feature reuses the typecheck pass + file-synthesis primitive established earlier.
 
 **Standing rule (bookkeeping).** When a task lands, move it to the "Done" section *in the same commit* with a one-line note about what shipped (and a commit ref if useful). When a new task is created, add it here *in the same commit* that creates the in-session task. The two views must not drift.
@@ -200,6 +202,34 @@ The features below all fit q's model: parse as valid Go, rewrite at compile time
 
   **Stretch:** a `q.SQLIn(values)` placeholder for `IN (…)` lists (expands to `?, ?, ?` matching `len(values)` and appends each to Args). Bare `{values}` for a slice would be ambiguous (one placeholder vs N), so an explicit helper is clearer.
 
+- [x] **#80 — Data manipulation helpers** — shipped. See Done ledger.
+
+- [ ] **#81 — Parallel data manipulation (q.ParMap / q.ParFlatMap and their `…Err` / `…E` variants).** Same surface as #80's Map/FlatMap (and ideally Filter / GroupBy if they earn it), but each fn invocation runs on a bounded worker pool. Default parallel limit: `runtime.NumCPU()`. Limit configurable via `context.Context`.
+
+  **Surface:**
+  - `q.ParMap[T, R](ctx context.Context, slice []T, fn func(context.Context, T) R) []R`
+  - `q.ParMapErr[T, R](ctx, slice, fn func(context.Context, T) (R, error)) ([]R, error)`
+  - `q.ParMapE[T, R](ctx, slice, fn func(context.Context, T) (R, error)) q.ErrResult[[]R]`
+  - `q.ParFlatMap` / `q.ParFlatMapErr` / `q.ParFlatMapE` — same shape for slice-of-slice flattening
+  - `q.ParFilter` / `q.ParFilterErr` / `q.ParFilterE` — likely worth it for IO-bound predicates; defer until a fixture demands it
+
+  **The user fn takes ctx.** This is the precedent every parallel-Go library lands on: only the user code can preempt itself, so we hand it the context and document that long-running fns must check it. Sequential bare ops (#80) take `func(T) R`; parallel ops take `func(ctx, T) R`. Different signatures — by design.
+
+  **Concurrency control via ctx:**
+  - `q.WithPar(ctx, limit int) context.Context` — sets parallel limit on a private ctx key
+  - `q.WithParUnbounded(ctx) context.Context` — opts out (limit = `len(input)`, fan-out everything)
+  - `q.GetPar(ctx) int` — reads the limit (returns `runtime.NumCPU()` when unset)
+
+  ctx-carried over options-arg because it composes through call graphs: top-level handler sets `ctx = q.WithPar(ctx, 8)` once, every nested ParMap respects it without re-threading. Parallel limit is naturally a "request-scoped resource budget" — same kind of thing already conventional to attach to ctx.
+
+  **Cancellation semantics.** ParMap selects on ctx.Done in addition to worker completion. When ctx cancels, the result returns `(zero, ctx.Err())`; in-flight workers continue (Go has no goroutine kill) and their results are discarded. Mirrors `q.AwaitAllRawCtx`. Document explicitly: "Par fns don't preempt user fns — long-running user fns must check ctx themselves."
+
+  **Error semantics for `…Err`.** First error wins (other workers' errors are discarded once one wins). Same precedent as `q.AwaitAllRawCtx`. A future `q.ParMapJoinErrors` aggregating via `errors.Join` is a possible follow-up; defer until somebody asks.
+
+  **Implementation.** Pure runtime helper. Worker pool via a bounded `chan` for the input feed + N goroutines. Output assembled by input index so the result preserves order. `qRuntimeHelpers` carve-out. Some output-assembly + index-preservation logic may be reusable from the existing `q.AwaitAllRaw` machinery — worth a look at land-time.
+
+  **Why later than #80.** Bare data ops earn their keep on every input size; parallel forms earn it only for IO-bound or CPU-heavy work. Shipping #80 first locks in the surface; #81 layers on top with the same naming. Skipping #80 → #81 ordering would force callers to reach for Par* on tiny slices where the goroutine overhead dominates the win.
+
 - [ ] **#78 — Embed `rewire` and `proven` into q's toolexec dispatcher.** Right now a project that wants q + proven + rewire has to run them as a chain or pick one. q's `cmd/q` could become an umbrella dispatcher that detects which patterns are present in each compiled package and routes to the appropriate rewriter pass.
 
   **Surface:**
@@ -221,6 +251,134 @@ The features below all fit q's model: parse as valid Go, rewrite at compile time
   4. New e2e fixture combining all three: a function that uses `q.Try`, `proven.True`, and `rewire.Mock` in the same body.
 
   **Open question:** does running multiple toolexec passes on the same compile produce correct results, or does pass N+1 trip on temp paths from pass N? Likely fine since each pass writes its own tempdir and the final argv just lists them all, but worth a smoke test before going deeper.
+
+- [ ] **#82 — `q.AtCompileTime[R](fn func() R) R` (compile-time evaluation).** Earlier in q's design history this was excluded as too speculative; with the rest of the macro toolkit shipped (q.Match, q.Enum*, q.F, q.SQL, q.Fields, q.Tag, q.Gen*…) it now sits naturally next to them. Each call site folds at compile time to a literal carrying the result of evaluating fn. Pure runtime stub on the value path — body is `panicUnrewritten("q.AtCompileTime")` — the rewriter does the actual work.
+
+  **Surface (working draft):**
+
+  ```go
+  // Evaluates fn at preprocessor time and splices the result as a Go
+  // literal at the call site.
+  func AtCompileTime[R any](fn func() R) R
+  ```
+
+  Variant ideas — pick whichever earns its keep:
+  - `q.AtCompileTime(fn)` — no-arg func, returns R
+  - `q.AtCompileTimeF[R any](fnExpr string) R` — evaluate a Go expression literal as a string (more powerful but harder to type-check at the IDE level — probably skip, fights the "valid Go syntax" rule)
+  - `q.AtCompileTimeFor[T, R any](xs []T, fn func(T) R) []R` — fold-time map; might be cute but `q.Map` over a literal slice already constant-folds in the Go compiler if the fn is small
+
+  **What "preprocessor time" means here.** The preprocessor would need to actually *execute* fn at toolexec time. Three escalating implementation paths:
+
+  1. **`go run` the closure in a hermetic sub-process.** Synthesize a tiny program that calls fn and prints its result via `fmt.Sprintf("%#v", v)`; capture stdout, splice as a literal at the call site. Pros: works for any pure-Go fn the user wrote; Go's own toolchain handles imports and types. Cons: spawns a subprocess per call site (slow); the synthesized program needs to import the user's module + dependencies (build cost); fn must be self-contained (no captures from the surrounding closure).
+  2. **Go-AST interpreter (constexpr-style).** Walk fn's body via `go/ast` + `go/types` and interpret a small whitelist of operations (arithmetic, string ops, slice/map literals, function calls into a stdlib whitelist). No subprocess; fast; restricted to "pure constexpr" fns. Inspired by Rust's `const fn` rules. Pros: fast, no IO; Cons: implementing the interpreter is a lift, scope creep risk.
+  3. **Hybrid:** start with stdlib-whitelist interpretation for cheap calls, fall back to `go run` subprocess for anything else. Diagnostic when the subprocess fails.
+
+  Lean: **start with path 1 (`go run` subprocess)** and document the cost. Most call sites won't trip the slow path often, and it makes the feature genuinely powerful. Optimize via path 2 later if subprocess overhead bites.
+
+  **Constraints on fn (any path).**
+  - Must be a function literal (not a named function reference) so the rewriter can extract the body.
+  - No free-variable captures from the enclosing scope (the subprocess can't see them; the interpreter can't bind them).
+  - Result type R must be representable as a Go literal — primitives, arrays, slices, maps, structs, pointers (rejected), channels (rejected), funcs (rejected).
+  - Pure: no I/O, no time queries, no random — anything that returns different values across runs is a footgun in compile-time evaluation. (Hard to enforce without sandboxing the subprocess; document the rule and optionally enforce a `GOFLAGS=-trimpath` + restricted `GOENV` to make it deterministic.)
+
+  **Use cases that motivate it:**
+  - Precompute lookup tables: `var sinTable = q.AtCompileTime(buildSinTable)` — no init() goroutine, no first-call cost
+  - Encode build metadata: `var commit = q.AtCompileTime(func() string { return git.HeadHash() })` (assuming the fn shells out to git via os/exec, which the subprocess path supports)
+  - Inline expensive constants: `var maxFib = q.AtCompileTime(func() uint64 { return fib(45) })`
+  - Parse-and-validate static config: `var schema = q.AtCompileTime(parseSchemaFile)`
+
+  **Why parked vs. shipped.** It's the natural cap-stone of the macro toolkit — q.AtCompileTime is the universal escape hatch every other macro is a special case of (q.F is `q.AtCompileTime(buildFmtCall)`, q.Snake is `q.AtCompileTime(toSnake)`, etc.). But the implementation is genuinely involved (subprocess discipline, subprocess error handling, literal-printer for arbitrary R, cache key sensitivity). Park until the existing helpers settle; visit when somebody has a concrete use case the others don't cover.
+
+- [ ] **#83 — Resource-escape detection for `q.Open` (and longer-term ARC).** A `q.Open(...).Release(cleanup)` value is alive *only* until the enclosing function returns — the rewriter registers `defer cleanup(v)` at that scope. Letting the value escape that scope (returning it, handing it to a goroutine that outlives the function, storing it in a field) is a use-after-close in waiting. Detect at compile time and surface a diagnostic.
+
+  **Detect-and-reject phase (small, well-scoped).** The typecheck pass already knows every `q.Open` call site and which local binding holds the resource. Walk the function body for misuses:
+
+  1. **`return v` where v is a Release-bound resource.** Always a bug — the moment the function returns, `defer cleanup(v)` fires, so the caller gets a closed resource. Diagnostic: *"q.Open(...).Release-bound value escapes via return; use .NoRelease() (caller takes ownership) or scope the work inside this function."*
+  2. **`go fn(v)` / spawning a goroutine that captures v.** Goroutine-lifetime > function-lifetime → `cleanup(v)` fires while the goroutine still holds it. Diagnostic: *"q.Open(...).Release-bound value passed to goroutine that may outlive its scope; use .NoRelease() and manage cleanup explicitly, or join the goroutine before return."*
+  3. **`field = v` where field is on a struct receiver / global.** Same flavour — the field outlives the function. Same diagnostic shape.
+  4. **`channel <- v`** — value escapes through the channel; receiver may use it after defer fires. Diagnostic.
+
+  Edge case to handle gracefully: passing v to a *blocking* function call that doesn't escape — `process(v)` is fine, the call completes before defer runs. Detection is local-flow + escape-analysis-lite; for v3 we could lean on `go/ssa`'s actual escape analysis, but a syntactic over-approximation is enough for v1. Document the false-positive frontier (any function call could in principle stash v in a global; we only flag goroutine spawns + return + field-store + channel-send).
+
+  Build-out path:
+  - Add a per-`qSubCall` field `ReleaseBound bool`.
+  - In typecheck, walk each enclosing function's AST after the q.Open is bound; collect every reference site (`info.Uses[ident]` matching the binding) and flag escape patterns.
+  - Diagnostic carries `file:line:col` of the offending site, plus the originating Open's location.
+  - Negative fixtures under `internal/preprocessor/testdata/cases/open_escape_*_rejected/`.
+
+  **Long-term phase: ARC for non-RAM resources.** "Last-usage-site closes" is what Rust gets through linear types and what Swift / Objective-C get through reference counting. q's seed for this is already half-built: `q.Open` is the resource constructor, `Release` is the destructor, and the rewriter knows where every resource binding flows.
+
+  The ambitious version: track every reference site of an Opened resource (including escapes) and, when escape is OK (e.g. handed to a goroutine that joins), insert refcount inc/dec at each ownership-transfer point so the resource closes at the *actual* last usage rather than the function boundary. Concretely:
+
+  - Wrap each Open value in a generated `qRC[T]{value T; rc *atomic.Int32; cleanup func(T)}` shim.
+  - At each transfer site (return, channel send, field store, goroutine spawn), emit `rc.Add(1)`. At each scope exit, emit `if rc.Add(-1) == 0 { cleanup(value) }`.
+  - The shim is invisible to user code — q.Open's existing surface (`Release`, `NoRelease`) stays — but the deferred cleanup becomes "decrement, free if last" instead of unconditional close.
+
+  This is a big lift: needs flow analysis (or a heavy hand: rewrite every reference into shim-method calls), needs to interop with raw resource access (sometimes you do want the underlying *Conn), and adds a real per-call atomic. Probably not worth it for the 90% case (functions that own their own resources). But it's the natural endgame if escape patterns turn out to be common.
+
+  **Detection-phase priority: ship before ARC.** The detect-and-reject pass alone closes the practical safety hole — most cases that would leak are caught with no runtime cost. ARC is a maybe-someday if profiles or user reports show resource ownership crosses function boundaries often enough that the diagnostics become annoying.
+
+- [ ] **#84 — `q.Assemble[T](recipes...)` — compile-time dependency-injection graph.** ZIO `ZLayer` / Scala-Cats `MakeFromInOut` / google/wire for Go, but resolved by q's preprocessor at the call site — no codegen step, no runtime reflection, no manual ordering. The user supplies a bag of recipes (functions producing a value, possibly with deps); q topologically sorts them and emits a flat sequence of calls that build the requested target.
+
+  **Surface (working draft):**
+
+  ```go
+  // Recipes are just functions whose inputs are required deps and whose
+  // output is what they construct. Optional second return: error.
+  func newConfig() *Config              { ... }
+  func newDB(c *Config) *DB             { ... }
+  func newServer(db *DB, c *Config) (*Server, error) { ... }
+
+  // Build a *Server. q.Assemble figures out the order: Config first
+  // (no deps), then DB (needs Config), then Server (needs DB + Config).
+  server := q.Assemble[*Server](newConfig, newDB, newServer)
+  ```
+
+  **What it folds to.** The rewriter walks the recipe set, builds a dep graph keyed by output type, topologically sorts, and emits the equivalent of:
+
+  ```go
+  server := func() *Server {
+      _config := newConfig()
+      _db := newDB(_config)
+      _server, _err := newServer(_db, _config)
+      // Whether to bubble _err depends on where q.Assemble appears
+      // (return / assign / discard) — same logic as q.Try.
+      return _server
+  }()
+  ```
+
+  Errors short-circuit using the existing q.Try machinery: any erroring recipe bubbles via the enclosing function's error return. Non-erroring recipes inline directly. Same five forms as the rest of q (define, assign, discard, return, hoist).
+
+  **Compile-time guarantees:**
+  - **Missing dep** — every recipe's input type must be produced by some other recipe (or supplied as a literal value mixed in with the recipes — `q.Assemble[*Server](newDB, newServer, &cfg)` works the same as a `func() *Config { return &cfg }` recipe). If not, compile-time diagnostic naming the type and the recipe that wanted it.
+  - **Duplicate provider** — two recipes producing the same type → diagnostic.
+  - **Cycle** — A needs B which needs A → diagnostic.
+  - **Unused recipe** — recipe in the bag but its output isn't reachable from T → diagnostic. (Strict mode; could relax behind a flag if it's annoying in practice.)
+  - **Unsatisfiable T** — no recipe produces T → diagnostic.
+
+  All of these become regular Go test failures at build time — the same ergonomics as misspelling a const.
+
+  **Variants worth considering:**
+  - `q.AssembleErr[T](recipes...) (T, error)` — explicit `(T, error)` shape; pairs with q.Try on the call site (`server := q.Try(q.AssembleErr[*Server](...))`). Probably what we ship as primary.
+  - `q.AssembleE[T](recipes...) ErrResult[T]` — chain variant, mirrors the q.TryE / q.AwaitE pattern. Composes with `.Wrap("startup")`.
+  - `q.AssembleAll[T](recipes...) []T` — when multiple recipes legitimately produce the same type and the caller wants them all (plugin / handler registration).
+  - **Resource-managed recipes** — a recipe that returns `q.OpenResult[T]` instead of `T` registers its cleanup via the existing `q.Open` machinery. The graph teardown is reverse-topo, automatic. This is the ZIO `ZLayer.scoped` overlap.
+
+  **Type-resolution mechanism (preprocessor work).**
+
+  1. Scanner recognises `q.Assemble[T](r1, r2, ...)`. Extract T from the index expression; capture the recipe expressions.
+  2. Typecheck pass uses `go/types` to resolve each recipe's `*types.Signature`: input types are deps, output type is what it provides. Non-function recipe args are treated as constant providers (their type IS the provided type).
+  3. Build a directed graph: edges from each recipe's input types to its output type. Run Kahn's algorithm to topo-sort. Detect cycles + missing deps + duplicates inline.
+  4. Emit the flat sequence of calls in topo order, with `_qDepN` temps named after the type's basename (with disambiguation for collisions).
+
+  **Tradeoffs vs. google/wire / uber/fx / samber/do:**
+  - **vs. wire:** wire generates a separate file via codegen step; q.Assemble is inline at the call site, no separate `wire.go` to keep in sync. Same compile-time guarantees.
+  - **vs. uber/fx:** fx resolves at runtime via reflection — slower startup, errors at runtime. q.Assemble errors at build time. fx supports lifecycle hooks; q.Assemble piggy-backs on q.Open for that.
+  - **vs. samber/do:** also runtime, also reflection-based. Same comparison as fx.
+
+  **Why this fits q's mission.** "Stop reaching for codegen tools" is already the through-line of q.Gen* and q.AtCompileTime. q.Assemble takes the next step: stop reaching for DI containers entirely. The recipes are plain Go functions; the orchestration is a one-liner. ZIO showed this pattern is powerful in a typed language — q can make it idiomatic in Go without the monad tax.
+
+  **Implementation order.** Big lift. Realistically lands after #82 (q.AtCompileTime) so we can lean on its preprocessor-time evaluation primitives — though strictly speaking q.Assemble's resolution is type-only and doesn't need to *execute* anything at preprocess time, just topo-sort. Could ship as a standalone pass earlier.
 
 ### Future / parking lot
 

@@ -235,6 +235,29 @@ description := q.Match(c,
 
 Folds to an IIFE-wrapped switch — value-returning switch as an expression, the way Scala / Rust / Swift have it. Coverage-checked when V is an enum (same rules as `q.Exhaustive`); `q.Default(...)` opts out for forward-compat scenarios.
 
+### Functional data ops
+
+```go
+// Transform, filter, group — pure runtime, no preprocessor magic.
+doubled := q.Map(nums, func(n int) int { return n * 2 })
+adults  := q.Filter(users, func(u User) bool { return u.Age >= 18 })
+byCat   := q.GroupBy(items, func(it Item) string { return it.Cat })
+total   := q.Fold(amounts, 0, func(acc, n int) int { return acc + n })
+mx      := q.Reduce(scores, func(a, b int) int { if a > b { return a }; return b })
+
+// Fallible variants compose with q.Try / q.TryE — first error short-circuits.
+func loadUsers(rows []Row) ([]User, error) {
+    return q.TryE(q.MapErr(rows, parseUser)).Wrap("loading users"), nil
+}
+
+// Find pairs with q.Ok / q.OkE for "bubble on missing"
+func findAdmin(users []User) (User, error) {
+    return q.Ok(q.Find(users, isAdmin)), nil
+}
+```
+
+Scala / samber/lo-style data ops over slices: `Map`, `FlatMap`, `Filter`, `GroupBy`, `Exists`, `ForAll`, `Find`, `Fold`, `Reduce`, `Distinct`, `Partition`, `Chunk`, `Count`, `Take`, `Drop`. Each fallible op ships in two flavours — bare and `…Err` returning `(result, error)` — designed to flow through `q.Try` / `q.TryE` for the bubble path. Pure runtime helpers; no `…E` chain flavour because `q.TryE(q.MapErr(…)).Wrap(…)` already produces that shape. Iterator (`iter.Seq`) variants are deferred to a follow-up wave.
+
 ### Compile-time reflection
 
 ```go
