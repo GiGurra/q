@@ -121,6 +121,45 @@ func planUserPackage(pkgPath string, toolArgs []string) (*Plan, error) {
 		rewrittenFiles = append(rewrittenFiles, rewritten{origPath: pf.src, newPath: newPath})
 	}
 
+	// Synthesize a companion methods file if any q.Gen* directives
+	// were detected. Reads from allShapes (post-typecheck), produces
+	// a single _q_gen.go containing all requested methods, and
+	// appends it to the compile argv. The synthesis runs before
+	// the importcfg extension below so any imports the synthesized
+	// file pulls in (encoding/json, fmt) get registered.
+	genDirs := collectGenDirectives(fset, allShapes)
+	var genCleanup func()
+	if len(genDirs) > 0 {
+		pkgName := ""
+		for _, pf := range parsedFiles {
+			if pf.file.Name != nil {
+				pkgName = pf.file.Name.Name
+				break
+			}
+		}
+		genSrc := synthesizeGenFile(pkgName, genDirs)
+		if genSrc != "" {
+			path, cleanup, err := writeTempGoFile("q-gen-*.go", []byte(genSrc))
+			if err != nil {
+				cleanupAll()
+				return nil, err
+			}
+			genCleanup = cleanup
+			rewrittenFiles = append(rewrittenFiles, rewritten{origPath: "", newPath: path})
+			// Mark imports the synthesized file uses so importcfg
+			// extension catches them.
+			for _, d := range genDirs {
+				switch d.family {
+				case familyGenEnumJSONStrict:
+					importsToInject["encoding/json"] = true
+					importsToInject["fmt"] = true
+				case familyGenEnumJSONLax:
+					importsToInject["encoding/json"] = true
+				}
+			}
+		}
+	}
+
 	if len(rewrittenFiles) == 0 {
 		return nil, nil
 	}
@@ -128,11 +167,19 @@ func planUserPackage(pkgPath string, toolArgs []string) (*Plan, error) {
 	newArgs := make([]string, len(toolArgs))
 	copy(newArgs, toolArgs)
 	for _, rw := range rewrittenFiles {
+		if rw.origPath == "" {
+			// Synthesized file with no original — append to argv.
+			newArgs = append(newArgs, rw.newPath)
+			continue
+		}
 		for i, a := range newArgs {
 			if a == rw.origPath {
 				newArgs[i] = rw.newPath
 			}
 		}
+	}
+	if genCleanup != nil {
+		cleanups = append(cleanups, genCleanup)
 	}
 
 	// Extend the compile's importcfg with any packages we injected

@@ -115,6 +115,9 @@ const (
 	familyCamel
 	familyPascal
 	familyTitle
+	familyGenStringer       // var _ = q.GenStringer[T]() — synthesize String() method
+	familyGenEnumJSONStrict // var _ = q.GenEnumJSONStrict[T]() — name-based JSON, errors on unknown
+	familyGenEnumJSONLax    // var _ = q.GenEnumJSONLax[T]() — passthrough JSON, preserves unknown
 )
 
 // form is the syntactic position of a recognised q.* call:
@@ -244,6 +247,21 @@ type qSubCall struct {
 	// diagnostic (the rewriter doesn't yet emit qualified
 	// identifiers for enum lookups).
 	EnumTypeText string
+
+	// EnumConstValues is a parallel slice to EnumConsts carrying
+	// each constant's runtime value, formatted as Go-syntax source
+	// text (e.g. `"pending"` for a string-backed const, `0` for an
+	// int-backed iota constant). Populated by the typecheck pass
+	// for the Gen* directives that need the value to drive JSON
+	// marshaller code generation.
+	EnumConstValues []string
+
+	// EnumUnderlyingKind is the basic-type kind of T's underlying
+	// type — "string" / "int" / "uint" / "int64" / etc. Populated
+	// by the typecheck pass. Empty when T's underlying isn't a
+	// basic type (which the Gen* directives reject with a
+	// diagnostic).
+	EnumUnderlyingKind string
 }
 
 // cleanupKind is the inferred cleanup form for q.Open(...).Release()
@@ -378,14 +396,102 @@ func scanFile(fset *token.FileSet, path string, file *ast.File) ([]callShape, []
 	var diags []Diagnostic
 
 	for _, decl := range file.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Body == nil {
-			continue
+		switch d := decl.(type) {
+		case *ast.FuncDecl:
+			if d.Body == nil {
+				continue
+			}
+			walkBlock(fset, path, d.Body, alias, d.Type, &shapes, &diags)
+		case *ast.GenDecl:
+			if d.Tok != token.VAR {
+				continue
+			}
+			scanTopLevelVarSpec(fset, path, d, alias, &shapes, &diags)
 		}
-		walkBlock(fset, path, fn.Body, alias, fn.Type, &shapes, &diags)
 	}
 
 	return shapes, diags, nil
+}
+
+// scanTopLevelVarSpec recognises the package-level directive shape
+//
+//	var _ = q.GenX[T]()
+//
+// where GenX is one of GenStringer, GenEnumJSONStrict,
+// GenEnumJSONLax. Each is captured as a callShape with a synthetic
+// ExprStmt so the rewriter substitutes the call's span with
+// `struct{}{}` (no-op runtime initializer). The file-synthesis pass
+// (see synthesizeGenFile) reads these shapes back out to generate
+// the companion methods file.
+//
+// Other top-level var declarations (regular package vars) are
+// ignored — q.* references inside their initializers would be a
+// scoping shape we don't currently support, and a future feature
+// can revisit if needed.
+func scanTopLevelVarSpec(fset *token.FileSet, path string, gd *ast.GenDecl, alias string, shapes *[]callShape, diags *[]Diagnostic) {
+	for _, spec := range gd.Specs {
+		vs, ok := spec.(*ast.ValueSpec)
+		if !ok {
+			continue
+		}
+		// Only blank-name ("var _ = …") forms are accepted as
+		// directives. A named binding would imply the user wants
+		// the value at runtime, which doesn't fit the directive
+		// model.
+		if len(vs.Names) != 1 || vs.Names[0].Name != "_" {
+			continue
+		}
+		if len(vs.Values) != 1 {
+			continue
+		}
+		call, ok := vs.Values[0].(*ast.CallExpr)
+		if !ok {
+			continue
+		}
+		fam, typeArg, ok := classifyGenDirective(call, alias)
+		if !ok {
+			continue
+		}
+		if len(call.Args) != 0 {
+			*diags = append(*diags, diagAt(fset, path, call.Pos(),
+				fmt.Sprintf("q.%s takes no arguments; got %d", genDirectiveName(fam), len(call.Args))))
+			continue
+		}
+		*shapes = append(*shapes, callShape{
+			Stmt:  &ast.ExprStmt{X: call},
+			Form:  formDiscard,
+			Calls: []qSubCall{{Family: fam, AsType: typeArg, OuterCall: call}},
+		})
+	}
+}
+
+// classifyGenDirective recognises q.GenX[T]() at top-level and
+// returns the family + type-arg expression. ok=false otherwise.
+func classifyGenDirective(call *ast.CallExpr, alias string) (family, ast.Expr, bool) {
+	if typeArg, ok := isIndexedSelector(call.Fun, alias, "GenStringer"); ok {
+		return familyGenStringer, typeArg, true
+	}
+	if typeArg, ok := isIndexedSelector(call.Fun, alias, "GenEnumJSONStrict"); ok {
+		return familyGenEnumJSONStrict, typeArg, true
+	}
+	if typeArg, ok := isIndexedSelector(call.Fun, alias, "GenEnumJSONLax"); ok {
+		return familyGenEnumJSONLax, typeArg, true
+	}
+	return 0, nil, false
+}
+
+// genDirectiveName is the user-facing spelling of a Gen directive
+// family for diagnostic messages.
+func genDirectiveName(f family) string {
+	switch f {
+	case familyGenStringer:
+		return "GenStringer"
+	case familyGenEnumJSONStrict:
+		return "GenEnumJSONStrict"
+	case familyGenEnumJSONLax:
+		return "GenEnumJSONLax"
+	}
+	return "GenX"
 }
 
 // walkBlock recursively scans every statement in the block (and every

@@ -1,0 +1,11 @@
+color.String(): Red
+color.String(): Green
+unknown.String(): ""
+color.Marshal: "Blue"
+color.Unmarshal(Green): 1
+color.Unmarshal(Pink).err: q.GenEnumJSONStrict[Color]: unknown name "Pink"
+status.Marshal: "done"
+status.Unmarshal(pending): pending
+status.Unmarshal(future_state): future_state
+status.Remarshal: "future_state"
+future_state valid? false

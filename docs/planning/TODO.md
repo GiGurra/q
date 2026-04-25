@@ -111,7 +111,7 @@ The features below all fit q's model: parse as valid Go, rewrite at compile time
 
   **Tradeoff:** doesn't extend to method values where the name is dynamic, doesn't help with overloading. Diagnostics for: name not found in signature, duplicate name, name on a callee whose params are unnamed.
 
-- [ ] **#73 — Compile-time string ops `q.Snake` / `q.Upper` / `q.Lower` / `q.Camel` / `q.Kebab`.** All take `string` literals, all fold to a `string` literal at the call site. Useful for codegen-adjacent helpers (column names, URL paths, env var keys) without runtime cost.
+- [x] **#73 — Compile-time string ops `q.Snake` / `q.Upper` / `q.Lower` / `q.Camel` / `q.Kebab` / `q.Pascal` / `q.Title`.** Shipped — see Done ledger.
 
   **Go-validity:** function call with string literal arg. Reject dynamic args at scan time.
 

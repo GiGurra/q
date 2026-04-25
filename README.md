@@ -270,6 +270,22 @@ both `int`-backed and `string`-backed enums (any const-able comparable
 type). Constants are discovered by walking the package's
 `*types.Const` set at compile time.
 
+### Auto-generated enum methods
+
+```go
+type Color int
+const (Red Color = iota; Green; Blue)
+
+var _ = q.GenStringer[Color]()         // synthesizes Color.String()
+var _ = q.GenEnumJSONStrict[Color]()   // name-based JSON, errors on unknown
+
+type Status string
+const (Pending Status = "pending"; Done Status = "done")
+var _ = q.GenEnumJSONLax[Status]()     // pass-through JSON, preserves unknown wire values
+```
+
+The directives are package-level; the toolexec pass writes a companion `_q_gen.go` with the methods. **Strict** rejects wire values your code doesn't know about. **Lax** preserves them for forward-compat with newer producers — pair with [`q.Exhaustive`](https://gigurra.github.io/q/api/exhaustive/)'s `default:` arm.
+
 ### Exhaustive switches
 
 ```go

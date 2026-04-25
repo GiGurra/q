@@ -296,10 +296,13 @@ func exprAsConstObjName(expr ast.Expr, info *types.Info) (string, bool) {
 
 // isEnumFamily reports whether sc's family is one of the q.Enum*
 // helpers whose rewriter output depends on the constant set of T.
+// Also covers the Gen* directives, which use the same constant
+// resolution to drive the companion-file synthesis.
 func isEnumFamily(f family) bool {
 	switch f {
 	case familyEnumValues, familyEnumNames, familyEnumName,
-		familyEnumParse, familyEnumValid, familyEnumOrdinal:
+		familyEnumParse, familyEnumValid, familyEnumOrdinal,
+		familyGenStringer, familyGenEnumJSONStrict, familyGenEnumJSONLax:
 		return true
 	}
 	return false
@@ -367,8 +370,9 @@ func resolveEnum(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPath st
 
 	scope := declPkg.Scope()
 	type entry struct {
-		name string
-		pos  token.Position
+		name  string
+		value string
+		pos   token.Position
 	}
 	var entries []entry
 	for _, name := range scope.Names() {
@@ -380,7 +384,11 @@ func resolveEnum(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPath st
 		if !types.Identical(c.Type(), named) {
 			continue
 		}
-		entries = append(entries, entry{name: c.Name(), pos: fset.Position(c.Pos())})
+		entries = append(entries, entry{
+			name:  c.Name(),
+			value: c.Val().ExactString(),
+			pos:   fset.Position(c.Pos()),
+		})
 	}
 	if len(entries) == 0 {
 		pos := fset.Position(sc.OuterCall.Pos())
@@ -399,11 +407,21 @@ func resolveEnum(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPath st
 	})
 
 	names := make([]string, len(entries))
+	values := make([]string, len(entries))
 	for i, e := range entries {
 		names[i] = e.name
+		values[i] = e.value
 	}
 	sc.EnumConsts = names
+	sc.EnumConstValues = values
 	sc.EnumTypeText = named.Obj().Name()
+	// Capture the underlying basic-type kind for the Gen* directives
+	// that need it to choose the right marshaller shape. Empty when
+	// the underlying isn't a basic type (struct, interface, etc.) —
+	// the Gen synthesis rejects those.
+	if basic, ok := named.Underlying().(*types.Basic); ok {
+		sc.EnumUnderlyingKind = basic.Name()
+	}
 	return Diagnostic{}, false
 }
 
@@ -423,6 +441,12 @@ func enumFamilyLabel(f family) string {
 		return "q.EnumValid"
 	case familyEnumOrdinal:
 		return "q.EnumOrdinal"
+	case familyGenStringer:
+		return "q.GenStringer"
+	case familyGenEnumJSONStrict:
+		return "q.GenEnumJSONStrict"
+	case familyGenEnumJSONLax:
+		return "q.GenEnumJSONLax"
 	}
 	return "q.Enum*"
 }
