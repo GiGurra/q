@@ -7,21 +7,6 @@ ctx = q.WithPar(ctx, 8)
 results := q.Try(q.ParMapErr(ctx, urls, fetchURL))
 ```
 
-## Why ctx-carried, not functional options
-
-Two viable shapes for the limit:
-
-1. **Functional options** — `q.ParMap(items, fn, q.ParLimit(8))` (samber/lo PR #858 style)
-2. **Ctx-carried** — `q.ParMap(q.WithPar(ctx, 8), items, fn)` (q's choice)
-
-q ships ctx-carried because:
-
-- **Set once, propagates through the call graph.** A handler that sets `ctx = q.WithPar(ctx, 16)` once gets every nested ParMap call honouring that limit without re-threading.
-- **Symmetric with the rest of q.** ctx-aware q.* helpers (`q.RecvCtx`, `q.AwaitCtx`, `q.CheckCtx`, …) all take `ctx` as the first arg. Par* fits the same shape.
-- **Per-call override is still cheap.** `q.ParMap(q.WithPar(ctx, 16), items, fn)` derives a per-call ctx. Slightly longer than `q.ParLimit(16)`, but no new concept.
-
-The ctx-carried choice is a deliberate departure from samber/lo and party — both ship per-call options. q owns its house style and ctx-as-config-vehicle is more in line with that.
-
 ## Surface
 
 ```go
@@ -30,6 +15,7 @@ func ParMap[T, R any](ctx context.Context, slice []T, fn func(T) R) []R
 func ParFlatMap[T, R any](ctx context.Context, slice []T, fn func(T) []R) []R
 func ParFilter[T any](ctx context.Context, slice []T, pred func(T) bool) []T
 func ParForEach[T any](ctx context.Context, slice []T, fn func(T))
+func ParGroupBy[T any, K comparable](ctx context.Context, slice []T, fn func(T) K) map[K][]T
 
 // Predicate searches — short-circuit on first match (Exists) or first
 // non-match (ForAll). ctx cancellation honoured (returns false).
@@ -42,6 +28,7 @@ func ParMapErr[T, R any](ctx context.Context, slice []T, fn func(context.Context
 func ParFlatMapErr[T, R any](ctx context.Context, slice []T, fn func(context.Context, T) ([]R, error)) ([]R, error)
 func ParFilterErr[T any](ctx context.Context, slice []T, pred func(context.Context, T) (bool, error)) ([]T, error)
 func ParForEachErr[T any](ctx context.Context, slice []T, fn func(context.Context, T) error) error
+func ParGroupByErr[T any, K comparable](ctx context.Context, slice []T, fn func(context.Context, T) (K, error)) (map[K][]T, error)
 func ParExistsErr[T any](ctx context.Context, slice []T, pred func(context.Context, T) (bool, error)) (bool, error)
 func ParForAllErr[T any](ctx context.Context, slice []T, pred func(context.Context, T) (bool, error)) (bool, error)
 
@@ -86,29 +73,6 @@ results = q.ParMap(ctx2, items, expensive)
 n := q.GetPar(ctx)
 ```
 
-## Composition with `q.Try` / `q.TryE`
-
-The `…Err` family returns `(result, error)`, so `q.Try` / `q.TryE` work directly:
-
-```go
-func loadAll(ctx context.Context, urls []string) ([]Response, error) {
-    return q.Try(q.ParMapErr(ctx, urls, fetchURL)), nil
-}
-
-func loadAllAnnotated(ctx context.Context, urls []string) ([]Response, error) {
-    return q.TryE(q.ParMapErr(ctx, urls, fetchURL)).Wrap("loading all"), nil
-}
-```
-
-`q.Check` consumes the error-only `ParForEachErr`:
-
-```go
-func uploadAll(ctx context.Context, files []File) error {
-    q.Check(q.ParForEachErr(ctx, files, upload))
-    return nil
-}
-```
-
 ## Cancellation semantics
 
 When ctx cancels mid-flight in an `…Err` op:
@@ -144,7 +108,7 @@ This is the same shape as `golang.org/x/sync/errgroup` and `q.AwaitAllRaw`. If y
 - **Output ordering:** workers write to `out[i]` directly (or write to a `mask[i] bool` for filter). Read after `wg.Wait()`. No per-element copy beyond the result slice.
 - **No atomics for first-error:** the 1-buffered errCh + non-blocking-send pattern (from samber/lo PR #858) replaces what `atomic.Pointer[error]` would do; cleaner and slightly faster.
 - **Two-phase select in dispatch:** priority check on errCh / ctx.Done first, then a send-or-error select. Catches errors and cancellation immediately without competing with work-channel sends in a flat select.
-- **Inspired by [github.com/GiGurra/party](https://github.com/GiGurra/party) and [samber/lo PR #858](https://github.com/samber/lo/pull/858).** q's flavour: ctx-carried limit instead of options/builder, no per-element index, slim signatures matching the rest of the data-ops family.
+- **Inspiration:** [github.com/GiGurra/party](https://github.com/GiGurra/party) and [samber/lo PR #858](https://github.com/samber/lo/pull/858).
 
 ## When *not* to use
 

@@ -1,6 +1,6 @@
 # Functional data ops: `q.Map`, `q.Filter`, `q.Fold`, `q.Reduce`, …
 
-Scala / samber/lo-style data manipulation over slices. Pure runtime helpers — no preprocessor rewriting on the value path. The point: stop reaching for hand-written `for` loops for `map`, `filter`, `groupBy`, `partition`, etc., and stop pulling in [samber/lo](https://github.com/samber/lo) just for the catalog. q already owns composition with `q.Try` / `q.Ok`, so the `…Err` flavours flow naturally into the bubble family.
+Functional data manipulation over slices. Pure runtime helpers — no preprocessor rewriting on the value path. The `…Err` flavours flow naturally through `q.Try` / `q.TryE` / `q.Ok` for the bubble path. Inspiration drawn from Scala collections and [samber/lo](https://github.com/samber/lo).
 
 ## Two flavours per fallible op
 
@@ -52,31 +52,6 @@ func Chunk[T any](slice []T, n int) [][]T                      // panics if n <=
 func Count[T any](slice []T, pred func(T) bool) int            // walks all (no short-circuit)
 func Take[T any](slice []T, n int) []T                         // first n
 func Drop[T any](slice []T, n int) []T                         // skip first n
-```
-
-## Composition with `q.Try` / `q.Ok`
-
-The `…Err` family returns `(result, error)` — exactly the shape `q.Try` consumes via Go's `f(g())` forwarding. No special preprocessor work, the existing q.Try rewrite covers it:
-
-```go
-func loadUsers(rows []Row) ([]User, error) {
-    users := q.Try(q.MapErr(rows, parseUser))
-    return users, nil
-}
-
-func loadUsersAnnotated(rows []Row) ([]User, error) {
-    return q.TryE(q.MapErr(rows, parseUser)).Wrap("loading users"), nil
-}
-```
-
-`q.Find` returns `(T, bool)` so `q.Ok` / `q.OkE` bubble on miss:
-
-```go
-func findAdmin(users []User) (User, error) {
-    return q.Ok(q.Find(users, isAdmin)), nil
-    // or with a custom message:
-    // return q.OkE(q.Find(users, isAdmin)).Wrap("no admin user"), nil
-}
 ```
 
 ## `Fold` vs `Reduce`
@@ -167,9 +142,7 @@ Go 1.23 ships `iter.Seq` / `iter.Seq2`. q's first wave is slice-only. Iterator-i
 
 ## Why no `…E` chain flavour?
 
-Because `q.TryE(q.MapErr(…)).Wrap(…)` already exists and reads cleanly. Adding `q.MapE(…).Wrap(…)` would save 5 characters and require preprocessor work to rewrite a new shape that does exactly what `q.TryE` already does. Net negative.
-
-If a single-helper-with-chain flavour earns its keep later, we'll add it under the same naming. Until then, compose.
+`q.TryE(q.MapErr(…)).Wrap(…)` already produces the chain shape via existing rewriter machinery. A separate `q.MapE` would duplicate that without adding capability.
 
 ## See also
 

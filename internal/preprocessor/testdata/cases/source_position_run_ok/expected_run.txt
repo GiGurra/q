@@ -1,0 +1,8 @@
+Line: 40
+File: main.go
+Line2: 49
+FileLine: main.go:50
+Line3: 56
+--- slog ---
+level=INFO msg=first line=72 file=main.go
+level=INFO msg=second line=78 file=main.go:78

@@ -210,6 +210,56 @@ func main() {
 		fmt.Println("ParForAll empty:", empty)
 	}
 
+	// ParGroupBy — keys computed in parallel, reassembly sequential.
+	{
+		type item struct {
+			cat string
+			v   int
+		}
+		items := []item{{"a", 1}, {"b", 2}, {"a", 3}, {"b", 4}, {"a", 5}}
+		grouped := q.ParGroupBy(ctx, items, func(it item) string { return it.cat })
+		keys := make([]string, 0, len(grouped))
+		for k := range grouped {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Printf("ParGroupBy[%s]=%v\n", k, grouped[k])
+		}
+	}
+
+	// ParGroupByErr happy path.
+	{
+		type entry struct{ s string }
+		entries := []entry{{"1"}, {"2"}, {"3"}, {"4"}}
+		grouped, err := q.ParGroupByErr(ctx, entries, func(_ context.Context, e entry) (string, error) {
+			n, err := strconv.Atoi(e.s)
+			if err != nil {
+				return "", err
+			}
+			if n%2 == 0 {
+				return "even", nil
+			}
+			return "odd", nil
+		})
+		fmt.Println("ParGroupByErr ok err:", err)
+		keys := make([]string, 0, len(grouped))
+		for k := range grouped {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Printf("ParGroupByErr[%s]=", k)
+			for i, e := range grouped[k] {
+				if i > 0 {
+					fmt.Print(",")
+				}
+				fmt.Print(e.s)
+			}
+			fmt.Println()
+		}
+	}
+
 	// ParForAllErr — fallible predicate.
 	{
 		all, _ := q.ParForAllErr(ctx, []int{2, 4}, func(_ context.Context, n int) (bool, error) {

@@ -256,7 +256,7 @@ func findAdmin(users []User) (User, error) {
 }
 ```
 
-Scala / samber/lo-style data ops over slices: `Map`, `FlatMap`, `Filter`, `GroupBy`, `Exists`, `ForAll`, `Find`, `Fold`, `Reduce`, `Distinct`, `Partition`, `Chunk`, `Count`, `Take`, `Drop`. Each fallible op ships in two flavours — bare and `…Err` returning `(result, error)` — designed to flow through `q.Try` / `q.TryE` for the bubble path. Pure runtime helpers; no `…E` chain flavour because `q.TryE(q.MapErr(…)).Wrap(…)` already produces that shape. Iterator (`iter.Seq`) variants are deferred to a follow-up wave.
+Functional data ops over slices: `Map`, `FlatMap`, `Filter`, `GroupBy`, `Exists`, `ForAll`, `Find`, `Fold`, `Reduce`, `Distinct`, `Partition`, `Chunk`, `Count`, `Take`, `Drop`. Each fallible op ships in two flavours — bare and `…Err` returning `(result, error)` — designed to flow through `q.Try` / `q.TryE` for the bubble path. Pure runtime helpers; no `…E` chain flavour because `q.TryE(q.MapErr(…)).Wrap(…)` already produces that shape. Iterator (`iter.Seq`) variants are deferred to a follow-up wave. Inspiration: Scala collections and [samber/lo](https://github.com/samber/lo).
 
 ### Parallel data ops
 
@@ -276,7 +276,7 @@ results = q.ParMap(ctx2, items, expensive)
 q.Check(q.ParEachErr(ctx, files, upload))
 ```
 
-`q.ParMap` / `q.ParMapErr`, `q.ParFlatMap` / `q.ParFlatMapErr`, `q.ParFilter` / `q.ParFilterErr`, `q.ParEach` / `q.ParEachErr`. The worker count rides on `context.Context` via `q.WithPar(ctx, n)` rather than per-call options — set once at the request top, every nested ParMap respects it without re-threading. ctx cancellation triggers `ctx.Err()` bubble in `…Err` variants. First error wins. Inspired by [samber/lo PR #858](https://github.com/samber/lo/pull/858) and [github.com/GiGurra/party](https://github.com/GiGurra/party); the ctx-carried-limit twist is q's house style.
+`q.ParMap` / `q.ParMapErr`, `q.ParFlatMap` / `q.ParFlatMapErr`, `q.ParFilter` / `q.ParFilterErr`, `q.ParForEach` / `q.ParForEachErr`, `q.ParGroupBy` / `q.ParGroupByErr`, `q.ParExists` / `q.ParExistsErr`, `q.ParForAll` / `q.ParForAllErr`. The worker count rides on `context.Context` via `q.WithPar(ctx, n)` — set once at the request top, every nested ParMap respects it. ctx cancellation triggers `ctx.Err()` bubble in `…Err` variants; bare variants stop dispatching and return partial results. First error wins. Inspiration: [samber/lo PR #858](https://github.com/samber/lo/pull/858) and [github.com/GiGurra/party](https://github.com/GiGurra/party).
 
 ### Compile-time reflection
 

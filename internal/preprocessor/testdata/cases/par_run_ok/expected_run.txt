@@ -29,6 +29,11 @@ ParExistsErr fail: true
 ParForAll yes: true
 ParForAll no: false
 ParForAll empty: true
+ParGroupBy[a]=[{a 1} {a 3} {a 5}]
+ParGroupBy[b]=[{b 2} {b 4}]
+ParGroupByErr ok err: <nil>
+ParGroupByErr[even]=2,4
+ParGroupByErr[odd]=1,3
 ParForAllErr yes: true
 ParForAllErr no: false
 ParForAllErr fail: true

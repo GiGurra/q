@@ -443,6 +443,8 @@ var qRuntimeHelpers = map[string]bool{
 	"ParFilterErr":     true,
 	"ParForEach":       true,
 	"ParForEachErr":    true,
+	"ParGroupBy":       true,
+	"ParGroupByErr":    true,
 	"ParExists":        true,
 	"ParExistsErr":     true,
 	"ParForAll":        true,

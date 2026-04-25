@@ -283,6 +283,48 @@ func ParFilterErr[T any](ctx context.Context, slice []T, pred func(context.Conte
 	return out, nil
 }
 
+// ParGroupBy buckets each element by the key fn returns, computing
+// keys in parallel. The reassembly into the result map is sequential
+// (map appends are fast — only the key fn benefits from parallelism,
+// and only when fn is IO-bound or CPU-heavy enough to outweigh
+// goroutine overhead).
+//
+// On ctx cancellation, returns nil — partial keys would mis-group
+// the elements they belong to. Callers who care about the cancel
+// case should check ctx.Err() after the call.
+func ParGroupBy[T any, K comparable](ctx context.Context, slice []T, fn func(T) K) map[K][]T {
+	if len(slice) == 0 {
+		return map[K][]T{}
+	}
+	keys := ParMap(ctx, slice, fn)
+	if ctx != nil && ctx.Err() != nil {
+		return nil
+	}
+	out := make(map[K][]T)
+	for i, k := range keys {
+		out[k] = append(out[k], slice[i])
+	}
+	return out
+}
+
+// ParGroupByErr is ParGroupBy with a fallible key fn. First error
+// short-circuits and returns (nil, err). ctx cancellation produces
+// (nil, ctx.Err()).
+func ParGroupByErr[T any, K comparable](ctx context.Context, slice []T, fn func(context.Context, T) (K, error)) (map[K][]T, error) {
+	if len(slice) == 0 {
+		return map[K][]T{}, nil
+	}
+	keys, err := ParMapErr(ctx, slice, fn)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[K][]T)
+	for i, k := range keys {
+		out[k] = append(out[k], slice[i])
+	}
+	return out, nil
+}
+
 // ParForEach runs fn on every element in parallel; no result is
 // collected. The fan-out form of "do X to each item, ignore the
 // values." Symmetric with the sequential q.ForEach — swap to
