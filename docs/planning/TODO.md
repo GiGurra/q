@@ -90,6 +90,36 @@ The persistent backlog for `q`. A cold-state reader can pick up here without re-
 
   Realistic scope: probably too big for q. Tier 1 (`q.Generator`) and tier 2 (`q.Coro`) cover most of the ergonomic win. Park unless a specific tight-loop workload justifies the lift.
 
+### Eventing
+
+- **#89 — Qt-style signals and slots.** Decoupled callback propagation: a `Signal[T]` holds a list of subscribers (slots), `signal.Connect(slot)` registers, `signal.Emit(v)` fans out. Plain runtime helper, no preprocessor magic — just generic types over `func(T)` callbacks with concurrency-safe Connect/Disconnect/Emit.
+
+  **Surface (sketch):**
+
+  ```go
+  type Signal[T any] struct { /* internal */ }
+  func NewSignal[T any]() *Signal[T]
+
+  func (s *Signal[T]) Connect(slot func(T)) (disconnect func())
+  func (s *Signal[T]) Emit(v T)              // synchronous fan-out
+  func (s *Signal[T]) EmitAsync(ctx, v T)    // each slot in its own goroutine; ctx for cancellation
+
+  // Fan-in: one slot listens to multiple signals.
+  func ConnectAll[T any](slot func(T), signals ...*Signal[T]) (disconnect func())
+  ```
+
+  **Why over plain channels:** channels couple producers and consumers via a known buffer + close discipline. Signals/slots decouple — each subscriber is a callback function; connecting/disconnecting is dynamic; no consumer-discovery boilerplate. Useful for UI-style event propagation, cross-module notifications inside a single binary, observability hooks.
+
+  **Open design questions.**
+  - **Sync vs async Emit.** Default to sync (each slot called inline on Emit's goroutine) — predictable latency, no goroutine sprawl. EmitAsync as opt-in for slow slots.
+  - **Slot panic policy.** A panicking slot shouldn't kill the emitter or stop other slots. Wrap each slot call in `defer recover()`; expose a `WithPanicHandler` hook on the signal for user-controlled handling.
+  - **Disconnect during Emit.** A slot that disconnects itself (or another) mid-Emit must not corrupt the iteration. Snapshot the slot list at Emit start.
+  - **Once-style slots.** `signal.ConnectOnce(slot)` for fire-and-disconnect; useful for "wait for first event" idioms.
+  - **Fan-in shape.** `ConnectAll` is one option; alternatively a `Merge[T](sigs...)` that returns a single `*Signal[T]` re-emitting any input. The latter composes better with downstream slots.
+  - **Typed payload constraints.** Generic on T; no runtime type assertion. For heterogeneous payloads users wrap in a struct or use `any`.
+
+  Inspiration: Qt's signal/slot, observable patterns from RxJava / RxJS, but simpler — no operator zoo, just connect/emit/disconnect.
+
 ### Future / parking lot
 
 - **#11 — `q.<X>` for is-nil-as-failure / comma-ok / etc.** Catch-all for any additional bubble triggers that surface later (e.g. `q.IfNil(x)` for error-less nil checks that don't want to spell `q.NotNilE(…).Err(ErrSomething)`). Existing bubble triggers cover the obvious cases; this is the umbrella for whatever turns up next.
