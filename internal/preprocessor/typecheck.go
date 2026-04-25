@@ -98,6 +98,10 @@ func checkErrorSlots(fset *token.FileSet, pkgPath, importcfgPath string, files [
 	errType := types.Universe.Lookup("error").Type()
 
 	var diags []Diagnostic
+	// Pass 1 — per-call resolution and guards that don't depend on
+	// cross-call state. resolveEnum populates sc.EnumTypeText for the
+	// q.Enum* and q.Gen* families; pass 2 reads that to enforce the
+	// Lax-default rule.
 	for i := range shapes {
 		for j := range shapes[i].Calls {
 			sc := &shapes[i].Calls[j]
@@ -114,24 +118,53 @@ func checkErrorSlots(fset *token.FileSet, pkgPath, importcfgPath string, files [
 					diags = append(diags, d)
 				}
 			}
-			if sc.Family == familyExhaustive {
-				if d, ok := validateExhaustive(fset, &shapes[i], sc, info, pkgPath); ok {
-					diags = append(diags, d)
-				}
-			}
 			if isReflectionFamily(sc.Family) {
 				if d, ok := resolveReflection(fset, sc, info); ok {
 					diags = append(diags, d)
 				}
 			}
+		}
+	}
+
+	// Cross-call state: types opted into q.GenEnumJSONLax. The wire
+	// format admits unknown values, so q.Exhaustive / q.Match on these
+	// types must include a `default:` arm to handle the openness.
+	laxTypes := collectLaxTypes(shapes)
+
+	// Pass 2 — guards that depend on cross-call state.
+	for i := range shapes {
+		for j := range shapes[i].Calls {
+			sc := &shapes[i].Calls[j]
+			if sc.Family == familyExhaustive {
+				if d, ok := validateExhaustive(fset, &shapes[i], sc, info, pkgPath, laxTypes); ok {
+					diags = append(diags, d)
+				}
+			}
 			if sc.Family == familyMatch {
-				if d, ok := resolveMatch(fset, sc, info, pkgPath); ok {
+				if d, ok := resolveMatch(fset, sc, info, pkgPath, laxTypes); ok {
 					diags = append(diags, d)
 				}
 			}
 		}
 	}
 	return diags
+}
+
+// collectLaxTypes returns the set of (unqualified, same-package) type
+// names that have been opted into q.GenEnumJSONLax. Read by
+// validateExhaustive / resolveMatch to enforce the
+// "Lax-opted types require default:" rule. Names match the
+// EnumTypeText form populated by resolveEnum (named.Obj().Name()).
+func collectLaxTypes(shapes []callShape) map[string]bool {
+	out := map[string]bool{}
+	for _, sh := range shapes {
+		for _, sc := range sh.Calls {
+			if sc.Family == familyGenEnumJSONLax && sc.EnumTypeText != "" {
+				out[sc.EnumTypeText] = true
+			}
+		}
+	}
+	return out
 }
 
 // validateExhaustive enforces that every const of T (the inferred
@@ -143,7 +176,7 @@ func checkErrorSlots(fset *token.FileSet, pkgPath, importcfgPath string, files [
 // Returns a diagnostic when the type can't resolve to a defined
 // named type with constants, or when one or more constants are not
 // referenced by any case clause.
-func validateExhaustive(fset *token.FileSet, sh *callShape, sc *qSubCall, info *types.Info, pkgPath string) (Diagnostic, bool) {
+func validateExhaustive(fset *token.FileSet, sh *callShape, sc *qSubCall, info *types.Info, pkgPath string, laxTypes map[string]bool) (Diagnostic, bool) {
 	if sc.InnerExpr == nil {
 		return Diagnostic{}, false
 	}
@@ -216,6 +249,7 @@ func validateExhaustive(fset *token.FileSet, sh *callShape, sc *qSubCall, info *
 	if !ok || swStmt.Body == nil {
 		return Diagnostic{}, false
 	}
+	hasDefault := false
 	covered := map[string]bool{}
 	for _, body := range swStmt.Body.List {
 		cc, ok := body.(*ast.CaseClause)
@@ -225,6 +259,7 @@ func validateExhaustive(fset *token.FileSet, sh *callShape, sc *qSubCall, info *
 		if cc.List == nil {
 			// `default:` clause — catches unknown values, not a
 			// substitute for declared-constant coverage.
+			hasDefault = true
 			continue
 		}
 		for _, expr := range cc.List {
@@ -264,17 +299,31 @@ func validateExhaustive(fset *token.FileSet, sh *callShape, sc *qSubCall, info *
 			missing = append(missing, name)
 		}
 	}
-	if len(missing) == 0 {
-		return Diagnostic{}, false
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		pos := fset.Position(sc.OuterCall.Pos())
+		return Diagnostic{
+			File: pos.Filename,
+			Line: pos.Line,
+			Col:  pos.Column,
+			Msg:  fmt.Sprintf("q: q.Exhaustive switch on %s is missing case(s) for: %s. Add the missing case(s), or use `default:` to opt out.", named.Obj().Name(), strings.Join(missing, ", ")),
+		}, true
 	}
-	sort.Strings(missing)
-	pos := fset.Position(sc.OuterCall.Pos())
-	return Diagnostic{
-		File: pos.Filename,
-		Line: pos.Line,
-		Col:  pos.Column,
-		Msg:  fmt.Sprintf("q: q.Exhaustive switch on %s is missing case(s) for: %s. Add the missing case(s), or use `default:` to opt out.", named.Obj().Name(), strings.Join(missing, ", ")),
-	}, true
+
+	// Lax-opted types must have an explicit default: arm. The wire
+	// format admits unknown values, so the switch needs to handle
+	// runtime drift / forward-compat values — even when every
+	// currently-declared constant is covered.
+	if !hasDefault && laxTypes[named.Obj().Name()] {
+		pos := fset.Position(sc.OuterCall.Pos())
+		return Diagnostic{
+			File: pos.Filename,
+			Line: pos.Line,
+			Col:  pos.Column,
+			Msg:  fmt.Sprintf("q: q.Exhaustive switch on %s requires a `default:` arm because the type is opted into q.GenEnumJSONLax (the wire format admits unknown values, so runtime drift / forward-compat values must be handled explicitly).", named.Obj().Name()),
+		}, true
+	}
+	return Diagnostic{}, false
 }
 
 // exprAsConstObjName returns the *types.Const's name if expr resolves
@@ -443,7 +492,7 @@ func resolveEnum(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPath st
 // violations; type-text resolution itself never produces a
 // diagnostic — when info isn't enough to resolve, the rewriter
 // falls back to `any`.
-func resolveMatch(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPath string) (Diagnostic, bool) {
+func resolveMatch(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPath string, laxTypes map[string]bool) (Diagnostic, bool) {
 	if sc.InnerExpr == nil {
 		return Diagnostic{}, false
 	}
@@ -535,6 +584,8 @@ func resolveMatch(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPath s
 		}
 	}
 	if hasDefault {
+		// Default present — covers any unknown values, no missing-case
+		// diagnostic. Lax-default rule is also satisfied.
 		return Diagnostic{}, false
 	}
 	var missing []string
@@ -543,17 +594,32 @@ func resolveMatch(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPath s
 			missing = append(missing, name)
 		}
 	}
-	if len(missing) == 0 {
-		return Diagnostic{}, false
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		pos := fset.Position(sc.OuterCall.Pos())
+		return Diagnostic{
+			File: pos.Filename,
+			Line: pos.Line,
+			Col:  pos.Column,
+			Msg:  fmt.Sprintf("q: q.Match on %s is missing case(s) for: %s. Add the missing case(s), or add a q.Default(...) arm.", named.Obj().Name(), strings.Join(missing, ", ")),
+		}, true
 	}
-	sort.Strings(missing)
-	pos := fset.Position(sc.OuterCall.Pos())
-	return Diagnostic{
-		File: pos.Filename,
-		Line: pos.Line,
-		Col:  pos.Column,
-		Msg:  fmt.Sprintf("q: q.Match on %s is missing case(s) for: %s. Add the missing case(s), or add a q.Default(...) arm.", named.Obj().Name(), strings.Join(missing, ", ")),
-	}, true
+
+	// Lax-opted types must include a q.Default arm even when every
+	// declared constant is covered. Mirrors the rule in
+	// validateExhaustive — the wire format admits unknown values, so
+	// the match needs an explicit catch-all for runtime drift /
+	// forward-compat values.
+	if laxTypes[named.Obj().Name()] {
+		pos := fset.Position(sc.OuterCall.Pos())
+		return Diagnostic{
+			File: pos.Filename,
+			Line: pos.Line,
+			Col:  pos.Column,
+			Msg:  fmt.Sprintf("q: q.Match on %s requires a q.Default(...) arm because the type is opted into q.GenEnumJSONLax (the wire format admits unknown values, so runtime drift / forward-compat values must be handled explicitly).", named.Obj().Name()),
+		}, true
+	}
+	return Diagnostic{}, false
 }
 
 // isReflectionFamily reports whether sc's family is one of the

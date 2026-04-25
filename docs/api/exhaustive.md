@@ -118,12 +118,12 @@ The rewriter currently writes case names unqualified; lifting the cross-package 
 
 ## Forward-compatibility (Lax JSON / wire drift)
 
-When a type is opted into a Lax JSON marshaller (so the wire can carry values outside the declared set — e.g. a service that hasn't adopted a new enum value yet), a `default:` arm is required to handle the genuinely-unknown values. The declared cases still must each be present:
+When a type is opted into [`q.GenEnumJSONLax`](gen.md) — the wire format admits values outside the declared set, e.g. a service that hasn't adopted a new enum value yet — a `default:` arm is **required**. Both the missing-case rule and the Lax-default rule apply; the typecheck pass enforces both:
 
 ```go
 type Color int
 const (Red Color = iota; Green; Blue)
-var _ = q.GenEnumJSONLax[Color]()  // (planned, see TODO)
+var _ = q.GenEnumJSONLax[Color]()
 
 switch q.Exhaustive(c) {
 case Red:   return "red"
@@ -136,7 +136,16 @@ default:
 }
 ```
 
-This is the "open type at the boundary, closed type internally" pattern made compile-time-checked. New constants added later still trigger the missing-case diagnostic — `default:` doesn't silently swallow them.
+Without the `default:`, the build fails with:
+
+```
+q: q.Exhaustive switch on Color requires a `default:` arm because the
+type is opted into q.GenEnumJSONLax (the wire format admits unknown
+values, so runtime drift / forward-compat values must be handled
+explicitly).
+```
+
+This is the "open type at the boundary, closed type internally" pattern made compile-time-checked. New constants added later still trigger the missing-case diagnostic — `default:` doesn't silently swallow them. The same rule applies to [`q.Match`](match.md) on Lax-opted types: a `q.Default(...)` arm is required.
 
 ## See also
 

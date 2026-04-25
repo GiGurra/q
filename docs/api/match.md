@@ -96,7 +96,7 @@ result := q.Match(c,
 // → build passes. Default catches Green / Blue / future variants.
 ```
 
-When forward-compat with `q.GenEnumJSONLax` matters, this is the right shape: `q.Default` handles wire values your code doesn't recognise. New constants added later still trigger the missing-case diagnostic — see [`q.Exhaustive`](exhaustive.md) for the same pattern at the statement level.
+When `V` is opted into [`q.GenEnumJSONLax`](gen.md), a `q.Default(...)` arm is **required** — the wire format admits unknown values, so runtime drift / forward-compat values must be handled explicitly. The typecheck pass enforces this even when every currently-declared constant has a `q.Case` covering it. New constants added later still trigger the missing-case diagnostic. See [`q.Exhaustive`](exhaustive.md) for the same rule at the statement level.
 
 ## Composes with non-enum values
 
