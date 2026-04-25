@@ -24,3 +24,11 @@ ord(99): -1
 descs: [Red=0 Green=1 Blue=2]
 color.String(): Red
 status.String(): Failed
+tryParse(Blue): 2 true <nil>
+tryParse(Pink).err: "Pink": q: unknown enum value
+tryParse(Pink).is: true
+tryParseWrapped.err: loading "Pink": "Pink": q: unknown enum value
+tryParseWrapped.is: true
+nameOfTried(Green): "Green" <nil>
+nameOfTried(Pink).err: "Pink": q: unknown enum value
+nested-in-Sprintf: name=Green

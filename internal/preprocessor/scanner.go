@@ -725,16 +725,42 @@ func collectQCalls(exprs []ast.Expr, alias string) ([]qSubCall, error) {
 	return subs, nil
 }
 
-// hasQRefInSub reports whether the sub's InnerExpr or any MethodArg
-// contains a nested q.* reference. Used by the direct-bind
-// eligibility check: if the matched q.* wraps more q.*s, hoist
-// instead so the nesting gets rendered innermost-first.
+// hasQRefInSub reports whether the sub's user-provided expression
+// fields contain any nested q.* reference. Used by the direct-bind
+// eligibility check: if the matched q.* wraps another q.* anywhere
+// in its arguments, hoist instead so each nested call gets its own
+// bind / temp / check, and parents pull from those temps via
+// substituteSpans.
+//
+// Every field that holds a user-supplied expression must be
+// inspected here. Missing one means a direct-bind path leaves nested
+// q.* calls unrewritten — they survive as panic stubs and fail at
+// runtime.
 func hasQRefInSub(sub qSubCall, alias string) bool {
 	if hasQRef(sub.InnerExpr, alias) {
 		return true
 	}
 	for _, a := range sub.MethodArgs {
 		if hasQRef(a, alias) {
+			return true
+		}
+	}
+	for _, a := range sub.OkArgs {
+		if hasQRef(a, alias) {
+			return true
+		}
+	}
+	if hasQRef(sub.ReleaseArg, alias) {
+		return true
+	}
+	if hasQRef(sub.AsType, alias) {
+		return true
+	}
+	for _, st := range sub.RecoverSteps {
+		if hasQRef(st.MatchArg, alias) {
+			return true
+		}
+		if hasQRef(st.ValueArg, alias) {
 			return true
 		}
 	}

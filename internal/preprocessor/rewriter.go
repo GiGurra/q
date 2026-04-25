@@ -693,26 +693,24 @@ func spanContains(fset *token.FileSet, outer, inner ast.Expr) bool {
 // sub whose OuterCall is an immediate child of that range replaced
 // by subTexts[i] (its pre-computed replacement string). "Immediate
 // child" means: contained by [start, end] and not contained by any
-// other sub also contained by [start, end]. An exact match
-// ([start, end] == OuterCall span) is not a child — otherwise
-// rendering a sub's own InnerExpr text would substitute the parent
-// sub into its own bind line. Children are applied bottom-up in
-// offset-descending order so earlier offsets stay valid.
+// other sub also contained by [start, end]. A sub whose span equals
+// the [start, end] range exactly counts as a child (e.g. when an
+// outer q.Try's InnerExpr IS the inner q.EnumParse call directly —
+// composition like `q.Try(q.EnumParse[Color](s))`). Children are
+// applied bottom-up in offset-descending order so earlier offsets
+// stay valid.
 //
 // subTexts[i] is the replacement string for subs[i]. Callers
 // pre-compute this in renderShape — most families map to
 // "_qTmp<counter>", in-place families map to their rewritten
 // expression (DebugPrintln → q.DebugPrintlnAt(...), DebugSlogAttr
-// → slog.Any(...)).
+// → slog.Any(...), q.EnumName → an IIFE switch).
 func substituteSpans(fset *token.FileSet, src []byte, start, end int, subs []qSubCall, subTexts []string) string {
 	var contained []int
 	for i, sub := range subs {
 		cs := fset.Position(sub.OuterCall.Pos()).Offset
 		ce := fset.Position(sub.OuterCall.End()).Offset
 		if cs < start || ce > end {
-			continue
-		}
-		if cs == start && ce == end {
 			continue
 		}
 		contained = append(contained, i)

@@ -95,6 +95,46 @@ func main() {
 	// User-defined String() method built on top of EnumName.
 	fmt.Printf("color.String(): %s\n", Red.String())
 	fmt.Printf("status.String(): %s\n", Failed.String())
+
+	// Composition: q.Try wraps q.EnumParse. The (T, error) shape of
+	// EnumParse drops straight into Try via Go's f(g()) rule.
+	parseTry, errInner := tryParse("Blue")
+	fmt.Printf("tryParse(Blue): %d %v %v\n", int(parseTry), parseTry == Blue, errInner)
+	_, errInnerBad := tryParse("Pink")
+	fmt.Printf("tryParse(Pink).err: %v\n", errInnerBad)
+	fmt.Printf("tryParse(Pink).is: %v\n", errors.Is(errInnerBad, q.ErrEnumUnknown))
+
+	// Composition: q.TryE chain wraps q.EnumParse — Wrapf prepends
+	// context to the bubbled error.
+	_, errWrapped := tryParseWrapped("Pink")
+	fmt.Printf("tryParseWrapped.err: %v\n", errWrapped)
+	fmt.Printf("tryParseWrapped.is: %v\n", errors.Is(errWrapped, q.ErrEnumUnknown))
+
+	// Composition: in-place q.EnumName wraps a bubble q.Try.
+	wrapped, errWrap := nameOfTried("Green")
+	fmt.Printf("nameOfTried(Green): %q %v\n", wrapped, errWrap)
+	_, errBubble := nameOfTried("Pink")
+	fmt.Printf("nameOfTried(Pink).err: %v\n", errBubble)
+
+	// Composition: in-place q.EnumName inside a non-q function call.
+	fmt.Printf("nested-in-Sprintf: %s\n", fmt.Sprintf("name=%s", q.EnumName[Color](Green)))
+}
+
+// nameOfTried demonstrates an in-place family (q.EnumName) wrapping
+// a bubble family (q.Try). q.Try fires its check before q.EnumName's
+// IIFE evaluates the substituted temp.
+func nameOfTried(s string) (string, error) {
+	return q.EnumName[Color](q.Try(q.EnumParse[Color](s))), nil
+}
+
+func tryParse(s string) (Color, error) {
+	c := q.Try(q.EnumParse[Color](s))
+	return c, nil
+}
+
+func tryParseWrapped(s string) (Color, error) {
+	c := q.TryE(q.EnumParse[Color](s)).Wrapf("loading %q", s)
+	return c, nil
 }
 
 // String demonstrates how a user pairs q.EnumName with their own
