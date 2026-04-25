@@ -120,6 +120,23 @@ results := q.AwaitAll(fa, fb, fc)     // []T in input order; bubble first error
 fastest := q.AwaitAny(fa, fb, fc)     // first success wins, errors.Join on all-fail
 ```
 
+### Bidirectional coroutines
+
+```go
+// Lua / Python-generator-send-style: caller passes in, body sends out.
+doubler := q.Coro(func(in <-chan int, out chan<- int) {
+    for v := range in {
+        out <- v * 2
+    }
+})
+defer doubler.Close()
+
+v, _ := doubler.Resume(21) // 42
+v, _  = doubler.Resume(100) // 200
+```
+
+`q.Coro` wraps a goroutine + two channels into a Resume / Close / Wait / Done API. Useful for stateful conversations Go's `iter.Seq` (one-way pull) can't express. Pure runtime — no preprocessor work.
+
 ### Multi-channel select and drain
 
 ```go

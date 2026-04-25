@@ -1,0 +1,19 @@
+Doubler: 2 true
+Doubler: 42 true
+Doubler: 200 true
+Doubler: 14 true
+Doubler Done: true
+Resume after Close: 0 false
+Summer: 10
+Summer: 30
+Summer: 60
+Summer: 100
+Twice: 10 20 0 false
+Fib: 0
+Fib: 1
+Fib: 1
+Fib: 2
+Fib: 3
+Fib: 5
+UPPER:hello
+Idempotent Close OK

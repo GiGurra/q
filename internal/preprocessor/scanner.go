@@ -430,6 +430,7 @@ var qRuntimeHelpers = map[string]bool{
 	"Zip":             true,
 	"Unzip":           true,
 	"ZipMap":          true,
+	"Coro":            true,
 	"Exists":          true,
 	"ExistsErr":       true,
 	"ForAll":          true,
