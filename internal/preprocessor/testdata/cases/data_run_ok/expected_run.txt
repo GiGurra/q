@@ -67,4 +67,18 @@ Unzip ages: [30 25 28]
 ZipMap[a]=1
 ZipMap[b]=2
 ZipMap[c]=3
+Sort: [1 1 2 3 4 5 6 9]
+Sort input unchanged: [3 1 4 1 5 9 2 6]
+SortBy: bob/25
+SortBy: carol/28
+SortBy: alice/30
+SortFunc stable: [bb aa ab ba]
+Min: 1 true
+Max: 9 true
+Min empty: false
+MinBy: c
+MaxBy: b
+Sum int: 15
+Sum float: 7
+Sum string: abc
 Pipeline: 50

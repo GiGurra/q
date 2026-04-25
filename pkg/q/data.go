@@ -1,6 +1,7 @@
 package q
 
 import (
+	"cmp"
 	"maps"
 	"slices"
 )
@@ -205,6 +206,112 @@ func MapKeysErr[K1, K2 comparable, V any](m map[K1]V, fn func(K1) (K2, error)) (
 		out[k2] = v
 	}
 	return out, nil
+}
+
+// Sort returns a sorted copy of slice in ascending order. Does NOT
+// mutate the input — use stdlib `slices.Sort` for in-place sort.
+// Sorting in a functional pipeline reads better when the input
+// stays untouched.
+func Sort[T cmp.Ordered](slice []T) []T {
+	out := make([]T, len(slice))
+	copy(out, slice)
+	slices.Sort(out)
+	return out
+}
+
+// SortBy returns a sorted copy ordered by `fn(elem)`. Stable —
+// equal keys preserve input order.
+//
+//	byAge := q.SortBy(users, func(u User) int { return u.Age })
+func SortBy[T any, K cmp.Ordered](slice []T, fn func(T) K) []T {
+	out := make([]T, len(slice))
+	copy(out, slice)
+	slices.SortStableFunc(out, func(a, b T) int {
+		return cmp.Compare(fn(a), fn(b))
+	})
+	return out
+}
+
+// SortFunc returns a sorted copy using less-style comparison —
+// `less(a, b)` returns negative when a < b, 0 when equal, positive
+// when a > b. Stable. Most general of the Sort* family; reach for
+// q.Sort when ascending order is enough or q.SortBy when a
+// projection produces the key.
+func SortFunc[T any](slice []T, less func(a, b T) int) []T {
+	out := make([]T, len(slice))
+	copy(out, slice)
+	slices.SortStableFunc(out, less)
+	return out
+}
+
+// Min returns the smallest element of slice. Empty input returns
+// (zero, false) — pairs naturally with q.Ok / q.OkE for the
+// bubble path.
+func Min[T cmp.Ordered](slice []T) (T, bool) {
+	if len(slice) == 0 {
+		var zero T
+		return zero, false
+	}
+	return slices.Min(slice), true
+}
+
+// Max returns the largest element of slice. Empty input returns
+// (zero, false).
+func Max[T cmp.Ordered](slice []T) (T, bool) {
+	if len(slice) == 0 {
+		var zero T
+		return zero, false
+	}
+	return slices.Max(slice), true
+}
+
+// MinBy returns the element minimising fn(elem). Empty input
+// returns (zero, false). Ties go to the first occurrence.
+func MinBy[T any, K cmp.Ordered](slice []T, fn func(T) K) (T, bool) {
+	if len(slice) == 0 {
+		var zero T
+		return zero, false
+	}
+	bestIdx := 0
+	bestKey := fn(slice[0])
+	for i := 1; i < len(slice); i++ {
+		k := fn(slice[i])
+		if k < bestKey {
+			bestKey = k
+			bestIdx = i
+		}
+	}
+	return slice[bestIdx], true
+}
+
+// MaxBy returns the element maximising fn(elem). Empty input
+// returns (zero, false). Ties go to the first occurrence.
+func MaxBy[T any, K cmp.Ordered](slice []T, fn func(T) K) (T, bool) {
+	if len(slice) == 0 {
+		var zero T
+		return zero, false
+	}
+	bestIdx := 0
+	bestKey := fn(slice[0])
+	for i := 1; i < len(slice); i++ {
+		k := fn(slice[i])
+		if k > bestKey {
+			bestKey = k
+			bestIdx = i
+		}
+	}
+	return slice[bestIdx], true
+}
+
+// Sum adds all elements of a numeric slice. Empty input returns
+// the zero value. Convenience over `q.Reduce(xs, func(a, b T) T
+// { return a + b })`.
+func Sum[T cmp.Ordered](slice []T) T {
+	var total T
+	for _, v := range slice {
+		total += v
+	}
+	return total
 }
 
 // Pair carries two values. Used by q.Zip / q.Unzip and any callers

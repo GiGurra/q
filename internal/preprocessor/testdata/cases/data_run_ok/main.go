@@ -312,6 +312,58 @@ func main() {
 		}
 	}
 
+	// Sort / SortBy / SortFunc — all return a sorted COPY (input unchanged).
+	{
+		input := []int{3, 1, 4, 1, 5, 9, 2, 6}
+		sorted := q.Sort(input)
+		fmt.Println("Sort:", sorted)
+		fmt.Println("Sort input unchanged:", input)
+	}
+	{
+		type entry struct {
+			name string
+			age  int
+		}
+		entries := []entry{{"alice", 30}, {"bob", 25}, {"carol", 28}}
+		byAge := q.SortBy(entries, func(e entry) int { return e.age })
+		for _, e := range byAge {
+			fmt.Printf("SortBy: %s/%d\n", e.name, e.age)
+		}
+	}
+	{
+		// Stable: equal keys preserve input order.
+		stable := q.SortFunc([]string{"bb", "aa", "ab", "ba"}, func(a, b string) int {
+			return len(a) - len(b)
+		})
+		fmt.Println("SortFunc stable:", stable)
+	}
+
+	// Min / Max + MinBy / MaxBy — comma-ok on empty.
+	{
+		mn, ok := q.Min([]int{3, 1, 4, 1, 5, 9, 2, 6})
+		fmt.Println("Min:", mn, ok)
+		mx, ok := q.Max([]int{3, 1, 4, 1, 5, 9, 2, 6})
+		fmt.Println("Max:", mx, ok)
+		_, ok = q.Min([]int{})
+		fmt.Println("Min empty:", ok)
+	}
+	{
+		type item struct {
+			name  string
+			score int
+		}
+		items := []item{{"a", 10}, {"b", 20}, {"c", 5}}
+		mn, _ := q.MinBy(items, func(i item) int { return i.score })
+		fmt.Println("MinBy:", mn.name)
+		mx, _ := q.MaxBy(items, func(i item) int { return i.score })
+		fmt.Println("MaxBy:", mx.name)
+	}
+
+	// Sum — convenience over Reduce.
+	fmt.Println("Sum int:", q.Sum([]int{1, 2, 3, 4, 5}))
+	fmt.Println("Sum float:", q.Sum([]float64{1.5, 2.5, 3.0}))
+	fmt.Println("Sum string:", q.Sum([]string{"a", "b", "c"}))
+
 	// Pipeline composition: chain bare ops
 	pipeline := q.Fold(
 		q.Filter(
