@@ -20,3 +20,6 @@
 # Coverage
 *.cover
 coverage.txt
+
+# mkdocs build output
+/site/
