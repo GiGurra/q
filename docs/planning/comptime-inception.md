@@ -277,11 +277,58 @@ Picking up Phase 5.2 work cold:
 5. Run existing comptime fixtures: `go test ./internal/preprocessor/ -run TestFixtures/atct_comptime` (Phase 5.1) and `TestFixtures/atct_nested` (Phase 5.2).
 6. Pick the next step from "Implementation plan for Path A" above.
 
+## Path D — Multipass macros (also planned, post-A)
+
+After Path A ships, Path D delivers the original "macros emitting macros" Tier 2 promise. Surface stays the same as today's `q.AtCompileTimeCode`; the rewriter just keeps going past the first splice.
+
+**Today (single-pass):**
+1. Scanner finds `q.AtCompileTimeCode` calls in user source.
+2. Synthesis subprocess runs the closure, returns Go source as a string.
+3. Rewriter parses the string, splices it at the call site.
+4. Done — any q.* in the spliced source that wasn't visible to the original scanner is left alone.
+
+**Multipass:**
+After step 3, re-scan the rewritten file. If the new scan finds `q.AtCompileTime` / `q.Comptime` / `q.NestedComptime` / `q.AtCompileTimeCode` calls that weren't in the previous pass's call list, run another rewrite cycle. Loop until a fixed point or a configurable max-pass bound (default 8) is reached.
+
+**Why it matters:** lets users build code-gen pipelines where one stage's output is the next stage's input. Stage 1 produces a slice of identifiers, stage 2 takes that slice and emits a `q.Match`-based dispatcher, stage 3 finds `q.F` format calls inside the emitted dispatcher and folds them. Today a user has to do all three stages in one big closure; multipass lets them split cleanly.
+
+**Implementation sketch:**
+- `userpkg.go`: after the rewrite pass, re-run scanner on the rewritten file source. If new comptime calls appeared, push them into a fresh synthesis pass.
+- Track a per-package pass counter; abort with a diagnostic above the bound.
+- The synthesis subprocess from pass N only re-runs if pass N found new sites; if all post-splice content is purely runtime, we exit cleanly.
+- Cache key includes pass index — pass-N artifacts shouldn't shadow pass-N+1 results.
+
+## Path B (revised) — Compile-time partial evaluator, complementary to Path A
+
+Originally classed as "expensive and probably skip". Re-classifying because it's a different value prop:
+
+- **Path A** = compiler-per-recursion via subprocesses. Wins when impls do nontrivial work (parsing, codegen) that benefits from cache amortisation.
+- **Path B** = compiler-internal evaluator. Wins when impls are tight numeric / arithmetic / branching code that the rewriter can fold inline without ANY subprocess — so build cost goes from "hundreds of ms per leaf" to "microseconds per leaf".
+
+Both should ship. Decision rule for users: Path A unless the impl is small enough to fold in-process; Path B as a build-time optimisation when the partial evaluator can handle the impl.
+
+**Subset Path B handles:**
+- Function literal body with parameter substitution
+- `if`/`else` with constant-foldable conditions
+- Arithmetic + comparisons over numeric/string/bool literals
+- Recursive calls to self or other `q.Comptime` decls (with literal args)
+- Memoisation per (impl, canonicalised-args) tuple within one rewrite pass
+
+**Reject (loud diagnostic) on:**
+- `for` / `range` loops
+- Slice / map / channel ops
+- Calls to non-`q.Comptime` Go functions
+- Type assertions, interface ops, `reflect`
+- Any side-effecting expression (channel ops, io)
+
+The diagnostic should name the specific syntax and direct users to `q.Comptime` (subprocess path) for richer impls.
+
+**Surface decision:** opt-in via a build tag or a new `q.PureComptime` decl, OR auto-detect (rewriter tries Path B first, falls back to A on unsupported syntax). Auto-detect is more user-friendly but harder to debug — go with explicit opt-in for the first cut, evaluate after fixtures pass.
+
 ## What we did NOT pursue
 
-- **The original "Tier 2 = multi-pass rewriting (macros emitting macros)"** — useful for `q.AtCompileTimeCode` returning source containing `q.AtCompileTime` calls. Doesn't enable compiler-per-recursion. Could still be worth shipping standalone if a use case appears.
-- **Path B (compile-time partial evaluator)** — too expensive for the value provided.
-- **Self-modifying generators** — `q.AtCompileTimeCode` that emits q.AtCompileTime calls. Theoretically interesting but the multi-pass rewriting needed is its own design exercise.
+- **Self-modifying generators that re-export `q.AtCompileTime`** — i.e. a `q.AtCompileTimeCode` that emits another macro that emits values. Path D covers this naturally so this isn't a separate item.
+- **JIT-style runtime comptime** — caching impl runs ACROSS runtime invocations of the user binary. Out of scope; comptime is a build-time concept.
 
 ## Cross-references
 
