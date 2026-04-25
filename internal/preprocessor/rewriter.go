@@ -334,7 +334,7 @@ func renderShape(fset *token.FileSet, src []byte, sh callShape, counter *int, al
 			subTexts[i] = strconv.Quote(sh.Calls[i].ResolvedString)
 		case familyMatch:
 			subTexts[i] = buildMatchReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts)
-		case familyAssemble, familyAssembleAll:
+		case familyAssemble, familyAssembleAll, familyAssembleStruct:
 			text, _ := buildAssembleReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts, alias)
 			subTexts[i] = text
 		case familyAtCompileTime, familyAtCompileTimeCode:
@@ -812,7 +812,7 @@ func isInPlaceFamily(f family) bool {
 		familyGenStringer, familyGenEnumJSONStrict, familyGenEnumJSONLax,
 		familyFields, familyAllFields, familyTypeName, familyTag,
 		familyMatch,
-		familyAssemble, familyAssembleAll,
+		familyAssemble, familyAssembleAll, familyAssembleStruct,
 		familyAtCompileTime, familyAtCompileTimeCode,
 		familyGenerator:
 		return true
@@ -1059,7 +1059,7 @@ func renderSubCall(fset *token.FileSet, src []byte, sh callShape, subIdx int, su
 	case familyMatch:
 		// IIFE switch — no imports needed.
 		return "", false, false, false, nil
-	case familyAssemble, familyAssembleAll:
+	case familyAssemble, familyAssembleAll, familyAssembleStruct:
 		// IIFE auto-DI — emitted as in-place subText. No bind/check
 		// block here; substituteSpans handles the substitution. fmt
 		// is needed when the body emits a runtime nil-check (uses

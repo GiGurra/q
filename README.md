@@ -303,6 +303,16 @@ server := q.Unwrap(q.Assemble[*Server](ctx, newConfig, newDB, newServer))
 // every recipe whose output is assignable to T contributes one slice
 // element, in declaration order.
 plugins := q.Unwrap(q.AssembleAll[Plugin](newAuthPlugin, newLogPlugin, newMetricsPlugin))
+
+// q.AssembleStruct[T] decomposes T's fields into separate dep targets.
+// Useful when several distinct products share a common dep set —
+// shared transitive deps (here *Config, *DB) build only once.
+type App struct {
+    Server *Server
+    Worker *Worker
+    Stats  *Stats
+}
+app := q.Unwrap(q.AssembleStruct[App](newConfig, newDB, newServer, newWorker, newStats))
 ```
 
 When a recipe is missing or duplicated or the graph cycles, the build fails with a tree visualisation of what the resolver sees. See [`docs/api/assemble.md`](docs/api/assemble.md).

@@ -474,11 +474,59 @@ The topo sort produces `*Config` exactly once; both plugin recipes share that si
 - Duplicate-provider detection still applies for *non-target* types. If two recipes both produce a `*Config` that another recipe consumes as a dep, that's still ambiguous and rejected.
 - The IIFE returns `([]T, error)` instead of `(T, error)`. Compose with `q.Try` / `q.Unwrap` / `q.TryE` / `q.UnwrapE` exactly as with `q.Assemble`.
 
+## Struct-target multi-output: `q.AssembleStruct`
+
+When several distinct products share a common dep set, packing them into one struct in a single assembly call avoids the boilerplate of three separate `q.Assemble` calls (each repeating the shared recipes). `q.AssembleStruct[T]` decomposes T (which must be a struct) into its fields and finds a recipe for each field's type. Shared transitive deps build only once.
+
+```go
+type App struct {
+    Server *Server
+    Worker *Worker
+    Stats  *Stats
+}
+
+app, err := q.AssembleStruct[App](newConfig, newDB, newServer, newWorker, newStats)
+```
+
+The rewriter emits roughly:
+
+```go
+app, err := (func() (App, error) {
+    _qDep0 := newConfig()
+    _qDep1 := newDB(_qDep0)        // *DB built once, fed to all 3 fields
+    _qDep2 := newServer(_qDep1)
+    _qDep3 := newWorker(_qDep1)
+    _qDep4 := newStats(_qDep0)
+    return App{Server: _qDep2, Worker: _qDep3, Stats: _qDep4}, nil
+}())
+```
+
+**Field requirements:**
+
+- Every exported field of T needs a recipe whose output type matches (exact-type or interface assignability). Missing a field → per-field diagnostic naming the field.
+- Unexported fields work in the same package (the rewritten code lives in T's package, so it can set them). Cross-package unexported fields are rejected.
+- Tagged fields (`Server q.Tagged[*Server, _primary]`) work the same way phase 1's tagged services do — the field type IS the brand.
+
+**Why a separate entry point from `q.Assemble`?**
+
+- `q.Assemble[App]` looks for a recipe that produces `App`. If the user has a `func newApp(...) App` recipe, that runs.
+- `q.AssembleStruct[App]` always decomposes into fields. A recipe that produces `App` directly is unused.
+
+The split avoids a precedence rule. You pick the entry, you pick the semantics.
+
+**Slice fields are NOT auto-aggregated.** A field `Plugins []Plugin` requires a recipe whose output is `[]Plugin` — either a hand-written one or `q.AssembleAll[Plugin]` called separately and passed as an inline-value recipe:
+
+```go
+plugins := q.Try(q.AssembleAll[Plugin](newAuth, newLog, newMetrics))
+app, _ := q.AssembleStruct[App](newConfig, plugins)  // plugins is the []Plugin recipe
+```
+
+The auto-aggregation behavior may be added later as an opt-in.
+
 ## What's coming
 
-Phase 1 ships the full single-call DI surface plus `q.AssembleAll` for multi-provider aggregation. Future phases:
+Phase 1 ships the full single-call DI surface, `q.AssembleAll` for multi-provider aggregation, and `q.AssembleStruct` for struct-target multi-output. Future phases:
 
-- **Phase 2b — struct-target multi-output.** `q.Assemble[App]` populates each field of `App` from a matching recipe.
 - **Phase 3 — resource lifetime.** `(T, func(), error)`-returning recipes for resources that need cleanup; defer-LIFO teardown integrates with `q.Open`'s escape detection.
 - **Phase 4 — parallel construction.** `q.WithAssemblyPar(ctx, n)` rides on the ctx like `q.WithAssemblyDebug`; the rewriter emits topo waves with a `sync.WaitGroup` per wave.
 

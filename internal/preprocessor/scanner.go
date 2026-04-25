@@ -126,8 +126,9 @@ const (
 	familyAtCompileTime     // q.AtCompileTime(func() R { ... }, codec...) — comptime evaluation
 	familyAtCompileTimeCode // q.AtCompileTimeCode[R](func() string { ... }) — comptime code generation
 	familyGenerator         // q.Generator[T](func() { ... q.Yield(v) ... }) — iter.Seq[T] sugar
-	familyAssemble    // q.Assemble[T](recipes...) (T, error) — auto-derived DI
-	familyAssembleAll // q.AssembleAll[T](recipes...) ([]T, error) — multi-provider aggregation
+	familyAssemble       // q.Assemble[T](recipes...) (T, error) — auto-derived DI
+	familyAssembleAll    // q.AssembleAll[T](recipes...) ([]T, error) — multi-provider aggregation
+	familyAssembleStruct // q.AssembleStruct[T](recipes...) (T, error) — field-decomposed multi-output
 )
 
 // form is the syntactic position of a recognised q.* call:
@@ -368,6 +369,18 @@ type qSubCall struct {
 	// RecipeIdx -> _qDep<N> map to emit the final
 	// `[]T{_qDep<i>, _qDep<j>, ...}` literal.
 	AssembleAllProviderRidxs []int
+
+	// AssembleStructFieldNames and AssembleStructFieldKeys are
+	// parallel slices: each pair is one field of the struct target T.
+	// FieldNames carries the field's exported (or in-package) Go
+	// identifier; FieldKeys carries the field type's canonical
+	// typeKey for provider lookup. Populated by resolveAssemble for
+	// familyAssembleStruct only; nil for other families. The
+	// rewriter emits a `T{Field1: _qDepX, Field2: _qDepY, ...}`
+	// literal, looking up each FieldKey in the per-step
+	// OutputKey -> _qDep<N> map.
+	AssembleStructFieldNames []string
+	AssembleStructFieldKeys  []string
 }
 
 // matchCase is one arm of a q.Match expression — either a
@@ -1589,6 +1602,22 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 		}
 		return qSubCall{
 			Family:          familyAssembleAll,
+			AsType:          typeArg,
+			AssembleRecipes: append([]ast.Expr(nil), call.Args...),
+			OuterCall:       expr,
+		}, true, nil
+	}
+	// q.AssembleStruct[T](recipes...) — field-decomposed multi-output.
+	// T must be a struct; each field is treated as a separate dep
+	// target. The rewriter emits a struct literal initialised from
+	// the dep temps. Same scan shape as q.Assemble; the typecheck
+	// pass branches on family to drive the field iteration.
+	if typeArg, ok := isIndexedSelector(call.Fun, alias, "AssembleStruct"); ok {
+		if len(call.Args) == 0 {
+			return qSubCall{}, false, fmt.Errorf("q.AssembleStruct[T] requires at least one recipe argument")
+		}
+		return qSubCall{
+			Family:          familyAssembleStruct,
 			AsType:          typeArg,
 			AssembleRecipes: append([]ast.Expr(nil), call.Args...),
 			OuterCall:       expr,

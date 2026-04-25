@@ -65,8 +65,7 @@ The persistent backlog for `q`. A cold-state reader can pick up here without re-
 
   Big lift: needs flow analysis (or a heavy hand: rewrite every reference into shim-method calls), needs to interop with raw resource access (sometimes you do want the underlying `*Conn`), and adds a real per-call atomic. Probably not worth it for the 90% case (functions that own their own resources) — defer until profiles or user reports show resource ownership crosses function boundaries often enough that the existing diagnostics become annoying.
 
-- **#84 — `q.Assemble` follow-on phases.** Phase 1 (single-entry auto-derived DI with full diagnostics, ctx-as-inline-value, runtime nil detection, debug tracing, q.Unwrap helpers) and Phase 2a (`q.AssembleAll[T]` for multi-provider aggregation) have shipped. See [`docs/api/assemble.md`](../api/assemble.md). Remaining work, full plan in [`docs/planning/assemble.md`](assemble.md):
-    - **Phase 2b — struct-target multi-output.** `q.Assemble[App]` populates each field of `App` from a matching recipe.
+- **#84 — `q.Assemble` follow-on phases.** Phase 1 (single-entry auto-derived DI), Phase 2a (`q.AssembleAll[T]` for multi-provider aggregation), and Phase 2b (`q.AssembleStruct[T]` for field-decomposition multi-output) have shipped. See [`docs/api/assemble.md`](../api/assemble.md). Remaining work, full plan in [`docs/planning/assemble.md`](assemble.md):
     - **Phase 3 — resource lifetime.** `(T, func(), error)`-returning resource recipes; defer-LIFO teardown integrates with q.Open's escape detection.
     - **Phase 4 — parallel construction.** `q.WithAssemblyPar(ctx, n)` rides on the ctx like `q.WithAssemblyDebug`; rewriter emits topo waves with `sync.WaitGroup` per wave.
 

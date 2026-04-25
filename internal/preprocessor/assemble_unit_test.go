@@ -631,6 +631,152 @@ func main() {
 	}
 }
 
+// TestUnitAssembleStructHappyPath exercises q.AssembleStruct[T] —
+// each App field gets a recipe whose output matches the field type;
+// shared transitive deps (here *Config) build only once.
+func TestUnitAssembleStructHappyPath(t *testing.T) {
+	src := `package main
+
+import "github.com/GiGurra/q/pkg/q"
+
+type Config struct{}
+type DB     struct{ cfg *Config }
+type Server struct{ db *DB; cfg *Config }
+type Worker struct{ db *DB }
+type App struct {
+	Server *Server
+	Worker *Worker
+}
+
+func newConfig() *Config                 { return &Config{} }
+func newDB(c *Config) *DB                { return &DB{cfg: c} }
+func newServer(d *DB, c *Config) *Server { return &Server{db: d, cfg: c} }
+func newWorker(d *DB) *Worker            { return &Worker{db: d} }
+
+func main() {
+	_, _ = q.AssembleStruct[App](newConfig, newDB, newServer, newWorker)
+}
+`
+	diags, shapes, err := analyzeAssembleSrc(t, src)
+	if err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+	requireNoDiags(t, diags)
+	sc := shapes[0].Calls[0]
+	if sc.Family != familyAssembleStruct {
+		t.Fatalf("expected familyAssembleStruct; got %v", sc.Family)
+	}
+	if len(sc.AssembleStructFieldNames) != 2 || len(sc.AssembleStructFieldKeys) != 2 {
+		t.Fatalf("expected 2 fields; got %d names / %d keys",
+			len(sc.AssembleStructFieldNames), len(sc.AssembleStructFieldKeys))
+	}
+	// 4 recipes → 4 topo steps (newConfig + newDB shared, plus 2 leaf recipes).
+	if len(sc.AssembleSteps) != 4 {
+		t.Fatalf("expected 4 topo-sorted steps; got %d", len(sc.AssembleSteps))
+	}
+}
+
+// TestUnitAssembleStructMissingField — when no recipe provides a
+// required field's type, the resolver must surface a per-field
+// missing-provider diagnostic naming the field.
+func TestUnitAssembleStructMissingField(t *testing.T) {
+	src := `package main
+import "github.com/GiGurra/q/pkg/q"
+type Server struct{}
+type Worker struct{}
+type App struct {
+	Server *Server
+	Worker *Worker
+}
+func newServer() *Server { return nil }
+func main() {
+	_, _ = q.AssembleStruct[App](newServer)
+}
+`
+	diags, _, err := analyzeAssembleSrc(t, src)
+	if err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+	requireDiagContains(t, diags,
+		"field Worker of App",
+		"has no provider",
+	)
+}
+
+// TestUnitAssembleStructNonStructTarget — q.AssembleStruct[T] is
+// rejected when T is not a struct. Suggests q.Assemble[T] instead.
+func TestUnitAssembleStructNonStructTarget(t *testing.T) {
+	src := `package main
+import "github.com/GiGurra/q/pkg/q"
+type Server struct{}
+func newServer() *Server { return nil }
+func main() {
+	_, _ = q.AssembleStruct[*Server](newServer)
+}
+`
+	diags, _, err := analyzeAssembleSrc(t, src)
+	if err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+	requireDiagContains(t, diags,
+		"is not a struct",
+		"q.AssembleStruct[T] requires T to be a struct type",
+		"use q.Assemble[T]",
+	)
+}
+
+// TestUnitAssembleStructEmptyTarget — q.AssembleStruct[struct{}] is
+// rejected (would always return zero struct).
+func TestUnitAssembleStructEmptyTarget(t *testing.T) {
+	src := `package main
+import "github.com/GiGurra/q/pkg/q"
+type Empty struct{}
+func main() {
+	_, _ = q.AssembleStruct[Empty]("ignored")
+}
+`
+	diags, _, err := analyzeAssembleSrc(t, src)
+	if err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+	requireDiagContains(t, diags, "has no fields")
+}
+
+// TestUnitAssembleStructInterfaceField — a field with an interface
+// type is satisfied by a concrete provider via assignability.
+func TestUnitAssembleStructInterfaceField(t *testing.T) {
+	src := `package main
+
+import "github.com/GiGurra/q/pkg/q"
+
+type Greeter interface{ Greet() string }
+type EN struct{}
+func (EN) Greet() string { return "hi" }
+
+type Cfg struct{}
+type Bundle struct {
+	G   Greeter
+	Cfg *Cfg
+}
+
+func newCfg() *Cfg { return &Cfg{} }
+func newEN() *EN   { return &EN{} }
+
+func main() {
+	_, _ = q.AssembleStruct[Bundle](newCfg, newEN)
+}
+`
+	diags, shapes, err := analyzeAssembleSrc(t, src)
+	if err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+	requireNoDiags(t, diags)
+	sc := shapes[0].Calls[0]
+	if len(sc.AssembleStructFieldNames) != 2 {
+		t.Fatalf("expected 2 fields; got %d", len(sc.AssembleStructFieldNames))
+	}
+}
+
 // TestUnitAssembleHappyPath exercises the simplest valid call to make
 // sure the unit harness reaches resolveAssemble without errors.
 func TestUnitAssembleHappyPath(t *testing.T) {

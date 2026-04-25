@@ -90,10 +90,10 @@ type assembleRecipeInfo struct {
 }
 
 // isAssembleFamily reports whether sc's family is one of the
-// q.Assemble entries (q.Assemble or q.AssembleAll). Used by the
-// typecheck dispatcher to pick resolveAssemble.
+// q.Assemble entries. Used by the typecheck dispatcher to pick
+// resolveAssemble.
 func isAssembleFamily(f family) bool {
-	return f == familyAssemble || f == familyAssembleAll
+	return f == familyAssemble || f == familyAssembleAll || f == familyAssembleStruct
 }
 
 // assembleFamilyLabel is the user-facing helper name for diagnostics.
@@ -103,6 +103,8 @@ func assembleFamilyLabel(f family) string {
 		return "q.Assemble"
 	case familyAssembleAll:
 		return "q.AssembleAll"
+	case familyAssembleStruct:
+		return "q.AssembleStruct"
 	}
 	return "q.Assemble<?>"
 }
@@ -303,6 +305,50 @@ func resolveAssemble(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPat
 				sc.AssembleTargetTypeText)
 		} else {
 			sc.AssembleAllProviderRidxs = providerRidxs
+		}
+	} else if sc.Family == familyAssembleStruct {
+		// Target T must be a struct type. Each field becomes a
+		// separate dep target. resolveInput is reused per field; an
+		// interface field with multiple providers is still flagged
+		// as ambiguous (per-field "target ambiguity" diagnostic).
+		st, ok := structUnderlying(targetType)
+		if !ok {
+			addProblem("target type %s is not a struct — q.AssembleStruct[T] requires T to be a struct type (use q.Assemble[T] for non-struct targets)",
+				sc.AssembleTargetTypeText)
+		} else if st.NumFields() == 0 {
+			addProblem("target type %s has no fields — q.AssembleStruct[T] would always return the zero struct; use q.Assemble[T] or remove the call",
+				sc.AssembleTargetTypeText)
+		} else {
+			fieldNames := make([]string, 0, st.NumFields())
+			fieldKeys := make([]string, 0, st.NumFields())
+			for i := 0; i < st.NumFields(); i++ {
+				f := st.Field(i)
+				if !f.Exported() && f.Pkg() != nil && f.Pkg().Path() != pkgPath {
+					addProblem("field %s of %s is unexported in package %s — q.AssembleStruct[T] cannot set unexported fields from another package; either export the field or call q.AssembleStruct[T] from %s",
+						f.Name(), sc.AssembleTargetTypeText, f.Pkg().Path(), f.Pkg().Path())
+					continue
+				}
+				ft := f.Type()
+				fk := typeKey(ft)
+				res := resolveInput(ft, fk)
+				if res.ok {
+					fieldNames = append(fieldNames, f.Name())
+					fieldKeys = append(fieldKeys, res.resolvedKey)
+				} else if len(res.ambiguous) > 0 {
+					var labels []string
+					for _, ridx := range res.ambiguous {
+						r := recipes[ridx]
+						labels = append(labels, fmt.Sprintf("%s → %s", recipeLabel(fset, r), typeText(r.output)))
+					}
+					addProblem("field %s of %s (type %s) is satisfied by multiple providers: %s — narrow the recipe set or use q.Tagged to disambiguate",
+						f.Name(), sc.AssembleTargetTypeText, typeText(ft), strings.Join(labels, ", "))
+				} else {
+					addProblem("field %s of %s (type %s) has no provider — add a recipe whose output is assignable to %s",
+						f.Name(), sc.AssembleTargetTypeText, typeText(ft), typeText(ft))
+				}
+			}
+			sc.AssembleStructFieldNames = fieldNames
+			sc.AssembleStructFieldKeys = fieldKeys
 		}
 	} else {
 		targetRes := resolveInput(targetType, sc.AssembleTargetKey)
@@ -519,6 +565,10 @@ func resolveAssemble(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPat
 				}
 			}
 		}
+	} else if sc.Family == familyAssembleStruct {
+		for _, fk := range sc.AssembleStructFieldKeys {
+			visit(fk)
+		}
 	} else if _, ok := providerOf[sc.AssembleTargetKey]; ok {
 		visit(sc.AssembleTargetKey)
 	}
@@ -586,6 +636,19 @@ func resolveAssemble(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPat
 	}
 	sc.AssembleSteps = steps
 	return Diagnostic{}, false
+}
+
+// structUnderlying returns the *types.Struct view of t when t's
+// underlying type is a struct (named or anonymous). When t is not a
+// struct (named-of-non-struct, pointer, interface, etc.), returns
+// (nil, false). q.AssembleStruct rejects non-struct targets via
+// this check.
+func structUnderlying(t types.Type) (*types.Struct, bool) {
+	if t == nil {
+		return nil, false
+	}
+	st, ok := t.Underlying().(*types.Struct)
+	return st, ok
 }
 
 // findContextContextType returns the *types.Interface for
@@ -727,20 +790,35 @@ func renderAssembleTree(targetKey string, recipes []assembleRecipeInfo, provider
 // its own sub-tree so the user can see how each contributing element
 // is built.
 func renderAssembleTreeForCall(sc *qSubCall, recipes []assembleRecipeInfo, providerOf map[string]int, typeText func(types.Type) string, fset *token.FileSet) string {
-	if sc.Family != familyAssembleAll {
+	switch sc.Family {
+	case familyAssembleAll:
+		if len(sc.AssembleAllProviderRidxs) == 0 {
+			return "- target ?? (no recipe provides T or anything assignable to T)"
+		}
+		var b bytes.Buffer
+		for i, pridx := range sc.AssembleAllProviderRidxs {
+			if i > 0 {
+				b.WriteString("\n")
+			}
+			b.WriteString(renderAssembleTree(recipes[pridx].outputKey, recipes, providerOf, typeText, fset))
+		}
+		return b.String()
+	case familyAssembleStruct:
+		if len(sc.AssembleStructFieldKeys) == 0 {
+			return "- target ?? (no struct fields resolved)"
+		}
+		var b bytes.Buffer
+		for i, fk := range sc.AssembleStructFieldKeys {
+			if i > 0 {
+				b.WriteString("\n")
+			}
+			fmt.Fprintf(&b, "field %s:\n", sc.AssembleStructFieldNames[i])
+			b.WriteString(renderAssembleTree(fk, recipes, providerOf, typeText, fset))
+		}
+		return b.String()
+	default:
 		return renderAssembleTree(sc.AssembleTargetKey, recipes, providerOf, typeText, fset)
 	}
-	if len(sc.AssembleAllProviderRidxs) == 0 {
-		return "- target ?? (no recipe provides T or anything assignable to T)"
-	}
-	var b bytes.Buffer
-	for i, pridx := range sc.AssembleAllProviderRidxs {
-		if i > 0 {
-			b.WriteString("\n")
-		}
-		b.WriteString(renderAssembleTree(recipes[pridx].outputKey, recipes, providerOf, typeText, fset))
-	}
-	return b.String()
 }
 
 // listProviders returns a one-line summary of every valid provider
@@ -941,6 +1019,17 @@ func buildAssembleBody(fset *token.FileSet, src []byte, sub qSubCall, subs []qSu
 		for _, ridx := range sub.AssembleAllProviderRidxs {
 			if dep, ok := depByRecipe[ridx]; ok {
 				parts = append(parts, dep)
+			}
+		}
+		fmt.Fprintf(&b, "\n\treturn %s{%s}, nil", targetText, strings.Join(parts, ", "))
+		return b.String(), fmtUsed
+	}
+
+	if sub.Family == familyAssembleStruct {
+		parts := make([]string, 0, len(sub.AssembleStructFieldKeys))
+		for i, fk := range sub.AssembleStructFieldKeys {
+			if dep, ok := depVar[fk]; ok {
+				parts = append(parts, fmt.Sprintf("%s: %s", sub.AssembleStructFieldNames[i], dep))
 			}
 		}
 		fmt.Fprintf(&b, "\n\treturn %s{%s}, nil", targetText, strings.Join(parts, ", "))

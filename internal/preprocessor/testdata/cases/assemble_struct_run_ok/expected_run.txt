@@ -1,0 +1,3 @@
+server.db.cfg.Region: eu-west-1
+worker.db.cfg.Region: eu-west-1
+stats.cfg.Region: eu-west-1

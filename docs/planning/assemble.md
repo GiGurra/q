@@ -1,13 +1,13 @@
-# q.Assemble — phase 2b+ plan (resume point after context clear)
+# q.Assemble — phase 3+ plan (resume point after context clear)
 
-This document is the resume-point for the remaining `q.Assemble` work. Phase 1 (single-entry auto-derived DI with full diagnostics, ctx-as-inline-value, runtime nil detection, debug tracing, q.Unwrap helpers) and Phase 2a (`q.AssembleAll[T]` for multi-provider aggregation) have shipped. Read these first; phase 2b/3/4 build on top.
+This document is the resume-point for the remaining `q.Assemble` work. Phase 1 (single-entry auto-derived DI), Phase 2a (`q.AssembleAll[T]` for multi-provider aggregation), and Phase 2b (`q.AssembleStruct[T]` for field-decomposition multi-output) have shipped. Read these first; phase 3/4 build on top.
 
 A cold-state reader can pick up from this doc plus the references below.
 
 ## Where things live
 
 - **API doc:** [`docs/api/assemble.md`](../api/assemble.md) — current public surface, full happy/sad-path coverage, every diagnostic shape with examples.
-- **Stubs:** [`pkg/q/assemble.go`](../../pkg/q/assemble.go) — `Assemble[T](recipes ...any) (T, error)`, `AssembleAll[T](recipes ...any) ([]T, error)`, `WithAssemblyDebug`, `WithAssemblyDebugWriter`, `AssemblyDebugWriter`. `q.Unwrap` and `q.UnwrapE` live in [`pkg/q/q.go`](../../pkg/q/q.go) (plain runtime; not rewritten).
+- **Stubs:** [`pkg/q/assemble.go`](../../pkg/q/assemble.go) — `Assemble[T](recipes ...any) (T, error)`, `AssembleAll[T](recipes ...any) ([]T, error)`, `AssembleStruct[T](recipes ...any) (T, error)`, `WithAssemblyDebug`, `WithAssemblyDebugWriter`, `AssemblyDebugWriter`. `q.Unwrap` and `q.UnwrapE` live in [`pkg/q/q.go`](../../pkg/q/q.go) (plain runtime; not rewritten).
 - **Implementation:** [`internal/preprocessor/assemble.go`](../../internal/preprocessor/assemble.go) — `resolveAssemble` (typecheck), `buildAssembleReplacement` + `buildAssembleBody` (rewriter). New phases hook in here.
 - **Scanner:** [`internal/preprocessor/scanner.go`](../../internal/preprocessor/scanner.go) — `familyAssemble`, `qSubCall.AssembleRecipes`, `qSubCall.AssembleCtxDepKey` (set at resolve time when a recipe provides `context.Context`).
 - **Tests:**
@@ -18,6 +18,7 @@ A cold-state reader can pick up from this doc plus the references below.
 
 - Single entry: `q.Assemble[T](recipes ...any) (T, error)` — composes with `q.Try` / `q.TryE` / `q.Unwrap` / `q.UnwrapE` at the call site.
 - Multi-provider entry: `q.AssembleAll[T](recipes ...any) ([]T, error)` — collects every recipe whose output is assignable to `T`, in declaration order. Phase 2a.
+- Struct-target entry: `q.AssembleStruct[T](recipes ...any) (T, error)` — T must be a struct; each field becomes a separate dep target; emits `T{Field: _qDep<i>, ...}`. Phase 2b. Slice fields are NOT auto-aggregated; supply an explicit `[]X` recipe (e.g. via a separate `q.AssembleAll[X]` call).
 - Function-reference and inline-value recipes; method values; pkg-qualified funcs.
 - All return shapes (T / *T / Ifc + their (T, error) variants).
 - Interface inputs satisfied by concrete providers via `types.AssignableTo`. Exact-type wins first (q.Tagged keeps precise routing).
@@ -30,35 +31,6 @@ ZIO features intentionally NOT carried over:
 - **Composition operators (`++`, `>>>`, `>+>`)** — don't fit Go syntax. Recipes are listed at the call site; group via `[]any{...}` + variadic spread when needed.
 - **Service pattern (`ZIO.service[DB]`)** — needs ZIO's monadic env. Replaced by named function inputs.
 - **Failures vs defects** — Go has one error.
-
-## Phase 2b — struct-target multi-output
-
-When the user wants several products from one assembly. Detect that T is a struct type and populate each field from a matching recipe.
-
-```go
-type App struct {
-    Server *Server
-    Worker *Worker
-    Stats  *Stats
-}
-
-app, err := q.Assemble[App](newConfig, newDB, newServer, newWorker, newStats)
-```
-
-**Implementation hooks:**
-
-- `resolveAssemble` detects `T`'s underlying is `*types.Struct`; iterate fields, treat each field's type as a required dep target. Missing fields → diagnostic with the same dep-tree visualisation.
-- `buildAssembleReplacement` emits a struct literal initialised from the dep temps: `App{Server: _qDep<i>, Worker: _qDep<j>, Stats: _qDep<k>}`.
-- Tagged fields (`Server q.Tagged[*Server, _primary]`) work the same way phase 1's tagged services do — the field's type IS the brand.
-- Be careful: a struct returned from a recipe (recipe whose output IS the target struct type) takes precedence over field-by-field decomposition. Detection rule: if `providersByKey[targetKey]` has a provider, use it directly (single-recipe path); otherwise decompose into fields.
-
-### Phase 2b deliverables
-
-1. `resolveAssemble`: detect when target type's underlying is `*types.Struct`; iterate fields and treat each field's type as a required dep target. Single-recipe path (when a provider produces the target struct directly) takes precedence.
-2. `buildAssembleReplacement` / `buildAssembleBody`: emit a struct literal `App{Field: _qDep<i>, ...}`.
-3. Unit tests in `assemble_unit_test.go`: struct-target-happy-path, struct-target-missing-field, struct-target-tagged-fields, struct-target-recipe-takes-precedence.
-4. E2E fixtures: `assemble_struct_target_run_ok`, `assemble_struct_target_missing_field_rejected`.
-5. Extend `docs/api/assemble.md` with the struct-target section.
 
 ## Phase 3 — resource lifetime
 
@@ -175,9 +147,8 @@ When `_qDbgPar == 0` (no `WithAssemblyPar` on ctx), skip the goroutine machinery
 
 ## Recommended phase order
 
-1. **Phase 2b (struct-target)** — composes well with the existing single-target and AssembleAll machinery; small lift relative to the others.
-2. **Phase 3 (resource lifetime)** — biggest impact for long-running services.
-3. **Phase 4 (parallel)** — last because it's the largest emit-side change and benefits from the other phases' fixtures shaking out edge cases.
+1. **Phase 3 (resource lifetime)** — biggest impact for long-running services.
+2. **Phase 4 (parallel)** — last because it's the largest emit-side change and benefits from the other phases' fixtures shaking out edge cases.
 
 Each phase is independent; the order is a recommendation based on payoff vs implementation cost.
 

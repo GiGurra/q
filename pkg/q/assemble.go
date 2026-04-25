@@ -96,6 +96,41 @@ func AssembleAll[T any](recipes ...any) ([]T, error) {
 	return nil, nil
 }
 
+// AssembleStruct is the field-decomposition sibling of Assemble. T
+// must be a struct type; each field is treated as a separate dep
+// target. The preprocessor finds a recipe for each field's type,
+// builds them all (sharing transitive deps via the same auto-derived
+// graph as q.Assemble), and packs them into the resulting struct.
+//
+//	type App struct {
+//	    Server *Server
+//	    Worker *Worker
+//	    Stats  *Stats
+//	}
+//
+//	app, err := q.AssembleStruct[App](
+//	    newConfig, newDB, newServer, newWorker, newStats,
+//	)
+//
+// Use this when several distinct products share a common dep set —
+// the *Config and *DB recipes only run once even though three
+// different fields consume them. Recipes whose output type doesn't
+// match any field still need to feed (transitively) into one that
+// does, otherwise they're flagged as unused.
+//
+// q.AssembleStruct does NOT honor a recipe whose output IS T — the
+// whole point of choosing this entry over q.Assemble[T] is "decompose
+// T's fields"; if you want the single-recipe-for-T path, use
+// q.Assemble[T] instead. A recipe producing T directly is unused.
+//
+// As with q.Assemble, compose with q.Try / q.Unwrap / q.TryE /
+// q.UnwrapE at the call site.
+func AssembleStruct[T any](recipes ...any) (T, error) {
+	panicUnrewritten("q.AssembleStruct")
+	var zero T
+	return zero, nil
+}
+
 // assemblyDebugKey is the unexported context-value key that
 // WithAssemblyDebug attaches the destination writer under. Using a
 // dedicated unexported struct type guarantees no key collision with
