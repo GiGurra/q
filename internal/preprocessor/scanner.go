@@ -104,6 +104,9 @@ const (
 	familyF    // q.F("hi {name}") — compile-time string interpolation
 	familyFerr // q.Ferr("err: {x}") — interpolation + errors.New / fmt.Errorf
 	familyFln  // q.Fln("dbg: {v}") — interpolation + fmt.Fprintln to DebugWriter
+	familySQL      // q.SQL("...{x}...") — placeholder-style parameterised SQL (?, ?...)
+	familyPgSQL    // q.PgSQL("...{x}...") — PostgreSQL-style ($1, $2, ...)
+	familyNamedSQL // q.NamedSQL("...{x}...") — named-param style (:name1, :name2, ...)
 )
 
 // form is the syntactic position of a recognised q.* call:
@@ -992,6 +995,26 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 			return qSubCall{}, false, err
 		}
 		return qSubCall{Family: familyFln, InnerExpr: call.Args[0], OuterCall: expr}, true, nil
+	}
+	// q.SQL / q.PgSQL / q.NamedSQL — parameterised SQL builders.
+	// Same placeholder syntax as q.F, different rewrite output.
+	if isSelector(call.Fun, alias, "SQL") {
+		if err := validateFLiteral("q.SQL", call.Args); err != nil {
+			return qSubCall{}, false, err
+		}
+		return qSubCall{Family: familySQL, InnerExpr: call.Args[0], OuterCall: expr}, true, nil
+	}
+	if isSelector(call.Fun, alias, "PgSQL") {
+		if err := validateFLiteral("q.PgSQL", call.Args); err != nil {
+			return qSubCall{}, false, err
+		}
+		return qSubCall{Family: familyPgSQL, InnerExpr: call.Args[0], OuterCall: expr}, true, nil
+	}
+	if isSelector(call.Fun, alias, "NamedSQL") {
+		if err := validateFLiteral("q.NamedSQL", call.Args); err != nil {
+			return qSubCall{}, false, err
+		}
+		return qSubCall{Family: familyNamedSQL, InnerExpr: call.Args[0], OuterCall: expr}, true, nil
 	}
 	// Bare q.CheckCtx — ctx.Err() checkpoint. Statement-only (discard).
 	if isSelector(call.Fun, alias, "CheckCtx") {

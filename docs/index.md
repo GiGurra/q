@@ -46,6 +46,7 @@ Around that core sit a handful of orthogonal helpers — context cancellation, f
 | [`q.DebugPrintln` / `q.DebugSlogAttr`](api/debug.md) | Go's missing `dbg!` — prints `file:line src = value` mid-expression, or produces an auto-keyed `slog.Attr`. |
 | [`q.EnumValues` / `EnumName` / `EnumParse` / `EnumValid` / `EnumOrdinal`](api/enums.md) | Compile-time helpers for Go's `const X = iota` enum pattern — list all values, name lookup, parse from name, membership, ordinal. Int- and string-backed. |
 | [`q.F` / `q.Ferr` / `q.Fln`](api/format.md) | Compile-time `{expr}` string interpolation. `q.F("hi {name}")` → `fmt.Sprintf(...)`. Format must be a string literal. |
+| [`q.SQL` / `q.PgSQL` / `q.NamedSQL`](api/sql.md) | Injection-safe parameterised SQL. `{expr}` placeholders lift out as `?` / `$N` / `:nameN` driver binds. |
 | [`q.GoroutineID`](api/goroutine_id.md) | Returns the runtime goid Go deliberately hides — via runtime-package injection. ~1ns. |
 | [`q.Lock`](api/lock.md) | `Lock()` + `defer Unlock()` for any `sync.Locker`. |
 | [`q.NotNil` / `q.NotNilE`](api/notnil.md) | Bubble on a nil pointer (sentinel `q.ErrNil`). |

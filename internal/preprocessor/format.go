@@ -227,3 +227,85 @@ func buildFlnReplacement(sub qSubCall, alias string) (string, error) {
 	parts = append(parts, res.ExprTexts...)
 	return fmt.Sprintf("fmt.Fprintln(%s.DebugWriter, fmt.Sprintf(%s))", alias, strings.Join(parts, ", ")), nil
 }
+
+// sqlPlaceholder generates the placeholder text for the i-th
+// (0-indexed) extracted expression for a given SQL family. Drivers
+// differ on placeholder syntax — same parsing, different output.
+func sqlPlaceholder(f family, i int) string {
+	switch f {
+	case familyPgSQL:
+		return fmt.Sprintf("$%d", i+1)
+	case familyNamedSQL:
+		return fmt.Sprintf(":name%d", i+1)
+	}
+	return "?"
+}
+
+// parseSQLFormat is parseFFormat's twin: same brace-tracking and
+// expression-validation, different placeholder generation per
+// family. Returns the rewritten SQL with placeholders + the
+// extracted expressions in left-to-right order. `%` characters in
+// the format are NOT escaped (unlike q.F) — fmt.Sprintf is not
+// involved on the output side, so `%` is just a literal character
+// in SQL.
+func parseSQLFormat(unquoted string, f family) (queryText string, exprTexts []string, err error) {
+	var out strings.Builder
+	var exprs []string
+	i := 0
+	for i < len(unquoted) {
+		c := unquoted[i]
+		switch c {
+		case '{':
+			if i+1 < len(unquoted) && unquoted[i+1] == '{' {
+				out.WriteByte('{')
+				i += 2
+				continue
+			}
+			end, ferr := findFExprClose(unquoted, i)
+			if ferr != nil {
+				return "", nil, ferr
+			}
+			exprText := unquoted[i+1 : end]
+			if strings.TrimSpace(exprText) == "" {
+				return "", nil, fmt.Errorf("q.SQL format has empty placeholder `{}` (use `{{` for a literal `{`)")
+			}
+			if _, perr := parser.ParseExpr(exprText); perr != nil {
+				return "", nil, fmt.Errorf("q.SQL placeholder %q is not a valid Go expression: %v", exprText, perr)
+			}
+			out.WriteString(sqlPlaceholder(f, len(exprs)))
+			exprs = append(exprs, exprText)
+			i = end + 1
+		case '}':
+			if i+1 < len(unquoted) && unquoted[i+1] == '}' {
+				out.WriteByte('}')
+				i += 2
+				continue
+			}
+			return "", nil, fmt.Errorf("q.SQL format has an unmatched `}` at offset %d (use `}}` for a literal `}`)", i)
+		default:
+			out.WriteByte(c)
+			i++
+		}
+	}
+	return out.String(), exprs, nil
+}
+
+// buildSQLReplacement emits a SQLQuery composite literal. The alias
+// is the user file's import name for pkg/q; when no expressions are
+// extracted, Args is nil to keep the literal valid without
+// allocating.
+func buildSQLReplacement(sub qSubCall, alias string) (string, error) {
+	unquoted, err := fLiteralOrError(sub)
+	if err != nil {
+		return "", err
+	}
+	queryText, exprTexts, err := parseSQLFormat(unquoted, sub.Family)
+	if err != nil {
+		return "", err
+	}
+	if len(exprTexts) == 0 {
+		return fmt.Sprintf("%s.SQLQuery{Query: %s, Args: nil}", alias, strconv.Quote(queryText)), nil
+	}
+	return fmt.Sprintf("%s.SQLQuery{Query: %s, Args: []any{%s}}",
+		alias, strconv.Quote(queryText), strings.Join(exprTexts, ", ")), nil
+}

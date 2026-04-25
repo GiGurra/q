@@ -219,6 +219,23 @@ q.Fln("processing {len(items)} items")        // → fmt.Fprintln(q.DebugWriter,
 
 `{{` / `}}` escape literal braces. The format must be a Go string literal — dynamic formats are rejected at scan time. Inside `{…}`, anything that parses as a Go expression goes (selectors, function calls, arithmetic, even nested string literals). Tradeoff: identifiers inside the literal aren't IDE-visible — go-to-definition / rename don't see them.
 
+### Injection-safe SQL
+
+```go
+s := q.SQL("SELECT * FROM users WHERE id = {id} AND status = {status}")
+// s.Query → "SELECT * FROM users WHERE id = ? AND status = ?"
+// s.Args  → []any{id, status}
+db.QueryRowContext(ctx, s.Query, s.Args...)
+
+// Or with PostgreSQL-style placeholders:
+s := q.PgSQL("SELECT * FROM users WHERE id = {id}")  // → "...$1", []any{id}
+
+// Or named-param style:
+s := q.NamedSQL("SELECT * FROM users WHERE id = {id}")  // → "...:name1", []any{id}
+```
+
+Same `{expr}` surface as `q.F`, but the rewriter physically can't inline user values into the query — `{name}` always becomes a placeholder + an entry in `Args`. The parameterised guarantee is structural, not advisory.
+
 ### Compile-time enum helpers
 
 ```go

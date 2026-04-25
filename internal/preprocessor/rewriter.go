@@ -279,6 +279,12 @@ func renderShape(fset *token.FileSet, src []byte, sh callShape, counter *int, al
 				return "", false, false, false, ferr
 			}
 			subTexts[i] = text
+		case familySQL, familyPgSQL, familyNamedSQL:
+			text, ferr := buildSQLReplacement(sh.Calls[i], alias)
+			if ferr != nil {
+				return "", false, false, false, ferr
+			}
+			subTexts[i] = text
 		}
 	}
 
@@ -658,7 +664,8 @@ func isInPlaceFamily(f family) bool {
 		familyFile, familyLine, familyFileLine, familyExpr,
 		familyEnumValues, familyEnumNames, familyEnumName,
 		familyEnumParse, familyEnumValid, familyEnumOrdinal,
-		familyF, familyFerr, familyFln:
+		familyF, familyFerr, familyFln,
+		familySQL, familyPgSQL, familyNamedSQL:
 		return true
 	}
 	return false
@@ -875,6 +882,12 @@ func renderSubCall(fset *token.FileSet, src []byte, sh callShape, subIdx int, su
 		// cheap to inject both, and importcfg extension is keyed by
 		// presence not arity.
 		return "", true, true, false, nil
+	case familySQL, familyPgSQL, familyNamedSQL:
+		// q.SQL / q.PgSQL / q.NamedSQL rewrite to a SQLQuery
+		// composite literal that references types in pkg/q itself —
+		// no fmt/errors/context imports needed beyond what the
+		// `var _ = q.ErrNil` keep-alive already does.
+		return "", false, false, false, nil
 	case familyAwait:
 		text, err := renderAwait(fset, src, sh, sub, counter, alias, subs, subTexts)
 		return text, false, false, false, err

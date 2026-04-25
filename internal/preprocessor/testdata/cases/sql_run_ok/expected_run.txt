@@ -1,0 +1,17 @@
+s1.Query: SELECT * FROM users WHERE id = ?
+s1.Args: [42]
+s2.Query: SELECT * FROM users WHERE id = ? AND status = ?
+s2.Args: [42 active]
+s3.Query: SELECT * FROM users WHERE name = ?
+s3.Args: [alice'; DROP TABLE users; --]
+s4.Query: SELECT * FROM users WHERE id = $1 AND status = $2
+s4.Args: [42 active]
+s5.Query: SELECT * FROM users WHERE id = :name1 AND status = :name2
+s5.Args: [42 active]
+s6.Query: SELECT '{json}' as label WHERE id = ?
+s6.Args: [42]
+s7.Query: SELECT 1
+s7.Args: []
+s8.Query: SELECT * FROM events WHERE user_id = $1 AND created_at > NOW() - INTERVAL '$2 days'
+s8.Args: [7 84]
+dump: [query="DELETE FROM cache WHERE key = ?" args=[alice'; DROP TABLE users; --]]
