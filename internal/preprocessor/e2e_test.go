@@ -99,6 +99,12 @@ func TestFixtures(t *testing.T) {
 		}
 		name := e.Name()
 		t.Run(name, func(t *testing.T) {
+			// Each fixture has its own tempdir for source + isolated
+			// build artifacts; only the harness-owned GOCACHE is
+			// shared, and Go's build cache is process-safe via file
+			// locks. Parallel fixtures cut wall-clock time roughly
+			// linearly with available cores.
+			t.Parallel()
 			runFixture(t, filepath.Join(casesDir, name))
 		})
 	}
