@@ -113,21 +113,21 @@ func buildEnumOrdinalReplacement(fset *token.FileSet, src []byte, sub qSubCall, 
 //
 // Two output shapes:
 //
-//	switch shape (every arm is q.Case / q.CaseFn / q.Default):
+//	switch shape (every arm's cond is value-typed — no predicate):
 //	  (func() R {
 //	      switch <value> {
-//	      case <val1>: return <result1>
-//	      default:     return <defaultResult>   // when q.Default is present
+//	      case <cond1>: return <result1>
+//	      default:      return <defaultResult>  // when q.Default is present
 //	      }
 //	      var _zero R; return _zero             // when no q.Default
 //	  }())
 //
-//	if-chain shape (any arm is q.Where / q.WhereFn):
+//	if-chain shape (at least one arm has a bool / func() bool cond):
 //	  (func() R {
-//	      _v := <value>                          // bound only if any q.Case arm exists
-//	      if <pred1>            { return <r1> } // q.Where boolExpr is rewritten verbatim
-//	      if _v == <caseVal2>   { return <r2> } // q.Case mixed in if-chain
-//	      if (<predFn>)()       { return <r3> } // q.WhereFn pred fn called lazily
+//	      _v := <value>                          // bound only if any value-match arm exists
+//	      if <pred1>            { return <r1> } // bool cond — emitted verbatim
+//	      if _v == <caseVal2>   { return <r2> } // value match mixed in if-chain
+//	      if (<predFn>)()       { return <r3> } // func() bool cond — called lazily
 //	      return <defaultResult>
 //	  }())
 //

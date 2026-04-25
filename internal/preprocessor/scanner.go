@@ -1444,13 +1444,11 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 		}
 		return qSubCall{Family: familyMatch, InnerExpr: call.Args[0], MatchCases: cases, OuterCall: expr}, true, nil
 	}
-	// q.Case / q.CaseFn / q.Default / q.DefaultFn / q.Where / q.WhereFn
-	// at the regular classifier path: silently no-match. They're only
-	// meaningful as q.Match's argument, where the q.Match scanner
-	// extracts them. Anywhere else the runtime panic stub fires.
-	if isSelector(call.Fun, alias, "Case") || isSelector(call.Fun, alias, "CaseFn") ||
-		isSelector(call.Fun, alias, "Default") || isSelector(call.Fun, alias, "DefaultFn") ||
-		isSelector(call.Fun, alias, "Where") || isSelector(call.Fun, alias, "WhereFn") {
+	// q.Case / q.Default at the regular classifier path: silently
+	// no-match. They're only meaningful as q.Match's argument, where
+	// the q.Match scanner extracts them. Anywhere else the runtime
+	// panic stub fires.
+	if isSelector(call.Fun, alias, "Case") || isSelector(call.Fun, alias, "Default") {
 		return qSubCall{}, false, nil
 	}
 	// q.Tag[T](field, key) — both args MUST be string literals so
