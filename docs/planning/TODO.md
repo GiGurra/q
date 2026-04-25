@@ -65,65 +65,7 @@ The persistent backlog for `q`. A cold-state reader can pick up here without re-
 
   Big lift: needs flow analysis (or a heavy hand: rewrite every reference into shim-method calls), needs to interop with raw resource access (sometimes you do want the underlying `*Conn`), and adds a real per-call atomic. Probably not worth it for the 90% case (functions that own their own resources) — defer until profiles or user reports show resource ownership crosses function boundaries often enough that the existing diagnostics become annoying.
 
-- **#84 — `q.Assemble[T](recipes...)` — compile-time dependency-injection graph.** ZIO `ZLayer` / Scala-Cats `MakeFromInOut` / google/wire for Go, but resolved by q's preprocessor at the call site — no codegen step, no runtime reflection, no manual ordering. The user supplies a bag of recipes (functions producing a value, possibly with deps); q topologically sorts them and emits a flat sequence of calls that build the requested target.
-
-  **Surface (working draft):**
-
-  ```go
-  // Recipes are just functions whose inputs are required deps and whose
-  // output is what they construct. Optional second return: error.
-  func newConfig() *Config              { ... }
-  func newDB(c *Config) *DB             { ... }
-  func newServer(db *DB, c *Config) (*Server, error) { ... }
-
-  // Build a *Server. q.Assemble figures out the order: Config first
-  // (no deps), then DB (needs Config), then Server (needs DB + Config).
-  server := q.Assemble[*Server](newConfig, newDB, newServer)
-  ```
-
-  **What it folds to.** The rewriter walks the recipe set, builds a dep graph keyed by output type, topologically sorts, and emits the equivalent of:
-
-  ```go
-  server := func() *Server {
-      _config := newConfig()
-      _db := newDB(_config)
-      _server, _err := newServer(_db, _config)
-      // Whether to bubble _err depends on where q.Assemble appears
-      // (return / assign / discard) — same logic as q.Try.
-      return _server
-  }()
-  ```
-
-  Errors short-circuit using the existing q.Try machinery: any erroring recipe bubbles via the enclosing function's error return. Non-erroring recipes inline directly. Same five forms as the rest of q (define, assign, discard, return, hoist).
-
-  **Compile-time guarantees:**
-  - **Missing dep** — every recipe's input type must be produced by some other recipe (or supplied as a literal value mixed in with the recipes — `q.Assemble[*Server](newDB, newServer, &cfg)` works the same as a `func() *Config { return &cfg }` recipe). If not, compile-time diagnostic naming the type and the recipe that wanted it.
-  - **Duplicate provider** — two recipes producing the same type → diagnostic.
-  - **Cycle** — A needs B which needs A → diagnostic.
-  - **Unused recipe** — recipe in the bag but its output isn't reachable from T → diagnostic. (Strict mode; could relax behind a flag if it's annoying in practice.)
-  - **Unsatisfiable T** — no recipe produces T → diagnostic.
-
-  All of these become regular Go test failures at build time — the same ergonomics as misspelling a const.
-
-  **Variants worth considering:**
-  - `q.AssembleErr[T](recipes...) (T, error)` — explicit `(T, error)` shape; pairs with q.Try on the call site (`server := q.Try(q.AssembleErr[*Server](...))`). Probably what we ship as primary.
-  - `q.AssembleE[T](recipes...) ErrResult[T]` — chain variant, mirrors the q.TryE / q.AwaitE pattern. Composes with `.Wrap("startup")`.
-  - `q.AssembleAll[T](recipes...) []T` — when multiple recipes legitimately produce the same type and the caller wants them all (plugin / handler registration).
-  - **Resource-managed recipes** — a recipe that returns `q.OpenResult[T]` instead of `T` registers its cleanup via the existing `q.Open` machinery. The graph teardown is reverse-topo, automatic. This is the ZIO `ZLayer.scoped` overlap.
-
-  **Type-resolution mechanism (preprocessor work).**
-
-  1. Scanner recognises `q.Assemble[T](r1, r2, ...)`. Extract T from the index expression; capture the recipe expressions.
-  2. Typecheck pass uses `go/types` to resolve each recipe's `*types.Signature`: input types are deps, output type is what it provides. Non-function recipe args are treated as constant providers (their type IS the provided type).
-  3. Build a directed graph: edges from each recipe's input types to its output type. Run Kahn's algorithm to topo-sort. Detect cycles + missing deps + duplicates inline.
-  4. Emit the flat sequence of calls in topo order, with `_qDepN` temps named after the type's basename (with disambiguation for collisions).
-
-  **Tradeoffs vs. google/wire / uber/fx / samber/do:**
-  - **vs. wire:** wire generates a separate file via codegen step; q.Assemble is inline at the call site, no separate `wire.go` to keep in sync. Same compile-time guarantees.
-  - **vs. uber/fx:** fx resolves at runtime via reflection — slower startup, errors at runtime. q.Assemble errors at build time. fx supports lifecycle hooks; q.Assemble piggy-backs on q.Open for that.
-  - **vs. samber/do:** also runtime, also reflection-based. Same comparison as fx.
-
-  **Why this fits q's mission.** "Stop reaching for codegen tools" is already the through-line of q.Gen* and q.AtCompileTime. q.Assemble takes the next step: stop reaching for DI containers entirely. The recipes are plain Go functions; the orchestration is a one-liner. ZIO showed this pattern is powerful in a typed language — q can make it idiomatic in Go without the monad tax.
+- **#84 — `q.Assemble[T](recipes...)` — ZIO ZLayer-style auto-derived DI at preprocess time.** Authoritative plan in [`docs/planning/assemble.md`](assemble.md): three-phase rollout (auto-derived assembly + diagnostics → AssembleAll + multi-output → resource-recipe lifetime), surface, type-resolution mechanism, fixture matrix, and resume checklist for cold-state implementers. TODO carries only the headline; assemble.md is the source of truth.
 
 ### Coroutines
 
