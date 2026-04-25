@@ -21,12 +21,19 @@ package q
 // `q.Default(result)` opts out of the coverage check and provides
 // the result for any value not covered by an explicit case.
 
-// MatchCase carries one arm of a q.Match. Constructed via q.Case or
-// q.Default; the rewriter consumes them at compile time, so the
-// runtime body is not reached in a successful build.
+// MatchCase carries one arm of a q.Match. Constructed via q.Case /
+// q.CaseFn / q.Default / q.DefaultFn; the rewriter consumes them at
+// compile time, so the runtime body is not reached in a successful
+// build.
+//
+// V and R are phantom type parameters — the compile-time-consumed
+// nature of the type means the value/result aren't actually needed
+// at runtime, but the type parameters must still flow through for
+// q.Match to type-check generically. The `[0]V` / `[0]R` zero-size
+// arrays consume the type parameters without taking any space.
 type MatchCase[V, R any] struct {
-	value     V
-	result    R
+	_         [0]V
+	_         [0]R
 	isDefault bool
 }
 
