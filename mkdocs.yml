@@ -40,7 +40,7 @@ nav:
   - Getting Started: getting-started.md
   - API:
     - q.AtCompileTime / AtCompileTimeCode (compile-time evaluation + macros): api/atcompiletime.md
-    - q.Assemble / AssembleErr / AssembleE (auto-derived DI): api/assemble.md
+    - q.Assemble (auto-derived DI): api/assemble.md
     - q.As:                    api/as.md
     - q.Async:                 api/async.md
     - q.AwaitAll / AwaitAny:   api/await_multi.md

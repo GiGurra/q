@@ -651,7 +651,7 @@ func scanFile(fset *token.FileSet, path string, file *ast.File) ([]callShape, []
 	//     has no rendering when not inside a Generator) or descend
 	//     into a func() body where q.Try / etc. have nothing to bubble
 	//     to.
-	skipFuncLits = map[*ast.FuncLit]bool{}
+	skip := map[*ast.FuncLit]bool{}
 	ast.Inspect(file, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
@@ -667,7 +667,7 @@ func scanFile(fset *token.FileSet, path string, file *ast.File) ([]callShape, []
 					sel.Sel.Name == "Generator") {
 				if len(call.Args) >= 1 {
 					if lit, ok := call.Args[0].(*ast.FuncLit); ok {
-						skipFuncLits[lit] = true
+						skip[lit] = true
 					}
 				}
 			}
@@ -681,7 +681,7 @@ func scanFile(fset *token.FileSet, path string, file *ast.File) ([]callShape, []
 			if d.Body == nil {
 				continue
 			}
-			walkBlock(fset, path, d.Body, alias, d.Type, &shapes, &diags)
+			walkBlock(fset, path, d.Body, alias, d.Type, &shapes, &diags, skip)
 		case *ast.GenDecl:
 			if d.Tok != token.VAR {
 				continue
@@ -690,17 +690,8 @@ func scanFile(fset *token.FileSet, path string, file *ast.File) ([]callShape, []
 		}
 	}
 
-	skipFuncLits = nil
 	return shapes, diags, nil
 }
-
-// skipFuncLits collects FuncLit AST nodes whose body the scanner
-// should NOT recurse into. Today: closures handed to q.AtCompileTime
-// (synthesis pass owns the body) and q.Generator (the renderer
-// rewrites q.Yield calls inside the body itself). The set is
-// populated at the start of scanFile and consulted by walkFuncLits +
-// collectQCalls to short-circuit descent.
-var skipFuncLits map[*ast.FuncLit]bool
 
 // scanTopLevelVarSpec recognises the package-level directive shape
 //
@@ -813,7 +804,7 @@ func genDirectiveName(f family) string {
 // return). The new statements live where the original q.* statement
 // lived — same scope, same in-flow position — so visibility of the
 // LHS variable to surrounding code is preserved.
-func walkBlock(fset *token.FileSet, path string, block *ast.BlockStmt, alias string, fnType *ast.FuncType, shapes *[]callShape, diags *[]Diagnostic) {
+func walkBlock(fset *token.FileSet, path string, block *ast.BlockStmt, alias string, fnType *ast.FuncType, shapes *[]callShape, diags *[]Diagnostic, skip map[*ast.FuncLit]bool) {
 	if block == nil {
 		return
 	}
@@ -829,8 +820,8 @@ func walkBlock(fset *token.FileSet, path string, block *ast.BlockStmt, alias str
 					fmt.Sprintf("unsupported q.* call shape; supported: `v := %s.Try/NotNil(...)`, `v = %s.Try/NotNil(...)`, `%s.Try/NotNil(...)` (discard), `return %s.Try/NotNil(...), …` (q.* as one top-level return result), with optional .Err / .ErrF / .Catch / .Wrap / .Wrapf chain methods on the *E entries", alias, alias, alias, alias)))
 			}
 		}
-		walkChildBlocks(fset, path, stmt, alias, fnType, shapes, diags)
-		walkFuncLits(fset, path, stmt, alias, shapes, diags)
+		walkChildBlocks(fset, path, stmt, alias, fnType, shapes, diags, skip)
+		walkFuncLits(fset, path, stmt, alias, shapes, diags, skip)
 	}
 }
 
@@ -864,7 +855,7 @@ func isContainerStmt(stmt ast.Stmt) bool {
 // avoids walking a closure's body twice when it contains further
 // closures; the recursive walkBlock on the outer closure will
 // discover the inner one.
-func walkFuncLits(fset *token.FileSet, path string, stmt ast.Stmt, alias string, shapes *[]callShape, diags *[]Diagnostic) {
+func walkFuncLits(fset *token.FileSet, path string, stmt ast.Stmt, alias string, shapes *[]callShape, diags *[]Diagnostic, skip map[*ast.FuncLit]bool) {
 	ast.Inspect(stmt, func(n ast.Node) bool {
 		if blk, ok := n.(*ast.BlockStmt); ok && ast.Node(blk) != ast.Node(stmt) {
 			return false
@@ -873,12 +864,12 @@ func walkFuncLits(fset *token.FileSet, path string, stmt ast.Stmt, alias string,
 		if !ok {
 			return true
 		}
-		if skipFuncLits[lit] {
+		if skip[lit] {
 			// Body is owned by another pass (synthesis for
 			// q.AtCompileTime, the Generator renderer for q.Generator).
 			return false
 		}
-		walkBlock(fset, path, lit.Body, alias, lit.Type, shapes, diags)
+		walkBlock(fset, path, lit.Body, alias, lit.Type, shapes, diags, skip)
 		return false
 	})
 }
@@ -887,10 +878,10 @@ func walkFuncLits(fset *token.FileSet, path string, stmt ast.Stmt, alias string,
 // given statement holds. Mirrors the shape of go/ast's nodes that
 // carry blocks; new statement kinds added by future Go versions would
 // need a case here.
-func walkChildBlocks(fset *token.FileSet, path string, stmt ast.Stmt, alias string, fnType *ast.FuncType, shapes *[]callShape, diags *[]Diagnostic) {
+func walkChildBlocks(fset *token.FileSet, path string, stmt ast.Stmt, alias string, fnType *ast.FuncType, shapes *[]callShape, diags *[]Diagnostic, skip map[*ast.FuncLit]bool) {
 	switch s := stmt.(type) {
 	case *ast.BlockStmt:
-		walkBlock(fset, path, s, alias, fnType, shapes, diags)
+		walkBlock(fset, path, s, alias, fnType, shapes, diags, skip)
 	case *ast.IfStmt:
 		if s.Init != nil {
 			scanContainerInit(fset, path, s.Init, alias, fnType, shapes, diags, "if")
@@ -898,13 +889,13 @@ func walkChildBlocks(fset *token.FileSet, path string, stmt ast.Stmt, alias stri
 		if s.Cond != nil {
 			scanContainerExpr(fset, path, s, []ast.Expr{s.Cond}, alias, fnType, shapes, diags, "if")
 		}
-		walkBlock(fset, path, s.Body, alias, fnType, shapes, diags)
+		walkBlock(fset, path, s.Body, alias, fnType, shapes, diags, skip)
 		if s.Else != nil {
 			switch elseStmt := s.Else.(type) {
 			case *ast.BlockStmt:
-				walkBlock(fset, path, elseStmt, alias, fnType, shapes, diags)
+				walkBlock(fset, path, elseStmt, alias, fnType, shapes, diags, skip)
 			case *ast.IfStmt:
-				walkChildBlocks(fset, path, elseStmt, alias, fnType, shapes, diags)
+				walkChildBlocks(fset, path, elseStmt, alias, fnType, shapes, diags, skip)
 			}
 		}
 	case *ast.ForStmt:
@@ -917,12 +908,12 @@ func walkChildBlocks(fset *token.FileSet, path string, stmt ast.Stmt, alias stri
 		if s.Cond != nil {
 			scanContainerExpr(fset, path, s, []ast.Expr{s.Cond}, alias, fnType, shapes, diags, "for")
 		}
-		walkBlock(fset, path, s.Body, alias, fnType, shapes, diags)
+		walkBlock(fset, path, s.Body, alias, fnType, shapes, diags, skip)
 	case *ast.RangeStmt:
 		if s.X != nil {
 			scanContainerExpr(fset, path, s, []ast.Expr{s.X}, alias, fnType, shapes, diags, "range")
 		}
-		walkBlock(fset, path, s.Body, alias, fnType, shapes, diags)
+		walkBlock(fset, path, s.Body, alias, fnType, shapes, diags, skip)
 	case *ast.SwitchStmt:
 		if shape, ok, err := matchExhaustiveSwitch(s, alias, fnType); err != nil {
 			*diags = append(*diags, diagAt(fset, path, s.Pos(), err.Error()))
@@ -934,11 +925,11 @@ func walkChildBlocks(fset *token.FileSet, path string, stmt ast.Stmt, alias stri
 		if s.Init != nil {
 			scanContainerInit(fset, path, s.Init, alias, fnType, shapes, diags, "switch")
 		}
-		walkBlock(fset, path, s.Body, alias, fnType, shapes, diags)
+		walkBlock(fset, path, s.Body, alias, fnType, shapes, diags, skip)
 	case *ast.TypeSwitchStmt:
-		walkBlock(fset, path, s.Body, alias, fnType, shapes, diags)
+		walkBlock(fset, path, s.Body, alias, fnType, shapes, diags, skip)
 	case *ast.SelectStmt:
-		walkBlock(fset, path, s.Body, alias, fnType, shapes, diags)
+		walkBlock(fset, path, s.Body, alias, fnType, shapes, diags, skip)
 	case *ast.CaseClause:
 		// case clause Body is a []ast.Stmt without its own BlockStmt
 		// wrapper, so we walk it inline.
@@ -954,8 +945,8 @@ func walkChildBlocks(fset *token.FileSet, path string, stmt ast.Stmt, alias stri
 						fmt.Sprintf("unsupported q.* call shape; supported: `v := %s.Try/NotNil(...)`, `v = %s.Try/NotNil(...)`, `%s.Try/NotNil(...)` (discard), `return %s.Try/NotNil(...), …` (q.* as one top-level return result), with optional .Err / .ErrF / .Catch / .Wrap / .Wrapf chain methods on the *E entries", alias, alias, alias, alias)))
 				}
 			}
-			walkChildBlocks(fset, path, child, alias, fnType, shapes, diags)
-			walkFuncLits(fset, path, child, alias, shapes, diags)
+			walkChildBlocks(fset, path, child, alias, fnType, shapes, diags, skip)
+			walkFuncLits(fset, path, child, alias, shapes, diags, skip)
 		}
 	case *ast.CommClause:
 		for _, child := range s.Body {
@@ -970,11 +961,11 @@ func walkChildBlocks(fset *token.FileSet, path string, stmt ast.Stmt, alias stri
 						fmt.Sprintf("unsupported q.* call shape; supported: `v := %s.Try/NotNil(...)`, `v = %s.Try/NotNil(...)`, `%s.Try/NotNil(...)` (discard), `return %s.Try/NotNil(...), …` (q.* as one top-level return result), with optional .Err / .ErrF / .Catch / .Wrap / .Wrapf chain methods on the *E entries", alias, alias, alias, alias)))
 				}
 			}
-			walkChildBlocks(fset, path, child, alias, fnType, shapes, diags)
-			walkFuncLits(fset, path, child, alias, shapes, diags)
+			walkChildBlocks(fset, path, child, alias, fnType, shapes, diags, skip)
+			walkFuncLits(fset, path, child, alias, shapes, diags, skip)
 		}
 	case *ast.LabeledStmt:
-		walkChildBlocks(fset, path, s.Stmt, alias, fnType, shapes, diags)
+		walkChildBlocks(fset, path, s.Stmt, alias, fnType, shapes, diags, skip)
 	}
 }
 
