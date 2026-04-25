@@ -251,7 +251,7 @@ func main() { _ = q.Assemble[*Cfg](newA, newB) }
 				"duplicate provider for *Cfg",
 				"#1 (newA)",
 				"#2 (newB)",
-				"pick one or use q.Tagged",
+				"pick one or define distinct named types",
 			},
 		},
 		{
@@ -325,7 +325,7 @@ func main() { _ = q.Assemble[*App](newEN, newES, newApp) }
 				"is satisfied by multiple providers",
 				"#1 (newEN) → *EN",
 				"#2 (newES) → *ES",
-				"narrow the recipe set or use q.Tagged",
+				"narrow the recipe set or define distinct named types",
 			},
 		},
 		{

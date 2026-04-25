@@ -238,13 +238,14 @@ func resolveAssemble(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPat
 		for _, ridx := range ridxs {
 			labels = append(labels, recipeLabel(fset, recipes[ridx]))
 		}
-		addProblem("duplicate provider for %s — recipes %s all produce it; pick one or use q.Tagged to brand the variants",
+		addProblem("duplicate provider for %s — recipes %s all produce it; pick one or define distinct named types per variant (e.g. `type PrimaryDB struct{ *DB }`) so each variant has its own provider key",
 			typeText(recipes[ridxs[0]].output), strings.Join(labels, ", "))
 	}
 
 	// resolveInput finds the provider that satisfies a desired input
 	// type. Two-step: exact-type first (covers concrete identity AND
-	// q.Tagged brands), then assignability scan for interface inputs.
+	// any named-type brand variants), then assignability scan for
+	// interface inputs.
 	type inputResolution struct {
 		resolvedKey string
 		ambiguous   []int
@@ -282,8 +283,8 @@ func resolveAssemble(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPat
 	// Resolve target T's provider(s).
 	//
 	// q.Assemble:    target T must have exactly one provider (exact
-	//                type, q.Tagged brand, or single interface match).
-	//                Zero or multiple providers → diagnostic.
+	//                type or single interface match). Zero or multiple
+	//                providers → diagnostic.
 	//
 	// q.AssembleAll: target T can have any number of providers — every
 	//                recipe whose output is assignable to T contributes
@@ -340,7 +341,7 @@ func resolveAssemble(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPat
 						r := recipes[ridx]
 						labels = append(labels, fmt.Sprintf("%s → %s", recipeLabel(fset, r), typeText(r.output)))
 					}
-					addProblem("field %s of %s (type %s) is satisfied by multiple providers: %s — narrow the recipe set or use q.Tagged to disambiguate",
+					addProblem("field %s of %s (type %s) is satisfied by multiple providers: %s — narrow the recipe set or define distinct named types per variant",
 						f.Name(), sc.AssembleTargetTypeText, typeText(ft), strings.Join(labels, ", "))
 				} else {
 					addProblem("field %s of %s (type %s) has no provider — add a recipe whose output is assignable to %s",
@@ -360,7 +361,7 @@ func resolveAssemble(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPat
 				r := recipes[ridx]
 				labels = append(labels, fmt.Sprintf("%s → %s", recipeLabel(fset, r), typeText(r.output)))
 			}
-			addProblem("target interface %s is satisfied by multiple providers: %s — narrow the recipe set or use q.Tagged to disambiguate",
+			addProblem("target interface %s is satisfied by multiple providers: %s — narrow the recipe set or define distinct named types per variant",
 				sc.AssembleTargetTypeText, strings.Join(labels, ", "))
 		} else {
 			sc.AssembleTargetKey = targetRes.resolvedKey
@@ -434,7 +435,7 @@ func resolveAssemble(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPat
 				cr := recipes[cidx]
 				choiceLabels = append(choiceLabels, fmt.Sprintf("%s → %s", recipeLabel(fset, cr), typeText(cr.output)))
 			}
-			addProblem("interface input %s (needed by %s) is satisfied by multiple providers: %s — narrow the recipe set or use q.Tagged to disambiguate",
+			addProblem("interface input %s (needed by %s) is satisfied by multiple providers: %s — narrow the recipe set or define distinct named types per variant",
 				ai.typeText, strings.Join(ai.consumer, ", "), strings.Join(choiceLabels, ", "))
 		}
 	}

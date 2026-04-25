@@ -21,7 +21,7 @@ A cold-state reader can pick up from this doc plus the references below.
 - Struct-target entry: `q.AssembleStruct[T](recipes ...any) (T, error)` — T must be a struct; each field becomes a separate dep target; emits `T{Field: _qDep<i>, ...}`. Phase 2b. Slice fields are NOT auto-aggregated; supply an explicit `[]X` recipe (e.g. via a separate `q.AssembleAll[X]` call).
 - Function-reference and inline-value recipes; method values; pkg-qualified funcs.
 - All return shapes (T / *T / Ifc + their (T, error) variants).
-- Interface inputs satisfied by concrete providers via `types.AssignableTo`. Exact-type wins first (q.Tagged keeps precise routing).
+- Interface inputs satisfied by concrete providers via `types.AssignableTo`. Exact-type wins first, so distinct named-type wrappers (e.g. `type PrimaryDB struct{ *DB }`) keep precise routing for the two-databases pattern.
 - ctx is just an inline value — recipes that take `context.Context` get matched via interface satisfaction. ctx supplied for assembly-config (debug, future hooks) is exempt from the unused-recipe check.
 - Runtime nil-check on every nilable output (pointer/interface/slice/map/chan/func) — bubbles `fmt.Errorf("...: %w", q.ErrNil)` so callers can `errors.Is(err, q.ErrNil)`. Catches the typed-nil-interface pitfall before downstream consumers see it.
 - Debug tracing via `q.WithAssemblyDebug` (writer defaults to `q.DebugWriter`) or `q.WithAssemblyDebugWriter(w)`. Per-recipe trace lines emitted to the writer.

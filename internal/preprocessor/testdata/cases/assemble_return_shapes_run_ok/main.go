@@ -6,6 +6,10 @@
 //   NewX() (X, err)  — value type with error
 //   NewX() (*X, err) — pointer with error
 //   NewX() (Ifc, err)— interface with error
+//
+// Distinct named-type wrappers brand each recipe so the provider
+// map gets one slot per shape — no q.Tagged needed; plain Go
+// embedding suffices.
 package main
 
 import (
@@ -19,39 +23,39 @@ type ifcImpl struct{ name string }
 
 func (i ifcImpl) Tag() string { return i.name }
 
-type _val struct{}
-type _ptr struct{}
-type _ifc struct{}
-type _vale struct{}
-type _ptre struct{}
-type _ifce struct{}
+// One named-type wrapper per recipe shape. struct{ ... } embedding
+// gives each its own provider key without affecting the underlying
+// type's behaviour.
+type Val struct{ v int }
+type Ptr struct{ v *int }
+type IfcV struct{ Ifc }
+type ValE struct{ v int }
+type PtrE struct{ v *int }
+type IfcVE struct{ Ifc }
 
-type Val   = q.Tagged[int, _val]
-type Ptr   = q.Tagged[*int, _ptr]
-type IfcV  = q.Tagged[Ifc, _ifc]
-type ValE  = q.Tagged[int, _vale]
-type PtrE  = q.Tagged[*int, _ptre]
-type IfcVE = q.Tagged[Ifc, _ifce]
-
-func newVal() Val { return q.MkTag[_val](1) }
-func newPtr() Ptr { v := 2; return q.MkTag[_ptr](&v) }
-func newIfc() IfcV { return q.MkTag[_ifc](Ifc(ifcImpl{name: "plain"})) }
-
-func newValE() (ValE, error)  { return q.MkTag[_vale](10), nil }
-func newPtrE() (PtrE, error)  { v := 20; return q.MkTag[_ptre](&v), nil }
-func newIfcE() (IfcVE, error) { return q.MkTag[_ifce](Ifc(ifcImpl{name: "errored"})), nil }
+func newVal() Val   { return Val{v: 1} }
+func newPtr() Ptr   { v := 2; return Ptr{v: &v} }
+func newIfc() IfcV  { return IfcV{Ifc: ifcImpl{name: "plain"}} }
+func newValE() (ValE, error) { return ValE{v: 10}, nil }
+func newPtrE() (PtrE, error) { v := 20; return PtrE{v: &v}, nil }
+func newIfcE() (IfcVE, error) {
+	return IfcVE{Ifc: ifcImpl{name: "errored"}}, nil
+}
 
 type App struct {
-	v   int
-	p   *int
-	i   Ifc
-	ve  int
-	pe  *int
-	ie  Ifc
+	v  int
+	p  *int
+	i  Ifc
+	ve int
+	pe *int
+	ie Ifc
 }
 
 func newApp(v Val, p Ptr, i IfcV, ve ValE, pe PtrE, ie IfcVE) *App {
-	return &App{v: v.Value(), p: p.Value(), i: i.Value(), ve: ve.Value(), pe: pe.Value(), ie: ie.Value()}
+	return &App{
+		v: v.v, p: p.v, i: i.Ifc,
+		ve: ve.v, pe: pe.v, ie: ie.Ifc,
+	}
 }
 
 func main() {

@@ -1,3 +1,3 @@
 duplicate provider for *Config
 recipes #1 (newConfig), #2 (newOtherConfig) all produce it
-pick one or use q.Tagged to brand the variants
+pick one or define distinct named types per variant

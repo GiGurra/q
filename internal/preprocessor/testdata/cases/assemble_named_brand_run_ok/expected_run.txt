@@ -1,0 +1,2 @@
+primary: DB:primary
+replica: DB:replica

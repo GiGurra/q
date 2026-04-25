@@ -1,6 +1,6 @@
 // Negative fixture: two recipes provide *Config — the resolver can't
-// pick between them. The user must remove one or use q.Tagged to
-// brand the variants.
+// pick between them. The user must remove one or define distinct
+// named types per variant.
 package main
 
 import (

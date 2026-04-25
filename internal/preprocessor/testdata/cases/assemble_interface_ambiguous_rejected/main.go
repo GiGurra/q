@@ -1,6 +1,6 @@
 // Negative fixture: two concrete recipes both implement the interface
 // the consumer needs. The resolver must reject the call so the user
-// disambiguates (drop one or use q.Tagged).
+// disambiguates (drop one or define distinct named types per variant).
 package main
 
 import (

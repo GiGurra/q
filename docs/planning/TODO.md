@@ -73,7 +73,7 @@ The persistent backlog for `q`. A cold-state reader can pick up here without re-
 
   **Open design questions.**
 
-  - **Lookup key.** typeKey alone (simplest, but two recipes producing the same type silently share) vs `(typeKey, taggedBrand)` from `q.Tagged` (precise, requires the brand to flow through the cache key).
+  - **Lookup key.** typeKey alone (simplest, but two recipes producing the same type silently share) is fine for most cases since the branded-variant pattern (`type PrimaryDB struct{ *DB }`) already gives each variant its own typeKey. If finer-grained scoping is needed later, the cache could key on `(typeKey, callSite)` to localise sharing.
   - **Phase 3 collision.** A cached `*DB` carries a `func()` cleanup. Cleanup must fire ONCE, tied to ctx cancellation — not per-Assemble-call. Either the cache owns the cleanup (registered via `context.AfterFunc(ctx, cleanup)`) or resource recipes are excluded from caching and rebuilt every time.
   - **Errors.** Re-attempt on each call, or cache the error? Default: no cache on error so transient failures don't get pinned.
   - **Recipe-identity divergence.** If two `q.Assemble` call sites use different recipe functions but request the same `*Config` type, the second call gets the first's `*Config`. Spec it as "ctx is the cache scope; you own its membership" rather than trying to be clever.

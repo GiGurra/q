@@ -647,8 +647,6 @@ var qRuntimeHelpers = map[string]bool{
 	"WithPar":          true,
 	"WithParUnbounded": true,
 	"GetPar":           true,
-	"MkTag":            true,
-	"UnTag":            true,
 }
 
 // scanFile walks one parsed source file and returns the list of

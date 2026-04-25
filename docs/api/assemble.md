@@ -153,27 +153,36 @@ ctx := q.WithAssemblyDebug(context.Background())
 server := q.Unwrap(q.Assemble[*Server](ctx, newConfig, newDB, newServer))
 ```
 
-### Tagged services — two databases, no special code
+### Branded variants — two databases, no special code
 
-`q.Tagged[U, T]` brands two values of the same underlying type as distinct types. Since the provider map keys on the full branded type, two providers of `*DB` tagged differently are treated as separate dep slots — the "two databases" pattern with zero assembler-side support.
+When you need two providers of the same underlying type — the classic primary / replica DB pattern — define a distinct named type per variant. The provider map keys on the full Go-named type, so each variant gets its own dep slot:
 
 ```go
-type _primary struct{}
-type _replica struct{}
-type PrimaryDB = q.Tagged[*DB, _primary]
-type ReplicaDB = q.Tagged[*DB, _replica]
+type DB struct{ name string }
+func (d *DB) Query() string { return "Q@" + d.name }
 
-func newPrimary() PrimaryDB { return q.MkTag[_primary](&DB{name: "primary"}) }
-func newReplica() ReplicaDB { return q.MkTag[_replica](&DB{name: "replica"}) }
+// One line per branded variant. *DB methods promote via embedding,
+// so the consumer can call p.Query() / r.Query() naturally — no
+// .Value() / unwrap step.
+type PrimaryDB struct{ *DB }
+type ReplicaDB struct{ *DB }
 
-func newServer(p PrimaryDB, r ReplicaDB) *Server { ... }
+func newPrimary() PrimaryDB { return PrimaryDB{&DB{name: "primary"}} }
+func newReplica() ReplicaDB { return ReplicaDB{&DB{name: "replica"}} }
+
+func newServer(p PrimaryDB, r ReplicaDB) *Server {
+    // p.Query() / r.Query() work directly — methods of *DB promote.
+    return &Server{primary: p.Query(), replica: r.Query()}
+}
 
 s := q.Unwrap(q.Assemble[*Server](newPrimary, newReplica, newServer))
 ```
 
+This is plain Go — no q-specific type machinery involved. The pattern works because `PrimaryDB` and `ReplicaDB` are *separately-declared* named types (even though both wrap `*DB`), which gives each its own canonical type-key in the resolver's provider map. The variant *names* carry the routing information; method/field access flows through naturally via struct embedding.
+
 ### Interface inputs satisfied by concrete providers
 
-A recipe can declare an interface input — the resolver matches it against any provider whose output type satisfies the interface (`types.AssignableTo` under the hood). Exact-type matches always win first; the assignability scan only kicks in when no exact provider exists, so tagged services keep their precise routing.
+A recipe can declare an interface input — the resolver matches it against any provider whose output type satisfies the interface (`types.AssignableTo` under the hood). Exact-type matches always win first; the assignability scan only kicks in when no exact provider exists, so branded variants keep their precise routing.
 
 ```go
 type Greeter interface{ Greet() string }
@@ -300,10 +309,10 @@ _, _ = q.Assemble[*Config](newConfig, newOtherConfig)
 ```
 ./main.go:16:9: q: q.Assemble[*Config] cannot resolve the recipe graph:
   - duplicate provider for *Config — recipes #1 (newConfig), #2 (newOtherConfig) all
-    produce it; pick one or use q.Tagged to brand the variants
+    produce it; pick one or define distinct named types per variant
 ```
 
-The fix is either dropping one or using `q.Tagged` to brand them as distinct dep slots.
+The fix is either dropping one or defining distinct named-type wrappers (e.g. `type PrimaryConfig struct{ *Config }`) so each variant lives in its own dep slot. See [Branded variants](#branded-variants-two-databases-no-special-code).
 
 ### Interface ambiguity
 
@@ -320,7 +329,7 @@ _, _ = q.Assemble[*App](newEN, newES, newApp)
 ./main.go:N:M: q: q.Assemble[*App] cannot resolve the recipe graph:
   - interface input Greeter (needed by #3 (newApp)) is satisfied by multiple
     providers: #1 (newEN) → *EnglishGreeter, #2 (newES) → *SpanishGreeter —
-    narrow the recipe set or use q.Tagged to disambiguate
+    narrow the recipe set or define distinct named types per variant
 ```
 
 ### Dependency cycle
@@ -419,7 +428,7 @@ The ctx is passed as an inline-value recipe — same as any other context.Contex
 
 - **Strict by default.** Unused recipes fail the build (except `context.Context` — exempt because it's expected to ride into the assembly for assembly-config). The discipline is intentional — recipe sets that drift over time stay correct only if every member is needed.
 - **No variadic recipes.** A recipe like `func newServer(plugins ...Plugin) *Server` can't be auto-resolved (the dep set isn't fixed). Wrap it in a fixed-arity adapter instead.
-- **Type identity is `go/types` identity.** Two named types with the same underlying type are still distinct providers — that's how `q.Tagged` works. If you have unintentional collisions (e.g. two packages with `type Config struct{...}`), use type aliases or named wrappers to disambiguate.
+- **Type identity is `go/types` identity.** Two named types with the same underlying type are still distinct providers — that's how the branded-variants pattern (`type PrimaryDB struct{ *DB }`) works. If you have unintentional collisions (e.g. two packages with `type Config struct{...}`), use named wrappers to disambiguate.
 - **Recipes can't be `q.*` calls** in the function-reference position. Inline-value recipes can wrap one (`q.Try(loadCfg())`) since the value-position rewrite triggers the standard q.* hoist.
 
 ## Multi-provider aggregation: `q.AssembleAll`
@@ -505,7 +514,7 @@ app, err := (func() (App, error) {
 
 - Every exported field of T needs a recipe whose output type matches (exact-type or interface assignability). Missing a field → per-field diagnostic naming the field.
 - Unexported fields work in the same package (the rewritten code lives in T's package, so it can set them). Cross-package unexported fields are rejected.
-- Tagged fields (`Server q.Tagged[*Server, _primary]`) work the same way phase 1's tagged services do — the field type IS the brand.
+- Branded fields (`Server PrimaryDB` where `type PrimaryDB struct{ *DB }`) work the same way the branded-variants pattern does — the field type IS the brand.
 
 **Why a separate entry point from `q.Assemble`?**
 
@@ -535,6 +544,5 @@ See [`docs/planning/assemble.md`](https://github.com/GiGurra/q/blob/main/docs/pl
 ## See also
 
 - [`q.Try` / `q.TryE`](try.md) — the bubble vocabulary `q.Assemble` composes with.
-- [`q.Tagged`](tagged.md) — phantom-type branding used for the "two databases" pattern.
 - [`q.Open`](open.md) — resource lifetime; phase 3 will integrate.
 - [ZIO `ZLayer`](https://zio.dev/reference/di/) — the inspiration. The conceptual model maps closely; the operator-heavy composition (`++`, `>>>`, `>+>`) does not.

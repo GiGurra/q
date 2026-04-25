@@ -1,4 +1,4 @@
 interface input Greeter (needed by #3 (newApp)) is satisfied by multiple providers
 #1 (newEN) → *EnglishGreeter
 #2 (newES) → *SpanishGreeter
-narrow the recipe set or use q.Tagged to disambiguate
+narrow the recipe set or define distinct named types per variant

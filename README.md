@@ -360,24 +360,6 @@ q.Check(q.ParEachErr(ctx, files, upload))
 
 `q.ParMap` / `q.ParMapErr`, `q.ParFlatMap` / `q.ParFlatMapErr`, `q.ParFilter` / `q.ParFilterErr`, `q.ParForEach` / `q.ParForEachErr`, `q.ParGroupBy` / `q.ParGroupByErr`, `q.ParExists` / `q.ParExistsErr`, `q.ParForAll` / `q.ParForAllErr`. The worker count rides on `context.Context` via `q.WithPar(ctx, n)` — set once at the request top, every nested ParMap respects it. ctx cancellation triggers `ctx.Err()` bubble in `…Err` variants; bare variants stop dispatching and return partial results. First error wins. Inspiration: [samber/lo PR #858](https://github.com/samber/lo/pull/858) and [github.com/GiGurra/party](https://github.com/GiGurra/party).
 
-### Phantom types
-
-```go
-type _userID  struct{}
-type _orderID struct{}
-type UserID  = q.Tagged[int, _userID]
-type OrderID = q.Tagged[int, _orderID]
-
-uid := q.MkTag[_userID](42)
-oid := q.MkTag[_orderID](42)
-
-// uid and oid are distinct types — Go won't implicitly convert
-// between them, even though both wrap an int.
-n := q.UnTag(uid)  // 42
-```
-
-`q.Tagged[U, T]` is a generic struct branded by a phantom tag type; same underlying `U`, distinct Go types per `T`. Pure runtime — no preprocessor work. The unexported field forces construction through `q.MkTag`, which is what makes the brand load-bearing.
-
 ### Compile-time reflection
 
 ```go
