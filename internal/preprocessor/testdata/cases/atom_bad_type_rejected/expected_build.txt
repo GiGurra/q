@@ -1,0 +1,3 @@
+# Both call sites must be rejected with directed diagnostics.
+T must be a named type derived from q.Atom
+T's underlying type must be string

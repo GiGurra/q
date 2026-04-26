@@ -1,0 +1,9 @@
+p: Pending
+d: Done
+f: Failed
+p == q.A[Pending](): true
+string(p): Pending
+matchStatus: still pending
+classify(Pending): p-class
+classify(Done): d-class
+map lookup: 1

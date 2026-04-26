@@ -39,6 +39,7 @@ nav:
   - Home: index.md
   - Getting Started: getting-started.md
   - API:
+    - q.A / q.AtomOf (typed-string atoms): api/atom.md
     - q.At (nested-nil safe traversal): api/at.md
     - q.AtCompileTime / AtCompileTimeCode (compile-time evaluation + macros): api/atcompiletime.md
     - q.Assemble (auto-derived DI): api/assemble.md

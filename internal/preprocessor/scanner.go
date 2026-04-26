@@ -133,6 +133,8 @@ const (
 	familyAt             // q.At[T](chain).OrElse(alt)*.Or(fallback) | .OrDefault() — nested-nil safe traversal
 	familyLazy           // q.Lazy[T](v) — wrap arg expression in a thunk closure for sync.Once-backed deferred eval
 	familyLazyE          // q.LazyE[T](call()) — same as q.Lazy but the thunk returns (T, error)
+	familyAtom           // q.A[T]() — typed-string atom with value = bare name of T
+	familyAtomOf         // q.AtomOf[T]() — q.Atom("name-of-T") for switch-case ergonomics
 )
 
 // form is the syntactic position of a recognised q.* call:
@@ -692,6 +694,7 @@ var qRuntimeHelpers = map[string]bool{
 	"UnwrapE":                 true,
 	"LazyFromThunk":           true,
 	"LazyEFromThunk":          true,
+	"Atom":                    true,
 	"WithAssemblyDebug":       true,
 	"WithAssemblyDebugWriter": true,
 	"AssemblyDebugWriter":     true,
@@ -1085,6 +1088,15 @@ func walkChildBlocks(fset *token.FileSet, path string, stmt ast.Stmt, alias stri
 	case *ast.SelectStmt:
 		walkBlock(fset, path, s.Body, alias, fnType, shapes, diags, skip)
 	case *ast.CaseClause:
+		// Case-position expressions get the same in-place treatment as
+		// switch-tag expressions: scanContainerExpr collects every q.*
+		// call inside s.List and synthesises per-call shapes the
+		// rewriter substitutes in place. Bubble-shape calls are
+		// rejected with a directed diagnostic since case headers can't
+		// host the multi-line bind+check.
+		if len(s.List) > 0 {
+			scanContainerExpr(fset, path, s, s.List, alias, fnType, shapes, diags, "case")
+		}
 		// case clause Body is a []ast.Stmt without its own BlockStmt
 		// wrapper, so we walk it inline.
 		for _, child := range s.Body {
@@ -1819,6 +1831,30 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 		return qSubCall{
 			Family:    familyLazyE,
 			LazyExpr:  call.Args[0],
+			OuterCall: expr,
+		}, true, nil
+	}
+	// q.A[T]() — typed-string atom whose value is the bare name of T.
+	// The preprocessor rewrites the call to T("<bare T>"), folding to
+	// a typed-string constant at compile time.
+	if typeArg, ok := isIndexedSelector(call.Fun, alias, "A"); ok {
+		if len(call.Args) != 0 {
+			return qSubCall{}, false, fmt.Errorf("q.A[T] takes no arguments; got %d", len(call.Args))
+		}
+		return qSubCall{
+			Family:    familyAtom,
+			AsType:    typeArg,
+			OuterCall: expr,
+		}, true, nil
+	}
+	// q.AtomOf[T]() — q.Atom("<bare T>"), case-friendly sibling of q.A.
+	if typeArg, ok := isIndexedSelector(call.Fun, alias, "AtomOf"); ok {
+		if len(call.Args) != 0 {
+			return qSubCall{}, false, fmt.Errorf("q.AtomOf[T] takes no arguments; got %d", len(call.Args))
+		}
+		return qSubCall{
+			Family:    familyAtomOf,
+			AsType:    typeArg,
 			OuterCall: expr,
 		}, true, nil
 	}

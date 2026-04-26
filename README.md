@@ -320,6 +320,27 @@ if userRequested {
 
 `q.Lazy(<expr>)` reads as if the expression were eager but the rewriter wraps it in a thunk closure. The first `.Value()` call evaluates the thunk under `sync.Once`; later calls return the cached result. Concurrency-safe by construction. `q.LazyE(<call>)` is the `(T, error)`-shaped sibling — pair `.Value()` with `q.Try` at the consumer. See [`docs/api/lazy.md`](docs/api/lazy.md).
 
+### Typed-string atoms (Erlang-flavoured)
+
+```go
+type Pending q.Atom              // each atom is its own type — no const decl
+type Done    q.Atom
+
+p := q.A[Pending]()              // p: Pending = "Pending" (auto-derived from T)
+
+func classify(a q.Atom) string {
+    switch a {
+    case q.AtomOf[Pending]():    // q.Atom-typed sibling for case ergonomics
+        return "p"
+    case q.AtomOf[Done]():
+        return "d"
+    }
+    return "?"
+}
+```
+
+Each atom is its own type — Go's type system protects against mixing — and the value is auto-derived from the type's bare name. No const block to maintain, no central declaration shared across files. The preprocessor rewrites every call site to a typed-string constant cast at compile time. Zero runtime cost. See [`docs/api/atom.md`](docs/api/atom.md).
+
 ### Named parameters for constructors
 
 The "options struct" pattern is Go's stand-in for named arguments — it gets you the readability win at the call site but loses the safety win, since Go can't tell "explicitly zero" from "didn't set it." `q.FnParams` / `q.ValidatedStruct` close that gap: required-by-default struct literals, with optional opt-out per field.

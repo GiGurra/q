@@ -154,6 +154,11 @@ func checkErrorSlotsWithInfo(fset *token.FileSet, pkgPath, importcfgPath string,
 					diags = append(diags, d)
 				}
 			}
+			if sc.Family == familyAtom || sc.Family == familyAtomOf {
+				if d, ok := resolveAtom(fset, sc, info); ok {
+					diags = append(diags, d)
+				}
+			}
 		}
 	}
 
