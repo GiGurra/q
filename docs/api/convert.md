@@ -163,27 +163,6 @@ dto := q.ConvertTo[UserDTO](user,
 //   }
 ```
 
-### Why `Target{}.Field`, not a string
-
-The `targetField` argument MUST be a struct-literal selector
-expression of the form `Target{}.<FieldName>` (a multi-hop
-`Target{}.<Inner>.<Field>` is also accepted — see "Nested-field
-overrides" below). `Target{}` is a valid Go composite literal that
-evaluates to the zero value at runtime, but Go's type-checker
-validates the field reference at compile time. Two consequences:
-
-- **Refactor-safe.** Rename `UserDTO.Source` → `SourceTag` and the
-  Go compiler immediately flags every `q.Set` / `q.SetFn` /
-  `q.SetFnE` site that referenced it. Strings would silently
-  stale-mismatch and surface only when the rewriter ran (or worse,
-  not at all if the misspelled name happens to match no field and
-  some other mechanism caught it).
-- **Type-safe.** The shared generic param `V` unifies the field's
-  type with the override value's type. `q.Set(UserDTO{}.ID, "x")`
-  fails to compile because `UserDTO{}.ID` is `int` and `"x"` is
-  `string` — Go's type-checker won't unify `V`. Same for `q.SetFn`'s
-  return type and `q.SetFnE`'s first result.
-
 ### Nested-field overrides
 
 Multi-hop paths target a nested field directly without forcing the
