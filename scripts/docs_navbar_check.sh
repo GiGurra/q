@@ -1,18 +1,22 @@
 #!/usr/bin/env bash
 # docs_navbar_check.sh — verify the docs navbar's API section.
 #
-# Three invariants:
+# Two invariants:
 #
 #   1. **Sorted (case-insensitive).** Entries inside the API: block
 #      must be in case-insensitive alphabetical order by label.
-#   2. **No duplicate destinations.** No two entries may point at the
-#      same .md file. Each docs page gets exactly one nav entry.
-#   3. **Completeness.** Every exported function and type in pkg/q
-#      (and pkg/q/either) must be mentioned by name in some docs page
-#      (any of docs/api/*.md or docs/typed-nil-guard.md). Names not
-#      currently covered surface as "missing".
+#   2. **Function completeness.** Every exported function in pkg/q
+#      (and pkg/q/either) must be listed in the navbar. The only
+#      collapsing allowed is `Foo` + `FooE` pairs into a single
+#      entry labelled `q.Foo / q.FooE`. Anything else gets its own
+#      entry.
 #
-# Exit status: 0 when all invariants hold, 1 otherwise.
+# Multiple navbar entries pointing at the same .md page are fine;
+# the docs pages themselves don't have to be split per-function.
+# Exported types are not required in the navbar (they're returned
+# by chain-style fluent calls; users rarely name them directly).
+#
+# Exit status: 0 when both invariants hold, 1 otherwise.
 
 set -euo pipefail
 
@@ -30,9 +34,8 @@ api_block=$(awk '
 ' mkdocs.yml)
 
 # Each navbar entry looks like `    - <label>: <path>`. Pull labels
-# and paths; preserve order.
+# in source order.
 labels=$(echo "$api_block" | sed -nE 's/^    - (.+): [^ ]+$/\1/p')
-paths=$(echo "$api_block"  | sed -nE 's/^    - .+: ([^ ]+)$/\1/p')
 
 # ---- Invariant 1: sorted (case-insensitive) ----------------------
 
@@ -43,74 +46,69 @@ if ! diff <(echo "$labels") <(echo "$sorted_labels") >/dev/null; then
     status=1
 fi
 
-# ---- Invariant 2: no duplicate destinations ----------------------
-
-dupes=$(echo "$paths" | sort | uniq -d)
-if [[ -n "$dupes" ]]; then
-    [[ $status -ne 0 ]] && echo
-    echo "Navbar has multiple entries pointing at the same docs page:"
-    while IFS= read -r p; do
-        echo "  $p:"
-        echo "$api_block" | grep -F ": $p" | sed 's/^/    /'
-    done <<< "$dupes"
-    status=1
-fi
-
-# ---- Invariant 3: completeness ------------------------------------
+# ---- Invariant 2: function completeness --------------------------
 
 # Non-test source files for each package.
 q_srcs=$(find pkg/q -maxdepth 1 -name '*.go' -not -name '*_test.go')
 either_srcs=$(find pkg/q/either -maxdepth 1 -name '*.go' -not -name '*_test.go' 2>/dev/null)
 
-# Exported funcs in pkg/q (top-level).
+# Exported funcs in pkg/q, prefixed `q.`.
 api_q_funcs=$(grep -h '^func [A-Z]' $q_srcs 2>/dev/null \
     | sed -E 's/[(\[].*//;s/^func //' \
     | sort -u \
     | grep -vE '^panicUnrewritten$' \
     | sed 's/^/q./')
 
-# Exported types in pkg/q.
-api_q_types=$(grep -hE '^type [A-Z]' $q_srcs 2>/dev/null \
-    | awk '{print $2}' | sed 's/\[.*//' | sort -u | sed 's/^/q./')
-
-# Exported funcs + types in pkg/q/either.
+# Exported funcs in pkg/q/either, prefixed `either.`.
 api_either_funcs=$(grep -h '^func [A-Z]' $either_srcs 2>/dev/null \
     | sed -E 's/[(\[].*//;s/^func //' \
     | sort -u \
     | sed 's/^/either./')
-api_either_types=$(grep -hE '^type [A-Z]' $either_srcs 2>/dev/null \
-    | awk '{print $2}' | sed 's/\[.*//' | sort -u | sed 's/^/either./')
 
-api=$(printf "%s\n%s\n%s\n%s\n" \
-    "$api_q_funcs" "$api_q_types" "$api_either_funcs" "$api_either_types" \
+api_funcs=$(printf "%s\n%s\n" "$api_q_funcs" "$api_either_funcs" \
     | sort -u | grep -v '^$')
 
-# A symbol counts as "mentioned" if any docs page references it as
-# either the qualified form (`q.FlatMap`) OR the bare name in a
-# word-bounded context. Code blocks inside pkg/q's own examples
-# use the bare form (`func FlatMap[…]`); narrative uses the
-# qualified form. Two-char-and-shorter bare names (`A`, `F`,
-# `At`, `Ok`) require the qualified form to avoid spurious matches.
-docs_files=$(find docs -maxdepth 2 -name '*.md' \
-    -not -path 'docs/planning/*' -not -name 'index.md')
+# Compute expected entry labels: collapse `Foo` + `FooE` pairs into
+# one `Foo / FooE` entry; emit everything else standalone. The
+# collapse only triggers when both halves exist as exported funcs
+# in the same package.
+expected=$(awk '
+    { funcs[$0] = 1 }
+    END {
+        for (f in funcs) {
+            if (f ~ /E$/) {
+                bare = substr(f, 1, length(f) - 1)
+                if (bare in funcs) {
+                    label[bare] = bare " / " f
+                    skip[f] = 1
+                }
+            }
+        }
+        for (f in funcs) {
+            if (skip[f]) continue
+            if (!(f in label)) label[f] = f
+        }
+        for (k in label) print label[k]
+    }
+' <<< "$api_funcs" | sort -f)
 
-missing=""
-for sym in $api; do
-    bare="${sym#*.}"
-    qualified_pat="${sym//./\\.}"
-    if grep -hEq "$qualified_pat" $docs_files 2>/dev/null; then
-        continue
-    fi
-    if (( ${#bare} >= 3 )) && grep -hwq "$bare" $docs_files 2>/dev/null; then
-        continue
-    fi
-    missing+="$sym"$'\n'
-done
+actual=$(echo "$labels" | sort -f)
+
+# Compare.
+missing=$(comm -23 <(echo "$expected") <(echo "$actual"))
+stale=$(comm -13 <(echo "$expected") <(echo "$actual"))
 
 if [[ -n "$missing" ]]; then
     [[ $status -ne 0 ]] && echo
-    echo "Exported symbols not mentioned in any docs page:"
-    printf "%s" "$missing" | sed 's/^/  /'
+    echo "Missing from navbar (exported funcs without an entry):"
+    echo "$missing" | sed 's/^/  /'
+    status=1
+fi
+
+if [[ -n "$stale" ]]; then
+    [[ -n "$missing" ]] && echo
+    echo "Stale in navbar (entries that don't match any exported func or Foo/FooE pair):"
+    echo "$stale" | sed 's/^/  /'
     status=1
 fi
 
@@ -118,8 +116,8 @@ fi
 
 if [[ $status -eq 0 ]]; then
     n_entries=$(echo "$labels" | wc -l | tr -d ' ')
-    n_symbols=$(echo "$api" | wc -l | tr -d ' ')
-    echo "navbar OK — $n_entries entries, $n_symbols exported symbols all mentioned"
+    n_funcs=$(echo "$api_funcs" | wc -l | tr -d ' ')
+    echo "navbar OK — $n_entries entries cover $n_funcs exported funcs"
 fi
 
 exit $status

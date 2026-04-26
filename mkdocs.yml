@@ -35,60 +35,201 @@ markdown_extensions:
   - toc:
       permalink: true
 
-# nav: one entry per docs page, sorted case-insensitively by label.
-# `scripts/docs_navbar_check.sh` enforces all three invariants:
-#   - alphabetical order (case-insensitive)
-#   - no two entries point at the same .md file (dedup)
-#   - every exported `pkg/q` (+ subpackage) func / type is mentioned
-#     by name in some docs page (completeness)
+# nav: every exported pkg/q (and pkg/q/either) function gets
+# its own navbar entry. The only collapsing is `Foo` + `FooE`
+# pairs into a single `Foo / FooE` entry. Multiple entries
+# pointing at the same docs page is fine — `q.Try / q.TryE`,
+# `q.Map`, `q.Filter`, etc. all link to their family doc.
+# scripts/docs_navbar_check.sh enforces both invariants.
 nav:
   - Home: index.md
   - Getting Started: getting-started.md
   - API:
-    - either.Either: api/either.md
-    - q.As: api/as.md
+    - either.AsEither: api/either.md
+    - either.FlatMap: api/either.md
+    - either.Fold: api/either.md
+    - either.GetOrElse: api/either.md
+    - either.Left: api/either.md
+    - either.Map: api/either.md
+    - either.MapLeft: api/either.md
+    - either.Right: api/either.md
+    - either.Swap: api/either.md
+    - q.A: api/atom.md
+    - q.AllFields: api/reflection.md
+    - q.As / q.AsE: api/as.md
+    - q.AsOneOf: api/oneof.md
     - q.Assemble: api/assemble.md
+    - q.AssembleAll: api/assemble.md
+    - q.AssembleStruct: api/assemble.md
+    - q.AssemblyDebugWriter: api/assemble.md
     - q.Async: api/async.md
     - q.At: api/at.md
     - q.AtCompileTime: api/atcompiletime.md
-    - q.Atom: api/atom.md
-    - q.AwaitAll / q.AwaitAny: api/await_multi.md
-    - q.AwaitCtx: api/await_ctx.md
-    - q.Check: api/check.md
-    - q.CheckCtx: api/checkctx.md
+    - q.AtCompileTimeCode: api/atcompiletime.md
+    - q.AtomOf: api/atom.md
+    - q.Await / q.AwaitE: api/async.md
+    - q.AwaitAll / q.AwaitAllE: api/await_multi.md
+    - q.AwaitAllCtx / q.AwaitAllCtxE: api/await_multi.md
+    - q.AwaitAllRaw: api/await_multi.md
+    - q.AwaitAllRawCtx: api/await_multi.md
+    - q.AwaitAny / q.AwaitAnyE: api/await_multi.md
+    - q.AwaitAnyCtx / q.AwaitAnyCtxE: api/await_multi.md
+    - q.AwaitAnyRaw: api/await_multi.md
+    - q.AwaitAnyRawCtx: api/await_multi.md
+    - q.AwaitCtx / q.AwaitCtxE: api/await_ctx.md
+    - q.AwaitRaw: api/async.md
+    - q.AwaitRawCtx: api/await_ctx.md
+    - q.BinaryCodec: api/atcompiletime.md
+    - q.Camel: api/string_case.md
+    - q.Case: api/match.md
+    - q.Check / q.CheckE: api/check.md
+    - q.Chunk: api/data.md
+    - q.Const: api/try.md
     - q.Coro: api/coro.md
+    - q.Count: api/data.md
+    - q.Deadline: api/timeout.md
     - q.DebugPrintln: api/debug.md
+    - q.DebugPrintlnAt: api/debug.md
+    - q.DebugSlogAttr: api/debug.md
+    - q.Default: api/match.md
+    - q.Distinct: api/data.md
+    - q.DistinctBy: api/data.md
+    - q.Drain: api/channel_multi.md
+    - q.DrainAll: api/channel_multi.md
+    - q.DrainAllCtx / q.DrainAllCtxE: api/channel_multi.md
+    - q.DrainAllRawCtx: api/channel_multi.md
+    - q.DrainCtx / q.DrainCtxE: api/recv_ctx.md
+    - q.DrainRawCtx: api/recv_ctx.md
+    - q.Drop: api/data.md
+    - q.EnumName: api/enums.md
+    - q.EnumNames: api/enums.md
+    - q.EnumOrdinal: api/enums.md
+    - q.EnumParse: api/enums.md
+    - q.EnumValid: api/enums.md
     - q.EnumValues: api/enums.md
     - q.Exhaustive: api/exhaustive.md
-    - q.F / q.Ferr / q.Fln: api/format.md
-    - q.Fields / q.TypeName / q.Tag: api/reflection.md
-    - q.FnParams / q.ValidatedStruct: api/fnparams.md
-    - q.Generator / q.Yield: api/generator.md
-    - q.GenStringer / q.GenEnumJSON: api/gen.md
+    - q.Exists: api/data.md
+    - q.ExistsErr: api/data.md
+    - q.Expr: api/slog.md
+    - q.F: api/format.md
+    - q.Ferr: api/format.md
+    - q.Fields: api/reflection.md
+    - q.File: api/slog.md
+    - q.FileLine: api/slog.md
+    - q.Filter: api/data.md
+    - q.FilterErr: api/data.md
+    - q.Find: api/data.md
+    - q.FlatMap: api/data.md
+    - q.FlatMapErr: api/data.md
+    - q.Fln: api/format.md
+    - q.Fold: api/data.md
+    - q.FoldErr: api/data.md
+    - q.ForAll: api/data.md
+    - q.ForAllErr: api/data.md
+    - q.ForEach: api/data.md
+    - q.ForEachErr: api/data.md
+    - q.GenEnumJSONLax: api/gen.md
+    - q.GenEnumJSONStrict: api/gen.md
+    - q.Generator: api/generator.md
+    - q.GenStringer: api/gen.md
+    - q.GetPar: api/par.md
+    - q.GobCodec: api/atcompiletime.md
     - q.GoroutineID: api/goroutine_id.md
-    - q.Lazy: api/lazy.md
+    - q.GroupBy: api/data.md
+    - q.InstallSlog: api/slog.md
+    - q.InstallSlogJSON: api/slog.md
+    - q.InstallSlogText: api/slog.md
+    - q.JSONCodec: api/atcompiletime.md
+    - q.Kebab: api/string_case.md
+    - q.Keys: api/data.md
+    - q.Lazy / q.LazyE: api/lazy.md
+    - q.LazyEFromThunk: api/lazy.md
+    - q.LazyFromThunk: api/lazy.md
+    - q.Line: api/slog.md
     - q.Lock: api/lock.md
-    - q.Map / q.Filter / q.Fold: api/data.md
+    - q.LogCloseErr: api/assemble.md
+    - q.Lower: api/string_case.md
+    - q.Map: api/data.md
+    - q.MapEntries: api/data.md
+    - q.MapEntriesErr: api/data.md
+    - q.MapErr: api/data.md
+    - q.MapKeys: api/data.md
+    - q.MapKeysErr: api/data.md
+    - q.MapValues: api/data.md
+    - q.MapValuesErr: api/data.md
     - q.Match: api/match.md
-    - q.NotNil: api/notnil.md
-    - q.Ok: api/ok.md
-    - q.OneOfN / q.AsOneOf: api/oneof.md
-    - q.Open: api/open.md
-    - q.ParMap / q.WithPar: api/par.md
-    - q.Recover: api/recover.md
-    - q.Recv: api/recv.md
-    - q.RecvAny / q.Drain: api/channel_multi.md
-    - q.RecvCtx: api/recv_ctx.md
+    - q.Max: api/data.md
+    - q.MaxBy: api/data.md
+    - q.Min: api/data.md
+    - q.MinBy: api/data.md
+    - q.NamedSQL: api/sql.md
+    - q.NewScope: api/scope.md
+    - q.NotNil / q.NotNilE: api/notnil.md
+    - q.Ok / q.OkE: api/ok.md
+    - q.OnType: api/match.md
+    - q.Open / q.OpenE: api/open.md
+    - q.ParExists: api/par.md
+    - q.ParExistsErr: api/par.md
+    - q.ParFilter: api/par.md
+    - q.ParFilterErr: api/par.md
+    - q.ParFlatMap: api/par.md
+    - q.ParFlatMapErr: api/par.md
+    - q.ParForAll: api/par.md
+    - q.ParForAllErr: api/par.md
+    - q.ParForEach: api/par.md
+    - q.ParForEachErr: api/par.md
+    - q.ParGroupBy: api/par.md
+    - q.ParGroupByErr: api/par.md
+    - q.ParMap: api/par.md
+    - q.ParMapErr: api/par.md
+    - q.Partition: api/data.md
+    - q.Pascal: api/string_case.md
+    - q.PermitNil: api/assemble.md
+    - q.PgSQL: api/sql.md
+    - q.Recover / q.RecoverE: api/recover.md
+    - q.Recv / q.RecvE: api/recv.md
+    - q.RecvAny / q.RecvAnyE: api/channel_multi.md
+    - q.RecvAnyCtx / q.RecvAnyCtxE: api/channel_multi.md
+    - q.RecvAnyRaw: api/channel_multi.md
+    - q.RecvAnyRawCtx: api/channel_multi.md
+    - q.RecvCtx / q.RecvCtxE: api/recv_ctx.md
+    - q.RecvRawCtx: api/recv_ctx.md
+    - q.Reduce: api/data.md
     - q.Require: api/require.md
-    - q.Scope: api/scope.md
     - q.Sealed: api/sealed.md
-    - q.SlogAttr / q.SlogCtx: api/slog.md
-    - q.Snake / q.Camel / q.Pascal: api/string_case.md
-    - q.SQL / q.PgSQL / q.NamedSQL: api/sql.md
+    - q.SlogAttr: api/slog.md
+    - q.SlogContextHandler: api/slog.md
+    - q.SlogCtx: api/slog.md
+    - q.SlogFile: api/slog.md
+    - q.SlogFileLine: api/slog.md
+    - q.SlogLine: api/slog.md
+    - q.Snake: api/string_case.md
+    - q.Sort: api/data.md
+    - q.SortBy: api/data.md
+    - q.SortFunc: api/data.md
+    - q.SQL: api/sql.md
+    - q.Sum: api/data.md
+    - q.Tag: api/reflection.md
+    - q.Take: api/data.md
     - q.Tern: api/tern.md
-    - q.Timeout / q.Deadline: api/timeout.md
-    - q.TODO / q.Unreachable: api/todo.md
-    - q.Trace: api/trace.md
-    - q.Try / q.TryE / q.Unwrap: api/try.md
+    - q.Timeout: api/timeout.md
+    - q.Title: api/string_case.md
+    - q.TODO: api/todo.md
+    - q.ToErr: typed-nil-guard.md
+    - q.Trace / q.TraceE: api/trace.md
+    - q.Try / q.TryE: api/try.md
+    - q.TypeName: api/reflection.md
+    - q.Unreachable: api/todo.md
+    - q.Unwrap / q.UnwrapE: api/try.md
+    - q.Unzip: api/data.md
+    - q.Upper: api/string_case.md
+    - q.Values: api/data.md
+    - q.WithAssemblyDebug: api/assemble.md
+    - q.WithAssemblyDebugWriter: api/assemble.md
+    - q.WithPar: api/par.md
+    - q.WithParUnbounded: api/par.md
+    - q.Yield: api/generator.md
+    - q.Zip: api/data.md
+    - q.ZipMap: api/data.md
   - Why builds fail on `*MyErr` returns: typed-nil-guard.md
   - Design: design.md

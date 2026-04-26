@@ -8,8 +8,6 @@ This is the authoritative design document for `q`, the question-mark-operator pr
 2. **Zero runtime overhead.** The generated code must be the same as what a careful programmer would write by hand. No closures, no panic/recover, no reflection.
 3. **IDE-native.** `gopls`, `go vet`, editors, and language servers must see ordinary Go at all times. No special syntax, no shadow files, no IDE plugins.
 4. **Loud failure for misuse.** Forgetting the preprocessor must fail the *build*, not silently produce a working-looking binary that drops errors. Same for any rewriter bug that leaves a `q.*` call site untransformed.
-5. **Narrow scope.** `q` is the Rust-`?` analogue, nothing more. It is not a monad library, not a general for-comprehension. The handful of helpers below is the entire surface; future expansions (e.g. comma-ok, channel receive) are deferred decisions, not pre-built parking lots.
-
 ## 2. The user-facing surface
 
 ### 2.1 Bare bubble
