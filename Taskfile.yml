@@ -35,3 +35,8 @@ tasks:
     desc: Remove build artifacts
     cmds:
       - go clean ./...
+
+  docs:check:
+    desc: Diff the docs navbar's API list against the actual exported surface in pkg/q (and subpackages); reports missing or stale entries.
+    cmds:
+      - ./scripts/docs_navbar_check.sh
