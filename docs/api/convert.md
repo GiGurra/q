@@ -158,9 +158,9 @@ q.Convert[UserDTO](loadUser())
   Option[T]`, etc. require either a runtime helper or an explicit
   override today. v2 stays strict on `types.AssignableTo` so
   surprises are loud.
-- **Field renames.** `q.Rename("FooID", "ID")` is a clean follow-up
-  if needed; for now use `q.SetFn("ID", func(s Source) int { return
-  s.FooID })`.
+- **Field renames.** `q.Rename(Target{}.ID, "FooID")` is a clean
+  follow-up if needed; for now use `q.SetFn(Target{}.ID, func(s
+  Source) int { return s.FooID })`.
 - **Slice / map / iter conversions.** Recursive auto-derivation
   works on direct struct fields only. For `[]Foo → []Bar` where
   `Foo → Bar` is derivable, write the loop yourself or wait for the

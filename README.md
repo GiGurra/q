@@ -494,15 +494,15 @@ type User    struct { ID int; First, Last, Email string; Internal bool }
 type UserDTO struct { ID int; Email, FullName, Source string }
 
 dto := q.Convert[UserDTO](user,
-    q.Set("Source", "v1"),
-    q.SetFn("Email",    func(u User) string { return strings.ToLower(u.Email) }),
-    q.SetFn("FullName", func(u User) string { return u.First + " " + u.Last }),
+    q.Set(UserDTO{}.Source, "v1"),
+    q.SetFn(UserDTO{}.Email,    func(u User) string { return strings.ToLower(u.Email) }),
+    q.SetFn(UserDTO{}.FullName, func(u User) string { return u.First + " " + u.Last }),
 )
 // → UserDTO{ID: user.ID, Email: ..., FullName: ..., Source: "v1"}
 // `User.Internal` is silently dropped (target-driven).
 ```
 
-Resolution per target field: `q.Set` / `q.SetFn` override → same-named source field with assignable type → recursive nested derivation when both fields are structs → build-time diagnostic. No runtime reflection; the rewriter emits a plain struct literal. See [`docs/api/convert.md`](docs/api/convert.md).
+The override field reference is a typed Go selector expression (`UserDTO{}.Field`), not a string — Go's type-checker validates the field exists and the value/fn return type matches. Rename a target field and every override site fails to compile. Multi-hop paths (`UserDTO{}.Address.City`) target nested fields directly. Resolution per target field: override → same-named source field with assignable type → recursive nested derivation when both fields are structs → build-time diagnostic. No runtime reflection; the rewriter emits a plain struct literal. See [`docs/api/convert.md`](docs/api/convert.md).
 
 ### Functional data ops
 
