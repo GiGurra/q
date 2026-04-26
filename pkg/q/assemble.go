@@ -44,7 +44,24 @@ package q
 import (
 	"context"
 	"io"
+	"log/slog"
 )
+
+// LogCloseErr is the auto-cleanup error sink used by q.Assemble's
+// auto-detected resource cleanups when T's Close() returns an
+// error. Surfacing failed teardown via slog.Error means a flaky
+// shutdown is loud rather than silent.
+//
+// Users with a custom logging story can replace q.LogCloseErr by
+// shadowing it in their own package — but the more idiomatic
+// approach is to write an explicit `(T, func(), error)` recipe that
+// handles the close in whatever way fits.
+func LogCloseErr(err error, recipe string) {
+	if err == nil {
+		return
+	}
+	slog.Error("q: assemble auto-cleanup Close failed", "recipe", recipe, "err", err)
+}
 
 // AssemblyResult is the chain handle returned by Assemble /
 // AssembleAll / AssembleStruct. Pick a chain terminator to choose

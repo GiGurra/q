@@ -3,7 +3,7 @@
 You list the recipes; the preprocessor reads each recipe's signature, builds a dependency graph keyed by output type, topo-sorts it, and emits the inlined construction at compile time. No `wire.go` to keep in sync; no runtime container; no `var _ = container.Build()` to forget. The whole graph collapses into one expression at the call site.
 
 ```go
-server, err := q.Assemble[*Server](newConfig, newDB, newServer)
+server, err := q.Assemble[*Server](newConfig, newDB, newServer).Release()
 ```
 
 ## Background — why this exists

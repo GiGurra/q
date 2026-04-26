@@ -164,28 +164,35 @@ func resolveAssemble(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPat
 			results := sig.Results()
 			switch results.Len() {
 			case 0:
-				addProblem("recipe #%d (%s) returns no values — recipes must return T, (T, error), or (T, func(), error)",
+				addProblem("recipe #%d (%s) returns no values — recipes must return T, (T, error), (T, func()), or (T, func(), error)",
 					i+1, snippet(fset, rExpr))
 				recipes = append(recipes, ri)
 				continue
 			case 1:
 				// Pure recipe — fine.
 			case 2:
-				if !types.Identical(results.At(1).Type(), errType) {
-					addProblem("recipe #%d (%s) second return is %s; recipes must return T, (T, error), or (T, func(), error)",
-						i+1, snippet(fset, rExpr), typeText(results.At(1).Type()))
+				secondType := results.At(1).Type()
+				if types.Identical(secondType, errType) {
+					ri.errored = true
+				} else if isZeroArgZeroReturnFunc(secondType) {
+					// (T, func()) — non-erroring resource recipe.
+					// Useful for "always succeeds" ctors that still
+					// own a cleanup (test fixtures, in-memory stores,
+					// goroutine spawners that need a stop signal).
+					ri.isResource = true
+				} else {
+					addProblem("recipe #%d (%s) second return is %s; recipes must return T, (T, error), (T, func()), or (T, func(), error)",
+						i+1, snippet(fset, rExpr), typeText(secondType))
 					recipes = append(recipes, ri)
 					continue
 				}
-				ri.errored = true
 			case 3:
 				// Resource-recipe shape: (T, func(), error). Accepted
 				// in any Assemble-family call — pure (T, error) and
 				// (T, func(), error) recipes mix freely. The chain
 				// terminator (.Release / .NoRelease) decides what
 				// happens with the cleanups.
-				cleanupSig, isCleanupFn := results.At(1).Type().(*types.Signature)
-				if !isCleanupFn || cleanupSig.Params().Len() != 0 || cleanupSig.Results().Len() != 0 {
+				if !isZeroArgZeroReturnFunc(results.At(1).Type()) {
 					addProblem("recipe #%d (%s) second return is %s; for resource recipes the second return must be `func()`",
 						i+1, snippet(fset, rExpr), typeText(results.At(1).Type()))
 					recipes = append(recipes, ri)
@@ -200,7 +207,7 @@ func resolveAssemble(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPat
 				ri.errored = true
 				ri.isResource = true
 			default:
-				addProblem("recipe #%d (%s) returns %d values; recipes must return T, (T, error), or (T, func(), error)",
+				addProblem("recipe #%d (%s) returns %d values; recipes must return T, (T, error), (T, func()), or (T, func(), error)",
 					i+1, snippet(fset, rExpr), results.Len())
 				recipes = append(recipes, ri)
 				continue
@@ -225,6 +232,24 @@ func resolveAssemble(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPat
 			ri.output = tv.Type
 			ri.outputKey = typeKey(ri.output)
 			ri.valid = true
+		}
+
+		// Auto-detect cleanup. When a function recipe's signature
+		// didn't declare an explicit cleanup (no `(T, func())` /
+		// `(T, func(), error)`), but T's type has a recognisable
+		// Close shape (Close() / Close() error / channel), attach a
+		// synthesised cleanup so external-lib ctors with no q
+		// awareness participate in the resource lifetime chain.
+		//
+		// Only function recipes get auto-cleanup; inline values are
+		// user-owned and pass through unchanged. The chain
+		// terminator (.Release / .NoRelease) decides what happens
+		// with the synthesised cleanup, same as explicit ones.
+		if ri.valid && !ri.isValue && !ri.isResource {
+			if kind := inferCleanupKind(ri.output, errType); kind != cleanupUnknown {
+				ri.isResource = true
+				ri.autoCleanup = kind
+			}
 		}
 
 		recipes = append(recipes, ri)
@@ -713,6 +738,39 @@ func findContextContextType(info *types.Info) types.Type {
 // isNilableType reports whether t can hold a nil value at runtime.
 // Pointer, interface, slice, map, chan, and function types are
 // nilable; struct values, basic types, and arrays are not.
+// autoCleanupExpr returns the source text of the synthesised cleanup
+// closure for an auto-detected resource. The closure binds the
+// recipe's bound dep variable and emits the appropriate teardown
+// based on the inferred cleanupKind:
+//   - cleanupChanClose → func() { close(_qDep<N>) }
+//   - cleanupCloseVoid → func() { _qDep<N>.Close() }
+//   - cleanupCloseErr  → func() { q.LogCloseErr(_qDep<N>.Close(), "<recipe-label>") }
+//
+// The cleanupCloseErr path routes the returned error through
+// q.LogCloseErr so failed shutdowns are loud rather than silent.
+func autoCleanupExpr(kind cleanupKind, depVar, alias, recipeLabel string) string {
+	switch kind {
+	case cleanupChanClose:
+		return fmt.Sprintf("func() { close(%s) }", depVar)
+	case cleanupCloseVoid:
+		return fmt.Sprintf("func() { %s.Close() }", depVar)
+	case cleanupCloseErr:
+		return fmt.Sprintf("func() { %s.LogCloseErr(%s.Close(), %q) }", alias, depVar, recipeLabel)
+	}
+	return "func(){}"
+}
+
+// isZeroArgZeroReturnFunc reports whether t is exactly `func()` —
+// no params, no returns. Used to recognise the cleanup slot in
+// resource-recipe shapes ((T, func()) and (T, func(), error)).
+func isZeroArgZeroReturnFunc(t types.Type) bool {
+	sig, ok := t.(*types.Signature)
+	if !ok {
+		return false
+	}
+	return sig.Params().Len() == 0 && sig.Results().Len() == 0
+}
+
 func isNilableType(t types.Type) bool {
 	if t == nil {
 		return false
@@ -1062,14 +1120,32 @@ func buildAssembleBody(fset *token.FileSet, src []byte, sub qSubCall, subs []qSu
 		}
 
 		switch {
-		case step.IsResource:
-			// (T, func(), error) recipe shape — bind all three;
-			// push the cleanup before any nil-check so partial
-			// failure auto-cleans the now-allocated resource too.
+		case step.IsResource && step.AutoCleanup != cleanupUnknown && step.Errored:
+			// Auto-detected cleanup on a (T, error) recipe — bind 2,
+			// then synthesise a cleanup closure based on T's shape.
+			errVar := fmt.Sprintf("_qAErr%d", n)
+			fmt.Fprintf(&b, "\n\t%s, %s := %s", dep, errVar, callText)
+			fmt.Fprintf(&b, "\n\tif %s != nil { %s }", errVar, errReturn(errVar))
+			fmt.Fprintf(&b, "\n\t_qCleanups = append(_qCleanups, %s)", autoCleanupExpr(step.AutoCleanup, dep, alias, step.Label))
+		case step.IsResource && step.AutoCleanup != cleanupUnknown:
+			// Auto-detected cleanup on a bare (T) recipe — single
+			// bind, then synthesise the cleanup.
+			fmt.Fprintf(&b, "\n\t%s := %s", dep, callText)
+			fmt.Fprintf(&b, "\n\t_qCleanups = append(_qCleanups, %s)", autoCleanupExpr(step.AutoCleanup, dep, alias, step.Label))
+		case step.IsResource && step.Errored:
+			// Explicit (T, func(), error) — bind all three; push the
+			// cleanup after the err-check so a failed call doesn't
+			// leak its cleanup func (which may be nil on failure).
 			cleanupVar := fmt.Sprintf("_qCleanup%d", n)
 			errVar := fmt.Sprintf("_qAErr%d", n)
 			fmt.Fprintf(&b, "\n\t%s, %s, %s := %s", dep, cleanupVar, errVar, callText)
 			fmt.Fprintf(&b, "\n\tif %s != nil { %s }", errVar, errReturn(errVar))
+			fmt.Fprintf(&b, "\n\tif %s != nil { _qCleanups = append(_qCleanups, %s) }", cleanupVar, cleanupVar)
+		case step.IsResource:
+			// Explicit (T, func()) — non-erroring resource recipe.
+			// No err check, but cleanup is still pushed.
+			cleanupVar := fmt.Sprintf("_qCleanup%d", n)
+			fmt.Fprintf(&b, "\n\t%s, %s := %s", dep, cleanupVar, callText)
 			fmt.Fprintf(&b, "\n\tif %s != nil { _qCleanups = append(_qCleanups, %s) }", cleanupVar, cleanupVar)
 		case step.Errored:
 			errVar := fmt.Sprintf("_qAErr%d", n)

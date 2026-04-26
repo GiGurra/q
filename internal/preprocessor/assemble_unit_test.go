@@ -339,7 +339,7 @@ func main() { _, _ = q.Assemble[*DB](sideEffect, newDB).Release() }
 `,
 			wantSubs: []string{
 				"recipe #1 (sideEffect) returns no values",
-				"recipes must return T, (T, error), or (T, func(), error)",
+				"recipes must return T, (T, error), (T, func()), or (T, func(), error)",
 			},
 		},
 		{
@@ -379,7 +379,7 @@ func main() { _, _ = q.Assemble[*DB](newDB).Release() }
 `,
 			wantSubs: []string{
 				"second return is *MyErr",
-				"recipes must return T, (T, error), or (T, func(), error)",
+				"recipes must return T, (T, error), (T, func()), or (T, func(), error)",
 			},
 		},
 		{

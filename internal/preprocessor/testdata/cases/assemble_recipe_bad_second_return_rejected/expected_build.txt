@@ -1,1 +1,1 @@
-second return is *MyErr; recipes must return T, (T, error), or (T, func(), error)
+second return is *MyErr; recipes must return T, (T, error), (T, func()), or (T, func(), error)

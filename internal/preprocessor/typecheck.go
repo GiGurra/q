@@ -1052,20 +1052,50 @@ func inferAutoCleanup(fset *token.FileSet, sc *qSubCall, info *types.Info, errTy
 	}
 	resourceType := tup.At(0).Type()
 
-	// 1) Channel type: T = chan U / chan<- U / <-chan U.
-	if _, isChan := resourceType.Underlying().(*types.Chan); isChan {
-		sc.AutoCleanup = cleanupChanClose
+	if kind := inferCleanupKind(resourceType, errType); kind != cleanupUnknown {
+		sc.AutoCleanup = kind
 		return Diagnostic{}, false
 	}
 
-	// 2) Method-set lookup. The method set of *T includes methods
-	//    declared on either T or *T (per Go spec). When T is itself a
-	//    pointer type (`*Foo`), *T is `**Foo` whose method set is
-	//    empty — use T directly in that case so Close() declared on
-	//    *Foo is reachable.
-	lookupType := resourceType
-	if _, isPtr := resourceType.(*types.Pointer); !isPtr {
-		lookupType = types.NewPointer(resourceType)
+	// 3) No match — diagnostic.
+	pos := fset.Position(sc.OuterCall.Pos())
+	msg := fmt.Sprintf(
+		"q.Open/OpenE(...).Release() (auto) cannot infer a cleanup for type %s. "+
+			"Auto-Release supports channel types (rewrites to `close(v)`), and types with a "+
+			"`Close() error` or `Close()` method. Either pass an explicit cleanup function "+
+			"(`Release(myCleanup)`), or opt out with `.NoRelease()` if no cleanup is wanted.",
+		resourceType.String(),
+	)
+	return Diagnostic{
+		File: pos.Filename,
+		Line: pos.Line,
+		Col:  pos.Column,
+		Msg:  "q: " + msg,
+	}, true
+}
+
+// inferCleanupKind reports the auto-cleanup form for type t, or
+// cleanupUnknown when no shape matches:
+//   - Channel types       → cleanupChanClose (close(v)).
+//   - T has Close()       → cleanupCloseVoid (v.Close()).
+//   - T has Close() error → cleanupCloseErr  (_ = v.Close()).
+//
+// Reusable by both q.Open's auto-Release and q.Assemble's auto-
+// detect on resource recipes whose T carries a Close shape but
+// whose recipe signature didn't declare an explicit cleanup.
+func inferCleanupKind(t, errType types.Type) cleanupKind {
+	if t == nil {
+		return cleanupUnknown
+	}
+	if _, isChan := t.Underlying().(*types.Chan); isChan {
+		return cleanupChanClose
+	}
+	// Method-set lookup. The method set of *T includes methods on
+	// either T or *T (per Go spec). When T is itself a pointer, *T
+	// is **Foo with an empty method set — fall back to T directly.
+	lookupType := t
+	if _, isPtr := t.(*types.Pointer); !isPtr {
+		lookupType = types.NewPointer(t)
 	}
 	mset := types.NewMethodSet(lookupType)
 	for i := 0; i < mset.Len(); i++ {
@@ -1086,31 +1116,14 @@ func inferAutoCleanup(fset *token.FileSet, sc *qSubCall, info *types.Info, errTy
 		}
 		switch sig.Results().Len() {
 		case 0:
-			sc.AutoCleanup = cleanupCloseVoid
-			return Diagnostic{}, false
+			return cleanupCloseVoid
 		case 1:
 			if types.Identical(sig.Results().At(0).Type(), errType) {
-				sc.AutoCleanup = cleanupCloseErr
-				return Diagnostic{}, false
+				return cleanupCloseErr
 			}
 		}
 	}
-
-	// 3) No match — diagnostic.
-	pos := fset.Position(sc.OuterCall.Pos())
-	msg := fmt.Sprintf(
-		"q.Open/OpenE(...).Release() (auto) cannot infer a cleanup for type %s. "+
-			"Auto-Release supports channel types (rewrites to `close(v)`), and types with a "+
-			"`Close() error` or `Close()` method. Either pass an explicit cleanup function "+
-			"(`Release(myCleanup)`), or opt out with `.NoRelease()` if no cleanup is wanted.",
-		resourceType.String(),
-	)
-	return Diagnostic{
-		File: pos.Filename,
-		Line: pos.Line,
-		Col:  pos.Column,
-		Msg:  "q: " + msg,
-	}, true
+	return cleanupUnknown
 }
 
 // validateSlot returns a diagnostic when sc's error slot type is
