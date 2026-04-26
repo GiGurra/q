@@ -454,6 +454,15 @@ type qSubCall struct {
 	// evaluated only on the first .Value() call.
 	LazyExpr     ast.Expr
 	LazyTypeText string
+
+	// AtomQualifiedName is the fully-qualified name of T for q.A[T]
+	// / q.AtomOf[T] calls — `<package-import-path>.<bare-type-name>`.
+	// Populated by the typecheck pass. The rewriter splices this as
+	// the typed-string value, ensuring atoms with the same bare name
+	// in different packages compare unequal at the q.Atom level.
+	// Empty when typecheck is skipped (rewriter_test fallback path
+	// uses the bare name).
+	AtomQualifiedName string
 }
 
 // atTerminal identifies which terminal method closes a q.At chain.

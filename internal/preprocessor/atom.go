@@ -63,18 +63,35 @@ func resolveAtom(fset *token.FileSet, sc *qSubCall, info *types.Info) (Diagnosti
 			Msg:  fmt.Sprintf("q.%s[T]: T's underlying type must be string (q.Atom is `type Atom string`); got %s with underlying %s", entryName, named.String(), named.Underlying().String()),
 		}, true
 	}
+	// Populate the qualified name for the rewriter. Format:
+	// "<package-import-path>.<bare-type-name>". Globally unique within
+	// a binary, so two atoms with the same bare name in different
+	// packages compare unequal at the q.Atom (string) level.
+	obj := named.Obj()
+	if obj != nil && obj.Pkg() != nil {
+		sc.AtomQualifiedName = obj.Pkg().Path() + "." + obj.Name()
+	} else if obj != nil {
+		sc.AtomQualifiedName = obj.Name()
+	}
 	return Diagnostic{}, false
 }
 
 // buildAtomReplacement emits the typed-string cast for a q.A[T]() or
 // q.AtomOf[T]() call.
 //
-//	q.A[T]()       -> T("name-of-T")
-//	q.AtomOf[T]()  -> q.Atom("name-of-T") (alias is the local q-import name)
+//	q.A[T]()       -> T("<import-path>.<bare-type-name>")
+//	q.AtomOf[T]()  -> q.Atom("<import-path>.<bare-type-name>")
 //
-// For qualified types like `pkg.MyAtom`, the cast keeps the full name
-// (`pkg.MyAtom`) but the string literal is the bare name only
-// (`"MyAtom"`) — that's the natural answer to "what's the atom's name".
+// The fully-qualified value is populated by the typecheck pass into
+// sub.AtomQualifiedName. When typecheck is skipped (rewriter_test
+// path), the rewriter falls back to the bare name from the AST so
+// the output still parses; production builds always go through
+// typecheck and get the fully-qualified value.
+//
+// The qualified value guarantees cross-package collision safety: two
+// packages with the same bare type name (e.g. `type Status q.Atom`
+// in both pkg A and pkg B) produce distinct atom strings and so
+// compare unequal at the q.Atom (parent) type level.
 func buildAtomReplacement(fset *token.FileSet, src []byte, sub qSubCall, alias string) string {
 	var bare, full string
 	switch t := sub.AsType.(type) {
@@ -87,8 +104,16 @@ func buildAtomReplacement(fset *token.FileSet, src []byte, sub qSubCall, alias s
 	default:
 		return `/* q.A: unsupported type argument */ ""`
 	}
-	if sub.Family == familyAtomOf {
-		return fmt.Sprintf("%s.Atom(%q)", alias, bare)
+	value := sub.AtomQualifiedName
+	if value == "" {
+		// Typecheck was skipped (rewriter_test path) — fall back to
+		// the bare name. Output still parses; the cross-package
+		// collision guarantee only applies to production builds where
+		// typecheck runs.
+		value = bare
 	}
-	return fmt.Sprintf("%s(%q)", full, bare)
+	if sub.Family == familyAtomOf {
+		return fmt.Sprintf("%s.Atom(%q)", alias, value)
+	}
+	return fmt.Sprintf("%s(%q)", full, value)
 }

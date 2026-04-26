@@ -1,8 +1,8 @@
-p: Pending
-d: Done
-f: Failed
+p: main.Pending
+d: main.Done
+f: main.Failed
 p == q.A[Pending](): true
-string(p): Pending
+string(p): main.Pending
 matchStatus: still pending
 classify(Pending): p-class
 classify(Done): d-class

@@ -109,12 +109,19 @@ counts[q.A[Pending]()]++
   Strict "T transitively derives from q.Atom in its TypeSpec chain"
   validation is a future extension — for now any named string-typed
   type is accepted.
-- **Type names only — no path qualification in the value.** For a
-  qualified type like `pkg.Color`, the rewritten value is just
-  `"Color"` (the bare name, matching what `reflect.Type.Name()` would
-  return). Two packages with `type Foo q.Atom` will both produce
-  `"Foo"`; if cross-package equality matters, keep the type names
-  unique or wrap them in branded variants.
+- **Cross-package collision safety.** The rewriter populates each
+  atom's value with its **fully-qualified import path + type name**,
+  so two packages defining `type Foo q.Atom` produce distinct atom
+  strings (`"github.com/me/a.Foo"` vs `"github.com/me/b.Foo"`) and
+  stay distinct at the q.Atom (parent) level. The qualified value
+  uses the canonical import path from `go/types`, so import aliases
+  at the use site (`import x "github.com/me/a"`) don't affect the
+  atom's identity — the canonical underlying type wins.
+
+  The cost is verbosity in `string(atom)` / `fmt.Print(atom)`
+  output: `string(q.A[Status]())` returns `"github.com/me/proj.Status"`,
+  not `"Status"`. For short readable atom values, plain typed-string
+  constants are the right tool.
 
 ## See also
 

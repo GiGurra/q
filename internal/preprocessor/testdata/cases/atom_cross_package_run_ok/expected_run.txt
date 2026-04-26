@@ -1,0 +1,6 @@
+a == b: false
+a: main.Status
+b: fixture/sub.Status
+len(m): 2
+m[a]: from main
+m[b]: from sub
