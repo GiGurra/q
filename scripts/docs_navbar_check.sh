@@ -59,11 +59,12 @@ api_q_funcs=$(grep -h '^func [A-Z]' $q_srcs 2>/dev/null \
     | grep -vE '^panicUnrewritten$' \
     | sed 's/^/q./')
 
-# Exported funcs in pkg/q/either, prefixed `either.`.
+# Exported funcs in pkg/q/either, prefixed `q.either.` so they sort
+# naturally under the q.E* range rather than ahead of all q.* entries.
 api_either_funcs=$(grep -h '^func [A-Z]' $either_srcs 2>/dev/null \
     | sed -E 's/[(\[].*//;s/^func //' \
     | sort -u \
-    | sed 's/^/either./')
+    | sed 's/^/q.either./')
 
 api_funcs=$(printf "%s\n%s\n" "$api_q_funcs" "$api_either_funcs" \
     | sort -u | grep -v '^$')
