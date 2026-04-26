@@ -8,6 +8,76 @@ The persistent backlog for `q`. A cold-state reader can pick up here without re-
 
 ## Open
 
+### Errors / observability
+
+- **#98 — Application-wide stack traces on errors.** Go errors don't
+  carry a stack by default. Libraries like `pkg/errors`
+  (`errors.WithStack`) and `cockroachdb/errors` plug the gap, but
+  they require per-call-site opt-in (`errors.WithStack(err)`) which
+  drifts: every new `errors.New` / `fmt.Errorf` site is a chance to
+  forget. q's preprocessor already sees every error-creation site
+  in the user package; it can attach a stack at compile time, with
+  zero ergonomic cost to the call site, so structured logs (slog
+  attrs, observability sinks) get a real stack for free.
+
+  **Surface options to compare:**
+
+  - **Auto-wrap**: the preprocessor finds every `errors.New(...)`,
+    `fmt.Errorf(...)`, and bare `return nil, err` (where the err
+    didn't come from a wrapped call) and wraps the produced error
+    in a stack-carrying shim. Zero call-site change. Off by default;
+    enabled per-package via `var _ = q.WithStackTraces()` or a
+    build-tag.
+  - **q.* bubble interception**: stack capture happens inside the
+    rewriter's existing `if err != nil { return zero, err }` block
+    that q.Try / q.Check / q.NotNilE / etc. already emit. Zero new
+    surface — every q-using codebase gets stack traces for free,
+    non-q errors stay untouched. Smaller blast radius than auto-
+    wrapping every `errors.New`.
+  - **Explicit q.Err helper**: `q.Err("msg")`, `q.Errf("...", args)`
+    — q-flavoured `errors.New` / `fmt.Errorf` that capture stack at
+    construction. Opt-in per call site; loud about the choice; same
+    drift problem as `errors.WithStack`.
+
+  **Lean:** start with q.* bubble interception (smallest surface,
+  highest hit rate for code already using q), then evaluate auto-
+  wrap on top if real codebases want it. The explicit helper can
+  layer alongside as a non-q option.
+
+  **slog integration:** a custom `slog.Handler` (or a thin wrapper
+  on top of `q.SlogContextHandler`) inspects every error-typed attr,
+  pulls the stack via `errors.As(err, *qStackErr{})`, and emits it
+  as a structured `stack` group (frames as `{file, line, fn}`
+  records, JSON-friendly). Pair with `q.InstallSlogJSON` so a
+  vanilla `slog.Error("processing", "err", err)` call ships a
+  full stack to the log sink with no per-site work.
+
+  **Open design questions before picking up.**
+
+  - **Stack capture cost.** `runtime.Callers` is fast but allocates
+    a `[]uintptr`. Most error paths are rare, but for
+    high-throughput error-loops (parser fast-fail, validator hot
+    paths) the alloc adds up. Consider a `runtime.Callers`
+    fixed-size buffer (typical depth is < 32) and lazy
+    symbolication.
+  - **Compatibility with existing wrapping.** If the user already
+    wraps via `fmt.Errorf("ctx: %w", err)`, the q-injected stack
+    needs to flow through `Unwrap` so `errors.Is` / `errors.As`
+    keep working. The shim must implement `Unwrap() error`.
+  - **Existing stack-carrying errors.** If the wrapped err already
+    carries a stack (the user pulled it in via pkg/errors or wrapped
+    a stdlib error explicitly), don't double-wrap. `errors.As`
+    against the q stack-error type before wrapping.
+  - **Goroutine boundaries.** Stack captured at error creation,
+    naturally — but a stack at the *return* site (where q.Try fires)
+    might be more useful for tracing the bubble chain. Decide
+    whether to capture once-at-source or per-bubble (cheap per-
+    bubble append: just one `runtime.Caller(0)` frame).
+  - **Off-by-default vs on-by-default.** Stack on every error is
+    invasive — even a small program produces megabytes of stack
+    text in tight error loops. Off by default; opt-in via a
+    package-level directive that the rewriter detects.
+
 ### Rejected-Go-proposal expansion
 
 - **#74 follow-up — `q.SealedN` alias-style spelling on top of
