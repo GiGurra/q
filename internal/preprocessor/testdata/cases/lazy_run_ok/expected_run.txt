@@ -1,0 +1,19 @@
+calls after Lazy: 0
+forced after Lazy: false
+first Value: 42
+calls after first Value: 1
+forced after first Value: true
+second Value: 42
+calls after second Value: 1
+closure-captured Value: 42
+typed-iface IsForced: false
+race Value: 100
+race thunk runs: 1
+LazyFromThunk Value: hand-thunk
+LazyE forced before Value: false
+loadCalls before Value: 0
+LazyE Value: loaded-cfg
+loadCalls after Value: 1
+loadCalls after second Value: 1
+LazyE first err: disk on fire
+LazyE second err (cached): disk on fire

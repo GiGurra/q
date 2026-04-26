@@ -307,6 +307,19 @@ name := q.At(user.Profile.DisplayName).OrZero()  // "" if any hop is nil
 
 `q.At(<chain>)` opens an optional-chaining-style traversal. The rewriter walks each hop, asks go/types whether it's nil-checkable, and emits per-hop guards inside an IIFE. `.OrElse(<alt>)` chains additional paths / values to try; `.Or(<fallback>)` and `.OrZero()` close the chain. Each path's expression is single-eval and evaluated lazily — only when reached. See [`docs/api/at.md`](docs/api/at.md).
 
+### Deferred evaluation
+
+```go
+cfg := q.Lazy(loadConfigFromDisk())  // loadConfigFromDisk() has NOT run.
+if userRequested {
+    settings := cfg.Value()           // first .Value() runs the thunk
+    _ = settings
+}
+// loadConfigFromDisk() never ran if userRequested was false.
+```
+
+`q.Lazy(<expr>)` reads as if the expression were eager but the rewriter wraps it in a thunk closure. The first `.Value()` call evaluates the thunk under `sync.Once`; later calls return the cached result. Concurrency-safe by construction. `q.LazyE(<call>)` is the `(T, error)`-shaped sibling — pair `.Value()` with `q.Try` at the consumer. See [`docs/api/lazy.md`](docs/api/lazy.md).
+
 ### Auto-derived dependency injection
 
 ```go

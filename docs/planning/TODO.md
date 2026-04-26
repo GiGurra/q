@@ -138,28 +138,6 @@ The persistent backlog for `q`. A cold-state reader can pick up here without re-
 
   Inspiration: Qt's signal/slot, observable patterns from RxJava / RxJS, but simpler — no operator zoo, just connect/emit/disconnect.
 
-### Lazy / memoisation
-
-- **#92 — `q.Lazy[T]` deferred-evaluation values.** Runtime helper for memoised one-shot evaluation, with a preprocessor pass that turns `q.Lazy(calculateValue())` into a thunk-bound constructor so the call site reads naturally — no manual `func() T { … }` wrapping. Same trick as `q.Tern`, just one branch.
-
-  **Surface:**
-  - `type Lazy[T any] struct { /* opaque */ }`
-  - `func Lazy[T any](v T) *Lazy[T]` — user-facing; rewriter wraps the eager arg expression in a thunk closure. Bare runtime body is link-gated (panics if the rewriter didn't run, matching the existing `q.Tern` pattern).
-  - `func (l *Lazy[T]) Value() T` — sync.Once-backed; computes on first access, returns cached value thereafter.
-  - `func (l *Lazy[T]) IsForced() bool` — diagnostic; has the value been computed yet?
-
-  **Mechanism.** Rewriter intercepts `q.Lazy(<expr>)` and emits `qLazyFromThunk(func() T { return <expr> })`. The expression is captured by the closure; locals it references must be in scope at the call site (they already are, since the user wrote the expression there).
-
-  **Open design questions.**
-  - **Thread safety default.** `sync.Once` (concurrent-safe). Microsecond-scale cost; not worth a `q.LazyUnsafe` variant.
-  - **Error-bubbling thunks.** `q.Lazy(loadConfig())` where `loadConfig() (Config, error)`: introduce `q.LazyE[T]` mirroring the bubble-family E-variant, with `.Value() (T, error)` so users can write `cfg := q.Try(l.Value())`. Don't reshape `Lazy[T]` automatically based on the arg's arity — keep the surface explicit.
-  - **Reset / invalidate.** Out of scope at first. Users who want this wrap in their own struct.
-  - **Recursive `Value()` inside the thunk.** Deadlocks via sync.Once. Document; don't guard.
-  - **`q.AtCompileTime` interaction.** `q.Lazy(q.AtCompileTime(...))` is a no-op for the lazy part — comptime evaluates eagerly at preprocess time. Document; safe.
-  - **Closure capture of mutable locals.** The thunk captures locals by reference like any Go closure. If the user mutates a captured local between the `q.Lazy(...)` call and the first `.Value()`, the thunk sees the mutated value. This is normal Go-closure behaviour but worth one line in the docs.
-
-  **Why a quick win.** Tiny rewriter pass (one-arg version of the q.Tern trick), no new bubble surface, immediate ergonomic payoff. The runtime helper is ~30 lines.
-
 ### Future / parking lot
 
 - **#84 — `q.Assemble` parallel construction (Phase 4).** Surface: `q.WithAssemblyPar(ctx, n)` rides on the ctx like `q.WithAssemblyDebug`; rewriter emits topo waves with `sync.WaitGroup` per wave. Phases 1–3 shipped (single-entry auto-derived DI, `AssembleAll`, `AssembleStruct`, AssemblyResult chain with `.DeferCleanup()` / `.NoDeferCleanup()`). Parked because the sequential path is fast enough for current workloads — revisit if profiles show construction time as a measurable cost. Plan still lives in [`docs/planning/assemble.md`](assemble.md) for when it's picked back up.

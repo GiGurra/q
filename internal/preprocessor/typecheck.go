@@ -143,6 +143,11 @@ func checkErrorSlotsWithInfo(fset *token.FileSet, pkgPath, importcfgPath string,
 					diags = append(diags, d)
 				}
 			}
+			if sc.Family == familyLazy || sc.Family == familyLazyE {
+				if d, ok := resolveLazy(fset, sc, info, pkgPath); ok {
+					diags = append(diags, d)
+				}
+			}
 		}
 	}
 

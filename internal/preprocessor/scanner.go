@@ -131,6 +131,8 @@ const (
 	familyAssembleStruct // q.AssembleStruct[T](recipes...) (T, error) — field-decomposed multi-output
 	familyTern           // q.Tern[T](cond, ifTrue, ifFalse) T — conditional expression
 	familyAt             // q.At[T](chain).OrElse(alt)*.Or(fallback) | .OrDefault() — nested-nil safe traversal
+	familyLazy           // q.Lazy[T](v) — wrap arg expression in a thunk closure for sync.Once-backed deferred eval
+	familyLazyE          // q.LazyE[T](call()) — same as q.Lazy but the thunk returns (T, error)
 )
 
 // form is the syntactic position of a recognised q.* call:
@@ -443,6 +445,13 @@ type qSubCall struct {
 	AtTerminal         atTerminal
 	AtTerminalArg      ast.Expr
 	AtResultTypeText   string
+
+	// LazyExpr is the value expression handed to a q.Lazy(<expr>) call.
+	// LazyTypeText is T's spelling under the call's package qualifier.
+	// The rewriter wraps LazyExpr in a thunk closure so the value is
+	// evaluated only on the first .Value() call.
+	LazyExpr     ast.Expr
+	LazyTypeText string
 }
 
 // atTerminal identifies which terminal method closes a q.At chain.
@@ -672,6 +681,8 @@ var qRuntimeHelpers = map[string]bool{
 	"Const":              true,
 	"Unwrap":                  true,
 	"UnwrapE":                 true,
+	"LazyFromThunk":           true,
+	"LazyEFromThunk":          true,
 	"WithAssemblyDebug":       true,
 	"WithAssemblyDebugWriter": true,
 	"AssemblyDebugWriter":     true,
@@ -1357,6 +1368,9 @@ func hasQRefInSub(sub qSubCall, alias string) bool {
 	if hasQRef(sub.AtTerminalArg, alias) {
 		return true
 	}
+	if hasQRef(sub.LazyExpr, alias) {
+		return true
+	}
 	if hasQRef(sub.TernCond, alias) || hasQRef(sub.TernThen, alias) || hasQRef(sub.TernElse, alias) {
 		return true
 	}
@@ -1749,6 +1763,55 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 	} else if ok {
 		sub.OuterCall = expr
 		return sub, true, nil
+	}
+	// q.Lazy(<expr>) or q.Lazy[T](<expr>) — wrap the eager arg expression
+	// in a thunk closure so its evaluation defers to the first .Value()
+	// call. The runtime body is link-gated; the rewriter rewrites the
+	// call site to qLazyFromThunk(func() T { return <expr> }).
+	if typeArg, ok := isIndexedSelector(call.Fun, alias, "Lazy"); ok {
+		if len(call.Args) != 1 {
+			return qSubCall{}, false, fmt.Errorf("q.Lazy[T] takes exactly 1 argument (the value expression); got %d", len(call.Args))
+		}
+		return qSubCall{
+			Family:    familyLazy,
+			AsType:    typeArg,
+			LazyExpr:  call.Args[0],
+			OuterCall: expr,
+		}, true, nil
+	}
+	if isSelector(call.Fun, alias, "Lazy") {
+		if len(call.Args) != 1 {
+			return qSubCall{}, false, fmt.Errorf("q.Lazy takes exactly 1 argument (the value expression); got %d", len(call.Args))
+		}
+		return qSubCall{
+			Family:    familyLazy,
+			LazyExpr:  call.Args[0],
+			OuterCall: expr,
+		}, true, nil
+	}
+	// q.LazyE(call()) or q.LazyE[T](call()) — defer a (T, error)-returning
+	// call. Same trick as q.Lazy but the thunk's return signature is
+	// (T, error) so the user pairs .Value() with q.Try at the consumer.
+	if typeArg, ok := isIndexedSelector(call.Fun, alias, "LazyE"); ok {
+		if len(call.Args) != 1 {
+			return qSubCall{}, false, fmt.Errorf("q.LazyE[T] takes exactly 1 argument (a (T, error)-returning call); got %d", len(call.Args))
+		}
+		return qSubCall{
+			Family:    familyLazyE,
+			AsType:    typeArg,
+			LazyExpr:  call.Args[0],
+			OuterCall: expr,
+		}, true, nil
+	}
+	if isSelector(call.Fun, alias, "LazyE") {
+		if len(call.Args) != 1 {
+			return qSubCall{}, false, fmt.Errorf("q.LazyE takes exactly 1 argument (a (T, error)-returning call); got %d", len(call.Args))
+		}
+		return qSubCall{
+			Family:    familyLazyE,
+			LazyExpr:  call.Args[0],
+			OuterCall: expr,
+		}, true, nil
 	}
 	// q.Tag[T](field, key) — both args MUST be string literals so
 	// the rewriter can resolve the tag at compile time.
