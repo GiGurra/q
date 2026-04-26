@@ -93,15 +93,57 @@ NewX() Ifc                  // interface
 NewX() (X, error)           // value type with error path
 NewX() (*X, error)          // pointer with error path
 NewX() (Ifc, error)         // interface with error path
-NewX() (*X, func(), error)  // pointer resource recipe — explicit cleanup
+NewX() (*X, func())         // non-erroring resource — explicit cleanup, no error
+NewX() (Ifc, func())        // interface non-erroring resource
+NewX() (*X, func(), error)  // resource recipe — explicit cleanup with error path
 NewX() (Ifc, func(), error) // interface resource recipe — also valid
 ```
+
+Any of these can also gain auto-detected cleanup if T has a `Close()` / `Close() error` method or is a channel — see [Resource lifetime](#resource-lifetime).
 
 Pointer / interface / slice / map / chan / func outputs are checked for nil at runtime (see [Nil-recipe detection](#nil-recipe-detection)). Value-typed outputs (struct, basic types, arrays) skip the check — they can't be nil.
 
 ## Resource lifetime
 
-Recipes can opt into lifetime management by returning `(T, func(), error)` — the second value is the recipe's cleanup. Examples:
+Recipes can opt into lifetime management three ways:
+
+### 1. Auto-detected from T's type (zero ceremony)
+
+When a function recipe returns a type with a recognisable close shape — `Close()`, `Close() error`, or a channel — the resolver auto-attaches a synthesised cleanup. **No wrapper needed for external libraries:**
+
+```go
+import "database/sql"
+
+// *sql.DB has Close() error → auto-detected.
+func newDB() (*sql.DB, error) {
+    return sql.Open("postgres", "...")
+}
+
+// chan struct{} → auto-detected (rewrites to close(c)).
+func newDoneCh() chan struct{} {
+    return make(chan struct{})
+}
+
+server, err := q.Assemble[*Server](newDB, newDoneCh, newServer).Release()
+// db.Close() and close(doneCh) both fire on enclosing-function exit,
+// in reverse-topo order. No q.Open boilerplate, no manual wrapping.
+```
+
+The auto-detected shapes:
+
+| T shape                       | Synthesised cleanup                                              |
+|-------------------------------|------------------------------------------------------------------|
+| `chan U` / `chan<- U` / `<-chan U` | `func() { close(t) }`                                            |
+| Has `Close()`                 | `func() { t.Close() }`                                           |
+| Has `Close() error`           | `func() { q.LogCloseErr(t.Close(), "<recipe-label>") }`          |
+
+The `Close() error` path routes through `q.LogCloseErr`, which `slog.Error`s the failure with the recipe label as a structured attr — failed teardown is loud, not silent.
+
+**Inline values are never auto-closed.** A precomputed value passed as a recipe (e.g. `q.Assemble[*App](existingDB, ...)`) belongs to the caller — the assembler doesn't claim ownership. The gate in the resolver is `!step.IsValue && hasCloseShape(T)`.
+
+### 2. Explicit `(T, func(), error)` — full control
+
+When you need custom cleanup (graceful HTTP shutdown with deadline, multi-step tear-down, drain-then-close patterns, etc.) declare the cleanup explicitly:
 
 ```go
 func openDB(c *Config) (*DB, func(), error) {
@@ -121,14 +163,46 @@ func openHTTPServer(addr string) (*http.Server, func(), error) {
 }
 ```
 
-The chain terminator decides what happens with the cleanups:
+If the explicit cleanup is `nil` on the success path, it's silently skipped — useful for "sometimes-cleanup" recipes.
+
+### 3. Non-erroring `(T, func())` — always-succeeds resources
+
+For ctors that genuinely can't fail (test fixtures, in-memory stores, recipes that spawn a goroutine and return a stop signal), the error slot is noise. Use the 2-return resource shape:
+
+```go
+func newWorker() (*Worker, func()) {
+    w := &Worker{}
+    stop := make(chan struct{})
+    go w.run(stop)
+    return w, func() { close(stop); w.wait() }
+}
+
+func newInMemStore() (*Store, func()) {
+    s := newStore()
+    return s, func() { s.clear() }
+}
+```
+
+### Chain terminator semantics
+
+Whether the cleanup is auto-detected or explicit, the chain terminator decides what happens with it:
 
 - **`.Release()`** — defer-injected; fires on enclosing function return in reverse-topo order.
 - **`.NoRelease()`** — handed to the caller as an idempotent closure for explicit control.
 
 In both cases, **partial-failure cleanup is automatic.** If recipe N fails, the cleanups for recipes 0..N-1 fire in reverse-topo before the error bubbles. The chain emerges intact: nothing leaks even on failure paths.
 
-Pure recipes mix freely with resource recipes — they just don't push anything onto the cleanup chain.
+### Mixing all four shapes
+
+A single `q.Assemble` call can mix:
+
+- Pure recipes: `func newConfig() *Config` (no cleanup).
+- Errored recipes: `func newDecoder() (*Decoder, error)` (no cleanup unless T has a close shape — then auto-detect).
+- Explicit resource recipes: `func openHTTPServer(addr string) (*http.Server, func(), error)` (cleanup from the recipe).
+- Non-erroring resource recipes: `func newWorker() (*Worker, func())` (cleanup from the recipe).
+- Inline values: `cfg`, `existingDB` (no cleanup, ever — caller-owned).
+
+Each pushes (or doesn't push) a cleanup onto the chain in topo order; teardown reverses it.
 
 ## Happy path examples
 
