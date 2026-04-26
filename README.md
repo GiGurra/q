@@ -320,6 +320,27 @@ if userRequested {
 
 `q.Lazy(<expr>)` reads as if the expression were eager but the rewriter wraps it in a thunk closure. The first `.Value()` call evaluates the thunk under `sync.Once`; later calls return the cached result. Concurrency-safe by construction. `q.LazyE(<call>)` is the `(T, error)`-shaped sibling — pair `.Value()` with `q.Try` at the consumer. See [`docs/api/lazy.md`](docs/api/lazy.md).
 
+### Discriminated sum types
+
+```go
+type Pending struct{}
+type Done    struct{ At time.Time }
+type Failed  struct{ Err error }
+
+type Status q.OneOf3[Pending, Done, Failed]   // discriminated union of three variants
+
+s := q.AsOneOf[Status](Done{At: time.Now()})
+
+desc := q.Match(s,
+    q.Case(Pending{}, "waiting"),
+    q.OnType(func(d Done) string   { return "done at " + d.At.String() }),
+    q.OnType(func(f Failed) string { return "failed: " + f.Err.Error() }),
+)
+// missing variant → build fails: "missing arm(s) for: Failed"
+```
+
+Real sum types — the headline rejected proposal. `q.OneOfN` is the struct-based form (uniform `Tag uint8; Value any` storage). `q.AsOneOf[T](v)` rewrites in place to `T{Tag: <pos>, Value: v}` after validating `v`'s type matches one of `T`'s variants. Dispatch reads through `q.Match`: `q.Case(Variant{}, result)` for tag-only arms (drops the payload), `q.OnType(func(t T) R { ... })` to bind the typed payload. `q.Default` opts out of coverage. Statement-level dispatch via `switch v := q.Exhaustive(s.Value).(type) { ... }` enforces case coverage with the same rules. See [`docs/api/oneof.md`](docs/api/oneof.md).
+
 ### Typed-string atoms (Erlang-flavoured)
 
 ```go

@@ -1,0 +1,16 @@
+waiting
+done at 10:30
+failed: disk full
+p
+d
+f
+waiting
+not waiting
+idle
+working
+stmt:waiting
+stmt:done at 10:30
+stmt:failed: disk full
+pending.Tag: 1
+done.Tag: 2
+failed.Tag: 3

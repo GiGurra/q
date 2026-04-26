@@ -135,6 +135,7 @@ const (
 	familyLazyE          // q.LazyE[T](call()) — same as q.Lazy but the thunk returns (T, error)
 	familyAtom           // q.A[T]() — typed-string atom with value = bare name of T
 	familyAtomOf         // q.AtomOf[T]() — q.Atom("name-of-T") for switch-case ergonomics
+	familyAsOneOf        // q.AsOneOf[T](v) — wrap v as a OneOfN-derived sum type T
 )
 
 // form is the syntactic position of a recognised q.* call:
@@ -463,6 +464,20 @@ type qSubCall struct {
 	// Empty when typecheck is skipped (rewriter_test fallback path
 	// uses the bare name).
 	AtomQualifiedName string
+
+	// OneOf-family fields. For familyAsOneOf: OneOfArmIdx is the
+	// resolved 1-based position of v's type within T's OneOfN arm
+	// list, populated by the typecheck pass. OneOfTypeText is T's
+	// textual spelling for the composite literal (e.g. "Status").
+	//
+	// For familyMatch: IsOneOfMatch flips when the matched value's
+	// type is a OneOfN-derived sum. OneOfArmTypeTexts carries every
+	// variant's textual spelling in declaration order — used by the
+	// coverage check and by the rewriter's exhaustive-switch emit.
+	OneOfArmIdx       int
+	OneOfTypeText     string
+	IsOneOfMatch      bool
+	OneOfArmTypeTexts []string
 }
 
 // atTerminal identifies which terminal method closes a q.At chain.
@@ -502,8 +517,8 @@ const (
 // inspecting its type via go/types, populating CondLazy / IsPredicate
 // / ResultLazy accordingly.
 type matchCase struct {
-	CondExpr   ast.Expr // nil for default; cond expression for q.Case
-	ResultExpr ast.Expr
+	CondExpr   ast.Expr // nil for default and OnType; cond expression for q.Case
+	ResultExpr ast.Expr // nil for OnType; result expression for q.Case / q.Default
 	IsDefault  bool
 
 	// Populated by the typecheck pass once go/types resolves the
@@ -511,6 +526,21 @@ type matchCase struct {
 	IsPredicate bool // cond is bool / func()bool — emit `if cond` instead of equality compare
 	CondLazy    bool // cond is func()V or func()bool — call before use
 	ResultLazy  bool // result is func()R — call before return
+
+	// IsOnType marks q.OnType arms — type-tagged dispatch on a
+	// q.OneOfN-derived sum type. HandlerExpr carries the function
+	// passed to q.OnType (literal closure or function reference).
+	// The rewriter emits a switch on the matched value's Tag field
+	// rather than a value-equality / predicate compare.
+	IsOnType    bool
+	HandlerExpr ast.Expr
+
+	// Populated by resolveMatch when IsOneOfMatch is true on the
+	// enclosing q.Match. OnTypeArmIdx is the 1-based variant
+	// position (matching the OneOfN type-arg list); OnTypeArmText
+	// is the variant type's textual spelling for the .(T) assertion.
+	OnTypeArmIdx  int
+	OnTypeArmText string
 }
 
 // assembleStep is one entry in the topo-sorted recipe sequence the
@@ -1093,6 +1123,11 @@ func walkChildBlocks(fset *token.FileSet, path string, stmt ast.Stmt, alias stri
 		}
 		walkBlock(fset, path, s.Body, alias, fnType, shapes, diags, skip)
 	case *ast.TypeSwitchStmt:
+		if shape, ok, err := matchExhaustiveTypeSwitch(s, alias, fnType); err != nil {
+			*diags = append(*diags, diagAt(fset, path, s.Pos(), err.Error()))
+		} else if ok {
+			*shapes = append(*shapes, shape)
+		}
 		walkBlock(fset, path, s.Body, alias, fnType, shapes, diags, skip)
 	case *ast.SelectStmt:
 		walkBlock(fset, path, s.Body, alias, fnType, shapes, diags, skip)
@@ -1866,6 +1901,26 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 			AsType:    typeArg,
 			OuterCall: expr,
 		}, true, nil
+	}
+	// q.AsOneOf[T](v) — wrap v as a OneOfN-derived sum type T. The
+	// typecheck pass validates v's type matches one of T's arms and
+	// populates OneOfArmIdx; the rewriter emits T{Tag: <pos>, Value: v}.
+	if typeArg, ok := isIndexedSelector(call.Fun, alias, "AsOneOf"); ok {
+		if len(call.Args) != 1 {
+			return qSubCall{}, false, fmt.Errorf("q.AsOneOf[T] takes exactly one argument (the variant value); got %d", len(call.Args))
+		}
+		return qSubCall{
+			Family:    familyAsOneOf,
+			AsType:    typeArg,
+			InnerExpr: call.Args[0],
+			OuterCall: expr,
+		}, true, nil
+	}
+	// q.OnType at the regular classifier path: silently no-match, like
+	// q.Case / q.Default. Only meaningful as a q.Match arm where
+	// parseMatchArms extracts the handler.
+	if isSelector(call.Fun, alias, "OnType") {
+		return qSubCall{}, false, nil
 	}
 	// q.Tag[T](field, key) — both args MUST be string literals so
 	// the rewriter can resolve the tag at compile time.
@@ -2737,6 +2792,50 @@ func matchExhaustiveSwitch(s *ast.SwitchStmt, alias string, fnType *ast.FuncType
 	}, true, nil
 }
 
+// matchExhaustiveTypeSwitch detects the
+//
+//	switch [v :=] q.Exhaustive(<expr>).(type) { case T1: …; case T2: … }
+//
+// shape and returns a callShape that wraps the TypeSwitchStmt as its
+// Stmt with a single q.Exhaustive sub-call. Used for q.OneOfN
+// coverage on type-switch dispatch over the unwrapped Value field.
+//
+// At rewrite time the q.Exhaustive call span is replaced by its
+// inner expression's source — exactly the same in-place strip pass
+// the regular SwitchStmt form uses.
+func matchExhaustiveTypeSwitch(s *ast.TypeSwitchStmt, alias string, fnType *ast.FuncType) (callShape, bool, error) {
+	var ta *ast.TypeAssertExpr
+	switch a := s.Assign.(type) {
+	case *ast.AssignStmt:
+		if len(a.Rhs) != 1 {
+			return callShape{}, false, nil
+		}
+		ta, _ = a.Rhs[0].(*ast.TypeAssertExpr)
+	case *ast.ExprStmt:
+		ta, _ = a.X.(*ast.TypeAssertExpr)
+	}
+	if ta == nil || ta.Type != nil {
+		// Not a `.(type)` assertion — this isn't a type switch.
+		return callShape{}, false, nil
+	}
+	call, ok := ta.X.(*ast.CallExpr)
+	if !ok {
+		return callShape{}, false, nil
+	}
+	if !isSelector(call.Fun, alias, "Exhaustive") {
+		return callShape{}, false, nil
+	}
+	if len(call.Args) != 1 {
+		return callShape{}, false, fmt.Errorf("q.Exhaustive must take exactly one argument (the value to switch on); got %d", len(call.Args))
+	}
+	return callShape{
+		Stmt:              s,
+		Form:              formHoist,
+		Calls:             []qSubCall{{Family: familyExhaustive, InnerExpr: call.Args[0], OuterCall: call}},
+		EnclosingFuncType: fnType,
+	}, true, nil
+}
+
 // parseMatchArms walks q.Match's tail arguments (each expected to be
 // a q.Case or q.Default call) and extracts the cond/result
 // expressions. The typecheck pass classifies each arm later, by
@@ -2772,8 +2871,16 @@ func parseMatchArms(args []ast.Expr, alias string) ([]matchCase, error) {
 				IsDefault:  true,
 			})
 			defaultSeen = true
+		case isSelector(call.Fun, alias, "OnType"):
+			if len(call.Args) != 1 {
+				return nil, fmt.Errorf("q.OnType must take exactly one argument (a func(T) R handler); got %d", len(call.Args))
+			}
+			cases = append(cases, matchCase{
+				IsOnType:    true,
+				HandlerExpr: call.Args[0],
+			})
 		default:
-			return nil, fmt.Errorf("q.Match argument %d is not a q.Case / q.Default call", i+1)
+			return nil, fmt.Errorf("q.Match argument %d is not a q.Case / q.OnType / q.Default call", i+1)
 		}
 	}
 	return cases, nil

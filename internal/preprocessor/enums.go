@@ -108,6 +108,19 @@ func buildEnumOrdinalReplacement(fset *token.FileSet, src []byte, sub qSubCall, 
 		t, strings.Join(cases, "; "), argText)
 }
 
+// buildMatchReplacementFallbackForOneOf is a defensive emitter used
+// when buildMatchReplacement is reached for a q.Match call that has
+// q.OnType arms but the typecheck pass didn't run (the unit-test
+// path through rewriter_test.go). The rewriter would otherwise
+// crash on nil mc.ResultExpr; instead emit a syntactically-valid
+// placeholder so the test pass that "every fixture rewrites to
+// parseable Go" still holds. Production builds always go through
+// typecheck and route to buildOneOfMatchReplacement before reaching
+// this fallback.
+func buildMatchReplacementFallbackForOneOf(resultType string) string {
+	return fmt.Sprintf("(func() %s { var _zero %s; return _zero }())", resultType, resultType)
+}
+
 // buildMatchReplacement emits an IIFE-wrapped switch (or if-chain)
 // for q.Match.
 //
@@ -138,6 +151,18 @@ func buildMatchReplacement(fset *token.FileSet, src []byte, sub qSubCall, subs [
 	resultType := sub.ResolvedString
 	if resultType == "" {
 		resultType = "any"
+	}
+
+	// Defensive: if any arm is q.OnType, this q.Match was a OneOfN
+	// dispatch that the typecheck pass should have routed to
+	// buildOneOfMatchReplacement. Reaching here means typecheck was
+	// skipped (the rewriter_test fast-path). Emit a syntactically
+	// valid placeholder so unit tests don't crash on nil mc.ResultExpr.
+	for _, mc := range sub.MatchCases {
+		if mc.IsOnType {
+			_ = valueText
+			return buildMatchReplacementFallbackForOneOf(resultType)
+		}
 	}
 
 	hasPredicate := false

@@ -147,6 +147,31 @@ explicitly).
 
 This is the "open type at the boundary, closed type internally" pattern made compile-time-checked. New constants added later still trigger the missing-case diagnostic — `default:` doesn't silently swallow them. The same rule applies to [`q.Match`](match.md) on Lax-opted types: a `q.Default(...)` arm is required.
 
+## q.OneOfN type-switch coverage
+
+`q.Exhaustive` also drives coverage on the type-switch dispatch over
+a [`q.OneOfN`](oneof.md)-derived sum's `.Value` field:
+
+```go
+type Status q.OneOf3[Pending, Done, Failed]
+
+switch v := q.Exhaustive(s.Value).(type) {
+case Pending:
+    // payload-less variant
+case Done:
+    fmt.Println(v.At)
+case Failed:
+    fmt.Println(v.Err)
+}
+```
+
+The build fails if any variant is missing. `default:` opts out of the
+missing-case rule but doesn't substitute for covering declared
+variants — same semantics as the const-enum form. The typecheck
+pass spots that `s.Value`'s ancestor type is OneOfN-derived and
+walks the variant list to drive the coverage check.
+
 ## See also
 
 - [`q.EnumValues` / `q.EnumName` / …](enums.md) — the value-level enum helpers `q.Exhaustive` is a sibling of.
+- [`q.OneOfN`](oneof.md) — discriminated sum types; uses this `q.Exhaustive` form for statement-level dispatch.

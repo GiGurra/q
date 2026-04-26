@@ -349,7 +349,11 @@ func renderShape(fset *token.FileSet, src []byte, sh callShape, counter *int, al
 		case familyTypeName, familyTag:
 			subTexts[i] = strconv.Quote(sh.Calls[i].ResolvedString)
 		case familyMatch:
-			subTexts[i] = buildMatchReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts)
+			if sh.Calls[i].IsOneOfMatch {
+				subTexts[i] = buildOneOfMatchReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts)
+			} else {
+				subTexts[i] = buildMatchReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts)
+			}
 		case familyAssemble, familyAssembleAll, familyAssembleStruct:
 			subTexts[i] = buildAssembleSubText(fset, src, sh.Calls[i], sh.Calls, subTexts, alias, counters[i])
 		case familyTern:
@@ -367,6 +371,8 @@ func renderShape(fset *token.FileSet, src []byte, sh callShape, counter *int, al
 			subTexts[i] = buildLazyReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts, alias)
 		case familyAtom, familyAtomOf:
 			subTexts[i] = buildAtomReplacement(fset, src, sh.Calls[i], alias)
+		case familyAsOneOf:
+			subTexts[i] = buildAsOneOfReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts)
 		case familyAtCompileTime, familyAtCompileTimeCode:
 			subTexts[i] = buildAtCompileTimeReplacement(sh.Calls[i])
 		case familyGenerator:
@@ -865,6 +871,7 @@ func isInPlaceFamily(f family) bool {
 		familyAt,
 		familyLazy, familyLazyE,
 		familyAtom, familyAtomOf,
+		familyAsOneOf,
 		familyAtCompileTime, familyAtCompileTimeCode,
 		familyGenerator:
 		return true
@@ -1143,6 +1150,10 @@ func renderSubCall(fset *token.FileSet, src []byte, sh callShape, subIdx int, su
 		return "", false, false, false, nil
 	case familyAtom, familyAtomOf:
 		// q.A[T]() / q.AtomOf[T]() rewrite in-place to typed-string casts;
+		// no bind/check block.
+		return "", false, false, false, nil
+	case familyAsOneOf:
+		// q.AsOneOf[T](v) rewrites in-place to T{Tag: <pos>, Value: v};
 		// no bind/check block.
 		return "", false, false, false, nil
 	case familyAwait:

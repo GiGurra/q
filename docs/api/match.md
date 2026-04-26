@@ -149,7 +149,29 @@ The typecheck pass infers `R` from the first arm's result expression and emits t
 - **Matched value must be `comparable` for value-match arms.** Slices, maps, and functions can't be value-compared (Go's switch requirement, not q's). Predicate-only matching works for any matched value type.
 - **Cross-package enum types** — coverage check is same-package only (matches the rest of the q.Enum* family).
 
+## Discriminated-sum dispatch
+
+When the matched value is a [`q.OneOfN`](oneof.md)-derived sum type,
+`q.Match` switches into tag-dispatch mode: each `q.Case`'s cond *type*
+selects the variant (the value is dropped), and a third arm constructor
+`q.OnType(func(T) R)` binds the typed payload:
+
+```go
+type Status q.OneOf3[Pending, Done, Failed]
+
+desc := q.Match(s,
+    q.Case(Pending{}, "waiting"),
+    q.OnType(func(d Done) string   { return "done at " + d.At.String() }),
+    q.OnType(func(f Failed) string { return "failed: " + f.Err.Error() }),
+)
+```
+
+The typecheck pass enforces every variant has an arm (or `q.Default`).
+See [`q.OneOfN`](oneof.md) for the construction surface and the
+statement-level `q.Exhaustive` form.
+
 ## See also
 
 - [`q.Exhaustive`](exhaustive.md) — statement-level switch coverage. Same coverage rules.
+- [`q.OneOfN`](oneof.md) — discriminated sum types. Integrates here via `q.Case` + `q.OnType`.
 - [`q.GenEnumJSONLax`](gen.md) — enable forward-compat JSON; pair with `q.Match` + `q.Default` for the unknown-arm.

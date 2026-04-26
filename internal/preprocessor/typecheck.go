@@ -167,17 +167,33 @@ func checkErrorSlotsWithInfo(fset *token.FileSet, pkgPath, importcfgPath string,
 	// types must include a `default:` arm to handle the openness.
 	laxTypes := collectLaxTypes(shapes)
 
+	// OneOfN-derived sum types declared in this package — used by
+	// q.AsOneOf, q.Match-on-sum, and q.Exhaustive type-switch coverage.
+	oneOfTypes := resolveOneOfTypes(files, info, pkgPath)
+
+	// Pass 1.5 — q.AsOneOf depends on the OneOf type map.
+	for i := range shapes {
+		for j := range shapes[i].Calls {
+			sc := &shapes[i].Calls[j]
+			if sc.Family == familyAsOneOf {
+				if d, ok := resolveAsOneOf(fset, sc, info, pkgPath, oneOfTypes); ok {
+					diags = append(diags, d)
+				}
+			}
+		}
+	}
+
 	// Pass 2 — guards that depend on cross-call state.
 	for i := range shapes {
 		for j := range shapes[i].Calls {
 			sc := &shapes[i].Calls[j]
 			if sc.Family == familyExhaustive {
-				if d, ok := validateExhaustive(fset, &shapes[i], sc, info, pkgPath, laxTypes); ok {
+				if d, ok := validateExhaustive(fset, &shapes[i], sc, info, pkgPath, laxTypes, oneOfTypes, files); ok {
 					diags = append(diags, d)
 				}
 			}
 			if sc.Family == familyMatch {
-				if d, ok := resolveMatch(fset, sc, info, pkgPath, laxTypes); ok {
+				if d, ok := resolveMatch(fset, sc, info, pkgPath, laxTypes, oneOfTypes); ok {
 					diags = append(diags, d)
 				}
 			}
@@ -224,9 +240,31 @@ func collectLaxTypes(shapes []callShape) map[string]bool {
 // Returns a diagnostic when the type can't resolve to a defined
 // named type with constants, or when one or more constants are not
 // referenced by any case clause.
-func validateExhaustive(fset *token.FileSet, sh *callShape, sc *qSubCall, info *types.Info, pkgPath string, laxTypes map[string]bool) (Diagnostic, bool) {
+func validateExhaustive(fset *token.FileSet, sh *callShape, sc *qSubCall, info *types.Info, pkgPath string, laxTypes map[string]bool, oneOfTypes map[*types.TypeName]oneOfArms, files []*ast.File) (Diagnostic, bool) {
 	if sc.InnerExpr == nil {
 		return Diagnostic{}, false
+	}
+	// q.OneOfN-derived value flowing through a type switch:
+	//
+	//	switch v := q.Exhaustive(<x>.Value).(type) { case T1: …; case T2: … }
+	//
+	// Detect by walking the AST for a TypeSwitchStmt whose tag's
+	// X is sc.OuterCall (the q.Exhaustive call). When found, the
+	// OneOf-specific validator handles coverage and exits.
+	if sw := findExhaustiveTypeSwitchParent(files, sc); sw != nil {
+		if d, ok := validateExhaustiveOneOf(fset, sw, sc, info, pkgPath, oneOfTypes); ok {
+			return d, true
+		}
+		// Even if validateExhaustiveOneOf returned no diagnostic, when
+		// the inner expression IS a OneOfN's .Value access we are done
+		// — the regular const-coverage path below would be misleading.
+		if sel, ok := sc.InnerExpr.(*ast.SelectorExpr); ok && sel.Sel != nil && sel.Sel.Name == "Value" {
+			if xtv, ok := info.Types[sel.X]; ok && xtv.Type != nil {
+				if _, isOne := armsForType(xtv.Type, oneOfTypes, pkgPath); isOne {
+					return Diagnostic{}, false
+				}
+			}
+		}
 	}
 	tv, ok := info.Types[sc.InnerExpr]
 	if !ok || tv.Type == nil {
@@ -540,7 +578,7 @@ func resolveEnum(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPath st
 // violations; type-text resolution itself never produces a
 // diagnostic — when info isn't enough to resolve, the rewriter
 // falls back to `any`.
-func resolveMatch(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPath string, laxTypes map[string]bool) (Diagnostic, bool) {
+func resolveMatch(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPath string, laxTypes map[string]bool, oneOfTypes map[*types.TypeName]oneOfArms) (Diagnostic, bool) {
 	if sc.InnerExpr == nil {
 		return Diagnostic{}, false
 	}
@@ -559,6 +597,31 @@ func resolveMatch(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPath s
 	if tv, ok := info.Types[sc.InnerExpr]; ok && tv.Type != nil {
 		matchedType = tv.Type
 		sc.EnumTypeText = types.TypeString(matchedType, qualifier)
+	}
+
+	// q.OneOfN-derived sum: dispatch via tag, not value-equality. The
+	// dedicated path validates each q.Case arm's cond TYPE against the
+	// variant list (the cond value itself is dropped) and each q.OnType
+	// arm's handler param TYPE the same way; coverage is enforced
+	// across the variant list.
+	if matchedType != nil {
+		if arms, ok := armsForType(matchedType, oneOfTypes, pkgPath); ok {
+			return resolveMatchOneOf(fset, sc, info, pkgPath, arms)
+		}
+	}
+
+	// q.OnType outside a OneOfN match makes no sense — surface it.
+	for i := range sc.MatchCases {
+		mc := &sc.MatchCases[i]
+		if mc.IsOnType {
+			pos := fset.Position(mc.HandlerExpr.Pos())
+			return Diagnostic{
+				File: pos.Filename,
+				Line: pos.Line,
+				Col:  pos.Column,
+				Msg:  "q.OnType: only valid in a q.Match whose value is a q.OneOfN-derived sum type",
+			}, true
+		}
 	}
 
 	// Classify every q.Case arm's cond by its resolved type:
