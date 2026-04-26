@@ -33,7 +33,6 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
-	"strconv"
 	"strings"
 )
 
@@ -107,12 +106,12 @@ func resolveConvert(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPath
 		return p.Name()
 	}
 
-	overrides, d, fail := parseConvertOverrides(fset, sc.ConvertOptArgs, info, targetTV.Type, srcTV.Type, qualifier)
+	tree, d, fail := parseConvertOverrides(fset, sc.ConvertOptArgs, info, targetTV.Type, srcTV.Type, qualifier)
 	if fail {
 		return d, true
 	}
 
-	fields, d, fail := resolveStructConversion(srcTV.Type, targetTV.Type, overrides, qualifier, pos, map[string]bool{})
+	fields, d, fail := resolveStructConversion(srcTV.Type, targetTV.Type, tree, qualifier, pos, map[string]bool{})
 	if fail {
 		return d, true
 	}
@@ -128,12 +127,24 @@ type convertOverride struct {
 	expr ast.Expr // value expr for Set; fn expr for SetFn
 }
 
+// overrideNode is one node in the recursive override tree. A leaf
+// node (`leaf != nil`) means this exact path is overridden; an
+// interior node (`children != nil` and `leaf == nil`) means at least
+// one descendant is overridden but this path is not. A path can't be
+// both — `q.Set(T{}.A, ...)` and `q.Set(T{}.A.B, ...)` together fail
+// validation because the first override owns the whole subtree.
+type overrideNode struct {
+	leaf     *convertOverride
+	children map[string]*overrideNode
+}
+
 // parseConvertOverrides walks the variadic q.Set / q.SetFn calls,
-// validates each (target field name is a string literal naming an
-// exported field; value/fn type is assignable), and builds an
-// override map keyed by target field name.
-func parseConvertOverrides(fset *token.FileSet, opts []ast.Expr, info *types.Info, targetType, srcType types.Type, qualifier types.Qualifier) (map[string]convertOverride, Diagnostic, bool) {
-	mkErr := func(p token.Position, msg string) (map[string]convertOverride, Diagnostic, bool) {
+// validates each, and builds the override tree. Multi-hop paths
+// (q.Set(Target{}.A.B.C, v)) become nested children. Conflicts (a
+// path that's both an override and an ancestor of another override)
+// fail validation.
+func parseConvertOverrides(fset *token.FileSet, opts []ast.Expr, info *types.Info, targetType, srcType types.Type, qualifier types.Qualifier) (*overrideNode, Diagnostic, bool) {
+	mkErr := func(p token.Position, msg string) (*overrideNode, Diagnostic, bool) {
 		return nil, Diagnostic{
 			File: p.Filename,
 			Line: p.Line,
@@ -142,19 +153,11 @@ func parseConvertOverrides(fset *token.FileSet, opts []ast.Expr, info *types.Inf
 		}, true
 	}
 
-	targetStruct, _ := targetType.Underlying().(*types.Struct)
-	if targetStruct == nil {
-		return map[string]convertOverride{}, Diagnostic{}, false
-	}
-	targetFields := map[string]*types.Var{}
-	for i := 0; i < targetStruct.NumFields(); i++ {
-		f := targetStruct.Field(i)
-		if f.Exported() {
-			targetFields[f.Name()] = f
-		}
+	root := &overrideNode{children: map[string]*overrideNode{}}
+	if _, ok := targetType.Underlying().(*types.Struct); !ok {
+		return root, Diagnostic{}, false
 	}
 
-	out := map[string]convertOverride{}
 	for _, opt := range opts {
 		callPos := fset.Position(opt.Pos())
 		call, ok := opt.(*ast.CallExpr)
@@ -168,18 +171,17 @@ func parseConvertOverrides(fset *token.FileSet, opts []ast.Expr, info *types.Inf
 		if len(call.Args) != 2 {
 			return mkErr(callPos, fmt.Sprintf("q.%s takes exactly 2 arguments (targetField, value/fn); got %d", method, len(call.Args)))
 		}
-		nameLit, ok := call.Args[0].(*ast.BasicLit)
-		if !ok || nameLit.Kind != token.STRING {
-			return mkErr(callPos, fmt.Sprintf("q.%s: targetField must be a string literal", method))
+		path, d2, fail := extractTargetFieldPath(call.Args[0], targetType, fset, qualifier, method)
+		if fail {
+			return nil, d2, true
 		}
-		fieldName, err := strconv.Unquote(nameLit.Value)
-		if err != nil {
-			return mkErr(callPos, fmt.Sprintf("q.%s: cannot decode field name literal: %v", method, err))
-		}
-		tf, ok := targetFields[fieldName]
-		if !ok {
-			return mkErr(callPos, fmt.Sprintf("q.%s: target field %q is not an exported field of %s",
-				method, fieldName, types.TypeString(targetType, qualifier)))
+
+		// Resolve the path through Target's struct chain to get the
+		// leaf field's expected type. Each hop must be an exported
+		// struct field.
+		leafField, d2, fail := walkTargetPath(targetType, path, qualifier, callPos, method)
+		if fail {
+			return nil, d2, true
 		}
 
 		valueExpr := call.Args[1]
@@ -192,10 +194,10 @@ func parseConvertOverrides(fset *token.FileSet, opts []ast.Expr, info *types.Inf
 		switch method {
 		case "Set":
 			ovKind = convertOverrideSet
-			if !types.AssignableTo(valueTV.Type, tf.Type()) {
-				return mkErr(callPos, fmt.Sprintf("q.Set: target field %s.%s (%s) is not assignable from override value (%s)",
-					types.TypeString(targetType, qualifier), tf.Name(),
-					types.TypeString(tf.Type(), qualifier),
+			if !types.AssignableTo(valueTV.Type, leafField.Type()) {
+				return mkErr(callPos, fmt.Sprintf("q.Set: target field %s (%s) is not assignable from override value (%s)",
+					formatPath(targetType, path, qualifier),
+					types.TypeString(leafField.Type(), qualifier),
 					types.TypeString(valueTV.Type, qualifier)))
 			}
 		case "SetFn":
@@ -211,19 +213,192 @@ func parseConvertOverrides(fset *token.FileSet, opts []ast.Expr, info *types.Inf
 					types.TypeString(srcType, qualifier)))
 			}
 			ret := sig.Results().At(0).Type()
-			if !types.AssignableTo(ret, tf.Type()) {
-				return mkErr(callPos, fmt.Sprintf("q.SetFn: target field %s.%s (%s) is not assignable from fn return type (%s)",
-					types.TypeString(targetType, qualifier), tf.Name(),
-					types.TypeString(tf.Type(), qualifier),
+			if !types.AssignableTo(ret, leafField.Type()) {
+				return mkErr(callPos, fmt.Sprintf("q.SetFn: target field %s (%s) is not assignable from fn return type (%s)",
+					formatPath(targetType, path, qualifier),
+					types.TypeString(leafField.Type(), qualifier),
 					types.TypeString(ret, qualifier)))
 			}
 		}
-		if _, dup := out[fieldName]; dup {
-			return mkErr(callPos, fmt.Sprintf("q.Convert: duplicate override for target field %q", fieldName))
+
+		// Walk the tree, creating nodes as needed; install the leaf at
+		// the path's tip. Conflicts fire if either an ancestor leaf
+		// already exists or a descendant has a leaf.
+		if d2, fail := installOverride(root, path, &convertOverride{kind: ovKind, expr: valueExpr}, callPos, formatPath(targetType, path, qualifier)); fail {
+			return nil, d2, true
 		}
-		out[fieldName] = convertOverride{kind: ovKind, expr: valueExpr}
 	}
-	return out, Diagnostic{}, false
+	return root, Diagnostic{}, false
+}
+
+// walkTargetPath traverses a multi-hop path through Target's struct
+// chain and returns the leaf field. Each hop must be exported and
+// (except for the last) of struct kind.
+func walkTargetPath(targetType types.Type, path []string, qualifier types.Qualifier, pos token.Position, method string) (*types.Var, Diagnostic, bool) {
+	mkErr := func(msg string) (*types.Var, Diagnostic, bool) {
+		return nil, Diagnostic{
+			File: pos.Filename,
+			Line: pos.Line,
+			Col:  pos.Column,
+			Msg:  msg,
+		}, true
+	}
+	cur := targetType
+	for i, name := range path {
+		st, ok := cur.Underlying().(*types.Struct)
+		if !ok {
+			return mkErr(fmt.Sprintf("q.%s: cannot descend into %s.%s — %s is not a struct",
+				method, formatPath(targetType, path[:i], qualifier), name,
+				types.TypeString(cur, qualifier)))
+		}
+		var f *types.Var
+		for j := 0; j < st.NumFields(); j++ {
+			cand := st.Field(j)
+			if cand.Exported() && cand.Name() == name {
+				f = cand
+				break
+			}
+		}
+		if f == nil {
+			return mkErr(fmt.Sprintf("q.%s: target path %s — field %q not found on %s",
+				method, formatPath(targetType, path, qualifier), name,
+				types.TypeString(cur, qualifier)))
+		}
+		if i == len(path)-1 {
+			return f, Diagnostic{}, false
+		}
+		cur = f.Type()
+	}
+	return mkErr(fmt.Sprintf("q.%s: empty target path", method))
+}
+
+// formatPath renders the full target path as `Target.A.B.C` for
+// diagnostics.
+func formatPath(targetType types.Type, path []string, qualifier types.Qualifier) string {
+	out := types.TypeString(targetType, qualifier)
+	for _, p := range path {
+		out += "." + p
+	}
+	return out
+}
+
+// installOverride attaches an override leaf at the given path in the
+// tree, creating intermediate nodes as needed. Fails if an ancestor
+// already has a leaf (the ancestor override would shadow this one) or
+// if the path is itself an ancestor of an existing override.
+func installOverride(root *overrideNode, path []string, ov *convertOverride, pos token.Position, pathLabel string) (Diagnostic, bool) {
+	mkErr := func(msg string) (Diagnostic, bool) {
+		return Diagnostic{
+			File: pos.Filename,
+			Line: pos.Line,
+			Col:  pos.Column,
+			Msg:  msg,
+		}, true
+	}
+	cur := root
+	for i, name := range path {
+		if cur.leaf != nil {
+			return mkErr(fmt.Sprintf("q.Convert: override for %s conflicts with an earlier ancestor override", pathLabel))
+		}
+		if cur.children == nil {
+			cur.children = map[string]*overrideNode{}
+		}
+		next, exists := cur.children[name]
+		if !exists {
+			next = &overrideNode{}
+			cur.children[name] = next
+		}
+		if i == len(path)-1 {
+			if next.leaf != nil {
+				return mkErr(fmt.Sprintf("q.Convert: duplicate override for %s", pathLabel))
+			}
+			if len(next.children) > 0 {
+				return mkErr(fmt.Sprintf("q.Convert: override for %s conflicts with deeper overrides under the same path", pathLabel))
+			}
+			next.leaf = ov
+			return Diagnostic{}, false
+		}
+		cur = next
+	}
+	return mkErr("q.Convert: empty override path")
+}
+
+// extractTargetFieldPath enforces and extracts the field path from
+// the override's first argument. Accepted shapes:
+//
+//	UserDTO{}.FieldName             — single-hop (the common case)
+//	UserDTO{}.Inner.Field           — multi-hop, drills into a nested
+//	                                  struct field directly
+//	(UserDTO{}).Field                — parenthesised, also fine
+//
+// Anything else (a runtime selector on an actual variable, a call
+// expression, a string literal) fails with a diagnostic that names
+// the expected shape.
+func extractTargetFieldPath(arg ast.Expr, targetType types.Type, fset *token.FileSet, qualifier types.Qualifier, method string) ([]string, Diagnostic, bool) {
+	pos := fset.Position(arg.Pos())
+	mkErr := func(msg string) ([]string, Diagnostic, bool) {
+		return nil, Diagnostic{
+			File: pos.Filename,
+			Line: pos.Line,
+			Col:  pos.Column,
+			Msg:  msg,
+		}, true
+	}
+	expected := fmt.Sprintf("expected %s{}.<FieldName>[.<NestedField>...]", types.TypeString(targetType, qualifier))
+
+	// Strip outer parentheses.
+	for {
+		paren, ok := arg.(*ast.ParenExpr)
+		if !ok {
+			break
+		}
+		arg = paren.X
+	}
+
+	// Walk the SelectorExpr chain inward, collecting names. The
+	// innermost X must be a CompositeLit (T{} witness).
+	var names []string
+	cur := arg
+	for {
+		// Strip parens at each level.
+		for {
+			paren, ok := cur.(*ast.ParenExpr)
+			if !ok {
+				break
+			}
+			cur = paren.X
+		}
+		sel, ok := cur.(*ast.SelectorExpr)
+		if !ok {
+			break
+		}
+		names = append([]string{sel.Sel.Name}, names...)
+		cur = sel.X
+	}
+	if len(names) == 0 {
+		return mkErr(fmt.Sprintf("q.%s: targetField must be a struct-literal-selector expression; %s", method, expected))
+	}
+	if _, ok := cur.(*ast.CompositeLit); !ok {
+		return mkErr(fmt.Sprintf("q.%s: targetField must be of the form %s — got %s", method, expected, exprShape(cur)))
+	}
+	return names, Diagnostic{}, false
+}
+
+// exprShape returns a short human label describing the shape of expr,
+// used in diagnostics so users see what they wrote vs. the expected
+// composite-literal form.
+func exprShape(expr ast.Expr) string {
+	switch e := expr.(type) {
+	case *ast.Ident:
+		return fmt.Sprintf("identifier %q", e.Name)
+	case *ast.SelectorExpr:
+		return "a selector chain (e.g. someVar.Field) — use Target{}.Field instead"
+	case *ast.CallExpr:
+		return "a call expression"
+	case *ast.BasicLit:
+		return fmt.Sprintf("a literal of kind %s", e.Kind)
+	}
+	return fmt.Sprintf("%T", expr)
 }
 
 // convertOptionMethod returns "Set" or "SetFn" if fn is a q.Set / q.SetFn
@@ -255,11 +430,12 @@ func convertOptionMethod(fn ast.Expr) string {
 }
 
 // resolveStructConversion is the recursive workhorse: given source
-// and target struct types and an override map, build the per-field
-// list. Recurses into nested structs (overrides do NOT propagate
-// into nested calls — they apply only at the call's top-level
-// Target).
-func resolveStructConversion(srcType, targetType types.Type, overrides map[string]convertOverride, qualifier types.Qualifier, pos token.Position, seenPair map[string]bool) ([]convertField, Diagnostic, bool) {
+// and target struct types plus the override tree at the current
+// depth, build the per-field list. Recurses into nested structs;
+// per-target-field overrides at the current depth win, and child
+// override sub-trees ride along into the recursive call so deep
+// overrides reach their target.
+func resolveStructConversion(srcType, targetType types.Type, tree *overrideNode, qualifier types.Qualifier, pos token.Position, seenPair map[string]bool) ([]convertField, Diagnostic, bool) {
 	mkErr := func(msg string) ([]convertField, Diagnostic, bool) {
 		return nil, Diagnostic{
 			File: pos.Filename,
@@ -299,19 +475,56 @@ func resolveStructConversion(srcType, targetType types.Type, overrides map[strin
 			continue
 		}
 
-		// 1. Override?
-		if ov, ok := overrides[tf.Name()]; ok {
+		var subtree *overrideNode
+		if tree != nil {
+			subtree = tree.children[tf.Name()]
+		}
+
+		// 1. Direct override at this exact path?
+		if subtree != nil && subtree.leaf != nil {
 			fields = append(fields, convertField{
 				Name:         tf.Name(),
 				Kind:         convertKindOverride,
-				OverrideKind: ov.kind,
-				OverrideExpr: ov.expr,
+				OverrideKind: subtree.leaf.kind,
+				OverrideExpr: subtree.leaf.expr,
 			})
 			continue
 		}
 
-		// 2. Direct copy?
 		sf, hasSF := srcFields[tf.Name()]
+
+		// 2. Nested overrides at deeper paths? Recurse with the
+		//    subtree so the descendant overrides reach their target.
+		//    Both source and target sides must be structs; if the
+		//    source side isn't (or doesn't exist), the override path
+		//    is broken — diagnose.
+		if subtree != nil && subtree.children != nil && len(subtree.children) > 0 {
+			if !hasSF {
+				return mkErr(fmt.Sprintf("q.Convert: nested override targets %s.%s but source has no counterpart",
+					types.TypeString(targetType, qualifier), tf.Name()))
+			}
+			_, sfIsStruct := sf.Type().Underlying().(*types.Struct)
+			_, tfIsStruct := tf.Type().Underlying().(*types.Struct)
+			if !sfIsStruct || !tfIsStruct {
+				return mkErr(fmt.Sprintf("q.Convert: nested override targets %s.%s, but %s is not a struct",
+					types.TypeString(targetType, qualifier), tf.Name(),
+					types.TypeString(tf.Type(), qualifier)))
+			}
+			children, d, fail := resolveStructConversion(sf.Type(), tf.Type(), subtree, qualifier, pos, seenPair)
+			if fail {
+				return nil, d, true
+			}
+			fields = append(fields, convertField{
+				Name:     tf.Name(),
+				Kind:     convertKindNested,
+				Accessor: sf.Name(),
+				NestedTy: types.TypeString(tf.Type(), qualifier),
+				Nested:   children,
+			})
+			continue
+		}
+
+		// 3. Direct copy?
 		if hasSF && types.AssignableTo(sf.Type(), tf.Type()) {
 			fields = append(fields, convertField{
 				Name:     tf.Name(),
@@ -321,7 +534,7 @@ func resolveStructConversion(srcType, targetType types.Type, overrides map[strin
 			continue
 		}
 
-		// 3. Nested struct derivation?
+		// 4. Auto-derived nested struct?
 		if hasSF {
 			_, sfIsStruct := sf.Type().Underlying().(*types.Struct)
 			_, tfIsStruct := tf.Type().Underlying().(*types.Struct)
@@ -341,7 +554,7 @@ func resolveStructConversion(srcType, targetType types.Type, overrides map[strin
 			}
 		}
 
-		// 4. Diagnostic.
+		// 5. Diagnostic.
 		if !hasSF {
 			return mkErr(fmt.Sprintf("q.Convert: target field %s.%s has no counterpart on source %s",
 				types.TypeString(targetType, qualifier), tf.Name(),
@@ -377,6 +590,12 @@ func withSeen(seen map[string]bool, key string) map[string]bool {
 //
 //	q.Convert[Target](getUser())  →
 //	    func() Target { _qSrcN := getUser(); return Target{F: _qSrcN.F, ...} }()
+//
+// The renderer threads two source-variable names through the
+// recursion: `accessVar` walks deeper as the tree descends (so direct
+// copies at depth read from `srcVar.A.B`), while `topSrcVar` stays
+// rooted at the original source so SetFn invocations always receive
+// the top-level Source value the user declared in the call.
 func buildConvertReplacement(fset *token.FileSet, src []byte, sub qSubCall, subs []qSubCall, subTexts []string, counter int) string {
 	target := sub.ConvertTargetTypeText
 	if target == "" {
@@ -385,14 +604,14 @@ func buildConvertReplacement(fset *token.FileSet, src []byte, sub qSubCall, subs
 	srcText := exprTextSubst(fset, src, sub.ConvertSrc, subs, subTexts)
 
 	if _, ok := sub.ConvertSrc.(*ast.Ident); ok {
-		return renderConvertLiteral(fset, src, target, srcText, sub.ConvertFields)
+		return renderConvertLiteral(fset, src, target, srcText, srcText, sub.ConvertFields)
 	}
 	srcVar := fmt.Sprintf("_qSrc%d", counter)
-	literal := renderConvertLiteral(fset, src, target, srcVar, sub.ConvertFields)
+	literal := renderConvertLiteral(fset, src, target, srcVar, srcVar, sub.ConvertFields)
 	return fmt.Sprintf("(func() %s { %s := %s; return %s }())", target, srcVar, srcText, literal)
 }
 
-func renderConvertLiteral(fset *token.FileSet, src []byte, target, srcVar string, fields []convertField) string {
+func renderConvertLiteral(fset *token.FileSet, src []byte, target, accessVar, topSrcVar string, fields []convertField) string {
 	if len(fields) == 0 {
 		return target + "{}"
 	}
@@ -405,23 +624,27 @@ func renderConvertLiteral(fset *token.FileSet, src []byte, target, srcVar string
 		}
 		b.WriteString(f.Name)
 		b.WriteString(": ")
-		b.WriteString(renderConvertFieldValue(fset, src, f, srcVar))
+		b.WriteString(renderConvertFieldValue(fset, src, f, accessVar, topSrcVar))
 	}
 	b.WriteString("}")
 	return b.String()
 }
 
-func renderConvertFieldValue(fset *token.FileSet, src []byte, f convertField, srcVar string) string {
+func renderConvertFieldValue(fset *token.FileSet, src []byte, f convertField, accessVar, topSrcVar string) string {
 	switch f.Kind {
 	case convertKindOverride:
 		text := exprText(fset, src, f.OverrideExpr)
 		if f.OverrideKind == convertOverrideSetFn {
-			return "(" + text + ")(" + srcVar + ")"
+			// SetFn always receives the top-level Source, not the
+			// nested struct — even when the override sits at a deep
+			// path. The fn's signature is func(Source) V where Source
+			// is the q.Convert call's source type.
+			return "(" + text + ")(" + topSrcVar + ")"
 		}
 		return text
 	case convertKindNested:
-		return renderConvertLiteral(fset, src, f.NestedTy, srcVar+"."+f.Accessor, f.Nested)
+		return renderConvertLiteral(fset, src, f.NestedTy, accessVar+"."+f.Accessor, topSrcVar, f.Nested)
 	default: // convertKindDirect
-		return srcVar + "." + f.Accessor
+		return accessVar + "." + f.Accessor
 	}
 }

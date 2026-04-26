@@ -13,8 +13,8 @@ the missing field on the source.
 func Convert[Target, Source any](src Source, opts ...ConvertOption) Target
 
 // Overrides — see "Manual overrides" below.
-func Set[V any](targetField string, value V) ConvertOption
-func SetFn[Source, V any](targetField string, fn func(Source) V) ConvertOption
+func Set[V any](targetField V, value V) ConvertOption
+func SetFn[Source, V any](targetField V, fn func(Source) V) ConvertOption
 ```
 
 ## Surface caveat — why it's not a chain
@@ -28,8 +28,11 @@ the explicit type-arg, Source inferred from the argument.
 
 For each exported field on `Target`:
 
-1. **Override** — `q.Set("Field", value)` or `q.SetFn("Field", fn)`
-   supplies the value explicitly. Wins over auto-derivation.
+1. **Override** — `q.Set(Target{}.Field, value)` or
+   `q.SetFn(Target{}.Field, fn)` supplies the value explicitly. Wins
+   over auto-derivation per-field — there's no "auto-derive first,
+   then patch" pass; the resolver branches on each target field once
+   and the override short-circuits the auto path.
 2. **Direct copy** — same-named source field whose type is
    `types.AssignableTo` the target field's type.
 3. **Nested derivation** — same-named source field that is itself a
@@ -88,9 +91,9 @@ type UserDTO struct {
 }
 
 dto := q.Convert[UserDTO](user,
-    q.Set("Source", "v1"),
-    q.SetFn("Email",    func(u User) string { return strings.ToLower(u.Email) }),
-    q.SetFn("FullName", func(u User) string { return u.First + " " + u.Last }),
+    q.Set(UserDTO{}.Source, "v1"),
+    q.SetFn(UserDTO{}.Email,    func(u User) string { return strings.ToLower(u.Email) }),
+    q.SetFn(UserDTO{}.FullName, func(u User) string { return u.First + " " + u.Last }),
 )
 // → UserDTO{
 //       ID:       user.ID,
@@ -100,9 +103,36 @@ dto := q.Convert[UserDTO](user,
 //   }
 ```
 
-`targetField` MUST be a string literal — the rewriter validates the
-name against `Target`'s exported fields at compile time. Misspellings
-fail the build immediately.
+`targetField` MUST be a struct-literal selector expression of the
+form `Target{}.<FieldName>` — the rewriter extracts the field path
+from the AST, and Go's own type-checker validates both the field
+reference (rename `Source` → `SourceTag` and the compiler flags
+every override site) AND the value/fn return type via the unified
+generic param `V`. Strings would fail silently on rename; that's why
+we don't accept them.
+
+### Nested-field overrides
+
+Multi-hop paths target a nested field directly without forcing the
+user to spell out the whole intermediate struct:
+
+```go
+type Address    struct { Street, City string }
+type AddressDTO struct { Street, City string }
+type User       struct { Name string; Address Address }
+type UserDTO    struct { Name string; Address AddressDTO }
+
+dto := q.Convert[UserDTO](user,
+    q.Set(UserDTO{}.Address.City, "Springfield"), // override one nested field
+)
+// → UserDTO{
+//       Name:    user.Name,
+//       Address: AddressDTO{Street: user.Address.Street, City: "Springfield"},
+//   }
+```
+
+Other nested fields (here `Address.Street`) keep their auto-derived
+values from `user.Address`. Mix-and-match works at any depth.
 
 ## Source-evaluation discipline
 

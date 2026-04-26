@@ -8,8 +8,8 @@ package q
 //
 // Resolution order, per target field (exported only):
 //
-//   1. Override — q.Set(field, value) or q.SetFn(field, fn) supplies
-//      the value explicitly. Wins over auto-derivation.
+//   1. Override — q.Set(Target{}.Field, value) or q.SetFn(Target{}.Field, fn)
+//      supplies the value explicitly. Wins over auto-derivation.
 //   2. Direct copy — same-named source field whose type is
 //      types.AssignableTo the target field's type.
 //   3. Nested derivation — same-named source field that is itself a
@@ -20,8 +20,19 @@ package q
 //      assignable copy, no nested derivation. Build fails.
 //
 // Source fields with no Target counterpart are silently dropped
-// (target-driven, like Chimney). Recursive type cycles between
-// Source and Target are detected and rejected.
+// (target-driven, like Chimney). Source/Target type cycles are
+// detected and rejected.
+//
+// The override field reference is a typed Go selector expression:
+//
+//	q.Set(UserDTO{}.Source, "v1")        // not q.Set("Source", "v1")
+//	q.SetFn(UserDTO{}.Email, fn)
+//
+// `UserDTO{}.Source` is a valid Go selector expression — it evaluates
+// to the zero value at runtime, but Go type-checks the field
+// reference at compile time. Rename UserDTO.Source → SourceTag and
+// every override call site fails to compile. Strings would silently
+// stale-mismatch — that's why we don't take them.
 //
 // Surface caveat: the original Chimney sketch was the chain form
 // q.From(src).To[Target]() but Go forbids type parameters on
@@ -31,11 +42,16 @@ package q
 // exported fields, with optional per-field overrides supplied via
 // opts. Reads as: "Convert <to Target> from src".
 //
-//	type User    struct { ID int; Name, Email string; Internal bool }
-//	type UserDTO struct { ID int; Name string; Email string; Source string }
+//	type User    struct { ID int; First, Last, Email string; Internal bool }
+//	type UserDTO struct { ID int; FullName, Email, Source string }
 //	dto := q.Convert[UserDTO](user,
-//	    q.Set("Source", "v1"),
-//	    q.SetFn("Email", func(u User) string { return strings.ToLower(u.Email) }),
+//	    q.Set(UserDTO{}.Source, "v1"),
+//	    q.SetFn(UserDTO{}.Email, func(u User) string {
+//	        return strings.ToLower(u.Email)
+//	    }),
+//	    q.SetFn(UserDTO{}.FullName, func(u User) string {
+//	        return u.First + " " + u.Last
+//	    }),
 //	)
 //
 // The runtime body is unreachable in a successful build.
@@ -52,29 +68,38 @@ type ConvertOption struct {
 	_ struct{} //nolint:unused // chain contract; the rewriter erases this
 }
 
-// Set overrides the value of targetField with value. targetField MUST
-// be a string literal — the preprocessor validates the field name
-// against Target's exported fields at compile time, and the value's
-// type against the target field's declared type.
+// Set overrides the value of targetField with value.
 //
-//	q.Convert[UserDTO](u, q.Set("Source", "v1"))
+// targetField MUST be a Target{}.<FieldName> selector expression so
+// the rewriter can extract the field path and so Go's own type-checker
+// validates the field reference. The generic param V is unified with
+// both the field's type and the override value's type — assignability
+// is enforced by Go itself.
+//
+//	q.Convert[UserDTO](u, q.Set(UserDTO{}.Source, "v1"))
 //	// → UserDTO{..., Source: "v1"}
-func Set[V any](targetField string, value V) ConvertOption {
+//
+//	// Refactor-safe: rename UserDTO.Source → SourceTag and Go's
+//	// compiler flags this call site immediately.
+func Set[V any](targetField V, value V) ConvertOption {
 	panicUnrewritten("q.Set")
 	return ConvertOption{}
 }
 
 // SetFn overrides the value of targetField with the result of fn(src).
-// targetField MUST be a string literal. fn's signature must be
-// `func(Source) V` where V is types.AssignableTo the target field's
-// type. The function literal is invoked with the source value at the
-// rewritten call site — closures capture surrounding scope normally.
 //
-//	q.Convert[UserDTO](u, q.SetFn("FullName", func(u User) string {
+// targetField MUST be a Target{}.<FieldName> selector expression
+// (same shape as q.Set). The generic param V unifies the field's
+// type with the function's return type; Source unifies with the
+// surrounding q.Convert call's source type. The function is
+// invoked with the source value at the rewritten call site —
+// closures capture surrounding scope normally.
+//
+//	q.Convert[UserDTO](u, q.SetFn(UserDTO{}.FullName, func(u User) string {
 //	    return u.First + " " + u.Last
 //	}))
 //	// → UserDTO{..., FullName: (func(u User) string { ... })(u)}
-func SetFn[Source, V any](targetField string, fn func(Source) V) ConvertOption {
+func SetFn[Source, V any](targetField V, fn func(Source) V) ConvertOption {
 	panicUnrewritten("q.SetFn")
 	return ConvertOption{}
 }
