@@ -38,3 +38,20 @@ package q
 // itself is just an empty struct; all the work happens in the
 // preprocessor's validation pass.
 type FnParams struct{}
+
+// ValidatedStruct is the general-purpose sibling of FnParams. The
+// validation semantics are identical — every named field must be
+// keyed in literals unless tagged `q:"optional"` (or `q:"opt"`).
+// The two markers exist so users can pick the name that reads best
+// at the use site:
+//
+//   - FnParams        — for function-parameter structs (typical use case).
+//   - ValidatedStruct — for any other struct where literal
+//                       construction should fail-loud on missing
+//                       fields (DTOs, configuration objects, model
+//                       structs, builder internals).
+//
+// Pick whichever name reads better; the preprocessor accepts both.
+//
+// Plain runtime type — NOT rewritten by the preprocessor.
+type ValidatedStruct struct{}

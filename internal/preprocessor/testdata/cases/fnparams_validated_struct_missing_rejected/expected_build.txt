@@ -1,0 +1,2 @@
+# q.ValidatedStruct must reject missing required fields like q.FnParams.
+required field(s) [Version] not set

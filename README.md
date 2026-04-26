@@ -320,21 +320,23 @@ if userRequested {
 
 `q.Lazy(<expr>)` reads as if the expression were eager but the rewriter wraps it in a thunk closure. The first `.Value()` call evaluates the thunk under `sync.Once`; later calls return the cached result. Concurrency-safe by construction. `q.LazyE(<call>)` is the `(T, error)`-shaped sibling — pair `.Value()` with `q.Try` at the consumer. See [`docs/api/lazy.md`](docs/api/lazy.md).
 
-### Required-by-default parameter structs
+### Named parameters for constructors
+
+The "options struct" pattern is Go's stand-in for named arguments — it gets you the readability win at the call site but loses the safety win, since Go can't tell "explicitly zero" from "didn't set it." `q.FnParams` / `q.ValidatedStruct` close that gap: required-by-default struct literals, with optional opt-out per field.
 
 ```go
 type LoadOptions struct {
-    _       q.FnParams
+    _       q.FnParams                          // or q.ValidatedStruct
     Path    string                              // required
     Format  string                              // required
-    Timeout time.Duration `q:"optional"`        // optional
+    Timeout time.Duration `q:"opt"`             // optional (also accepts q:"optional")
 }
 
 Load(LoadOptions{Path: "/etc", Format: "yaml"}) // OK
 Load(LoadOptions{Path: "/etc"})                  // build error: Format required
 ```
 
-Add `_ q.FnParams` as a blank field on a parameter struct to flip the polarity: every field is required by default, opt out per field via the `q:"optional"` tag. The preprocessor checks each marked struct literal at its construction site; missing required fields fail the build with a diagnostic naming the gap. See [`docs/api/fnparams.md`](docs/api/fnparams.md).
+Add `_ q.FnParams` (function parameters) or `_ q.ValidatedStruct` (any other DTO / config / model struct) as a blank marker field. The preprocessor walks every struct literal in the package — top-level and nested — and rejects any literal of a marked type that omits a required field. Optional fields opt out per-field via `q:"opt"` / `q:"optional"`. See [`docs/api/fnparams.md`](docs/api/fnparams.md).
 
 ### Auto-derived dependency injection
 

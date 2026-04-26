@@ -1,0 +1,3 @@
+config: {{} app 1 <nil> false}
+load: {{} /etc yaml 0}
+mixed: {{} x 0 false}

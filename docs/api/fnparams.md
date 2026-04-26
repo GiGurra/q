@@ -1,14 +1,21 @@
-# `q.FnParams` — required-by-default parameter structs
+# `q.FnParams` / `q.ValidatedStruct` — named arguments for constructors
 
-Go's `func F(opts MyOpts)` pattern is the standard alternative to
-named arguments — but Go can't tell whether a caller "explicitly set
-this field to its zero value" or "didn't set it at all," so the
-"required field" check that languages with named arguments give you
-for free has no clean shape in pure Go.
+**The goal: named parameters in Go.** Languages with named arguments
+give you two wins for free — readability ("I can see at the call site
+what each value means") and safety ("the compiler tells me if I
+forgot a required argument"). Go's "options struct" pattern delivers
+the readability win but loses the safety one — Go can't distinguish
+"explicitly set this field to its zero value" from "didn't set it at
+all," so a typo or omission silently becomes a zero-valued default.
 
-`q.FnParams` is the opt-in marker that flips the polarity: every
-field is required-by-default; mark the optional ones with a
-`q:"optional"` tag.
+`q.FnParams` (and its general-purpose sibling `q.ValidatedStruct`)
+closes the gap. Add the marker as a blank field, and every field is
+required-by-default; mark the optional ones with a `q:"optional"`
+(or `q:"opt"`) tag. With the marker in place, omitting a required
+field becomes a compile-time error — the same thing a `func
+F(name: required, age: optional)` named-argument syntax would buy
+you, achieved through the standard struct-literal-options pattern
+plus a preprocessor pass.
 
 ```go
 type LoadOptions struct {
@@ -16,7 +23,7 @@ type LoadOptions struct {
     Path    string                                 // required
     Format  string                                 // required
     Timeout time.Duration `q:"optional"`           // optional
-    Logger  *slog.Logger  `q:"optional"`           // optional
+    Logger  *slog.Logger  `q:"opt"`                // optional (short form)
 }
 
 Load(LoadOptions{Path: "/etc", Format: "yaml"})    // OK
@@ -27,13 +34,32 @@ Load(LoadOptions{})                                 // build error: Path, Format
 ## Surface
 
 ```go
-type FnParams struct{}
+type FnParams        struct{}    // marker for function-parameter structs
+type ValidatedStruct struct{}    // marker for any struct (DTOs, configs, models, …)
 ```
 
-A zero-size empty struct. Use it as the type of a blank field
-(`_ q.FnParams`) on any struct you want validated. The field adds no
-bytes to the struct layout; it exists only to mark the type at the
-go/types level.
+Both are zero-size empty structs with **identical** validation
+semantics; pick whichever name reads best at the use site. Use
+`q.FnParams` when the struct is a function parameter; use
+`q.ValidatedStruct` for any other required-by-default struct (DTO,
+configuration object, model, builder internals).
+
+The marker field adds no bytes to the struct layout; it exists only
+to flag the type at the go/types level.
+
+## Optional-field tag spelling
+
+`q:"optional"` and `q:"opt"` are interchangeable. Pick whichever
+reads better in the surrounding tag stack.
+
+```go
+type Mixed struct {
+    _ q.ValidatedStruct
+    A string                       // required
+    B int    `q:"opt"`             // optional
+    C bool   `q:"optional"`        // optional, equivalent to q:"opt"
+}
+```
 
 ## What the preprocessor does
 
@@ -191,10 +217,57 @@ what was an intentional default.
   marker on the generic struct definition applies to every
   instantiation. Validation runs against the instantiated field set.
 
+## Why "named arguments for constructors" is the right framing
+
+Go's "options struct" pattern is a workaround for the absence of
+named arguments. It gets you the readability win (each field is
+named at the call site) but loses the safety win (the compiler
+can't tell which fields the caller actually meant to supply).
+
+`q.FnParams` / `q.ValidatedStruct` close that gap: with the marker
+in place, omitting a required field becomes a compile-time error,
+not a silent zero-value default. That's the "named args for ctors"
+shape Go's syntax has never supported directly.
+
+## Future directions
+
+The current pass enforces a single rule — "every named field must
+be keyed unless tagged optional." The same machinery (walk every
+CompositeLit, read tags via go/types, emit diagnostics) generalises
+to a richer set of literal-construction invariants:
+
+- **Bounds and shape constraints.** `q:"min=0,max=100"`,
+  `q:"len>0"`, `q:"nonzero"`. Constant-folded literals get checked
+  at compile time; non-constant values fall through to runtime guards
+  (or stay un-checked if the user prefers).
+- **Enum / set membership.** `q:"in:foo,bar,baz"` on a string
+  field, validated against literal values at compile time. Unifies
+  with `q.Exhaustive` for the named-constant case.
+- **Mutual exclusion / co-dependency.**
+  `q:"oneof:FieldA,FieldB,FieldC"` (exactly one must be keyed),
+  `q:"requires:OtherField"` (if this is keyed, OtherField must be
+  too). Useful for variant-shape options structs that don't quite
+  warrant a sum type.
+- **Format hints.** `q:"url"`, `q:"email"`, `q:"uuid"`, `q:"regex=..."`.
+  Compile-time validation when the value is a literal constant;
+  runtime check otherwise.
+- **Cross-field comparisons.** `q:"lessThan:OtherField"`,
+  `q:"after:StartTime"`. Same compile-time vs runtime split as
+  bounds checks.
+- **Conditional requiredness.** `q:"required-if=OtherField"` —
+  this field is required only when OtherField is also set. Captures
+  the common "if you opted into feature X, you must supply Y too"
+  pattern.
+
+The goal is the same throughout: surface the constraint at the
+literal site so a misuse fails the build instead of slipping through
+to runtime. Each addition is a self-contained pass extension; ship
+them one at a time as users ask.
+
 ## See also
 
 - [Design](../design.md) — the rewriter's contract and why parse-not-template.
 - `golangci-lint`'s `exhaustruct` — strictly enforces "every field
-  must be set" for tagged types. `q.FnParams` is the selective
+  must be set" for tagged types. The q markers are the selective
   variant: only truly required fields fail-loud, optionals get an
   explicit opt-out.

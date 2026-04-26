@@ -23,10 +23,16 @@ import (
 	"sort"
 )
 
-// fnParamsTypeName matches `(*types.Named).Obj().Name()` for the
-// marker type. Combined with the package path, this uniquely
-// identifies the marker across recompilations.
-const fnParamsTypeName = "FnParams"
+// validationMarkerNames are the q.* type names that flip a struct
+// to required-by-default. Both spellings have identical validation
+// semantics; the names exist so users can pick the one that reads
+// best at the use site (FnParams when the struct is a function
+// parameter, ValidatedStruct for any other required-by-default
+// struct).
+var validationMarkerNames = map[string]bool{
+	"FnParams":        true,
+	"ValidatedStruct": true,
+}
 
 // packageImportsQ reports whether any file in the package imports
 // pkg/q. Used by the typecheck pass to decide whether running the
@@ -185,9 +191,10 @@ func unwrapStruct(t types.Type) (*types.Struct, bool) {
 	}
 }
 
-// isFnParamsMarker reports whether a struct field is the
-// `_ q.FnParams` marker. The check matches by package path + type
-// name so users can rename their q import alias freely.
+// isFnParamsMarker reports whether a struct field is one of the
+// q.* validation markers (`_ q.FnParams` or `_ q.ValidatedStruct`).
+// The check matches by package path + type name so users can rename
+// their q import alias freely.
 func isFnParamsMarker(f *types.Var) bool {
 	if f.Name() != "_" {
 		return false
@@ -200,15 +207,19 @@ func isFnParamsMarker(f *types.Var) bool {
 	if obj == nil || obj.Pkg() == nil {
 		return false
 	}
-	return obj.Pkg().Path() == qPkgImportPath && obj.Name() == fnParamsTypeName
+	if obj.Pkg().Path() != qPkgImportPath {
+		return false
+	}
+	return validationMarkerNames[obj.Name()]
 }
 
 // hasOptionalTag reports whether a struct tag carries the
-// `q:"optional"` directive. Uses reflect.StructTag.Get for the parse,
-// matching how go/types tags are spelled.
+// `q:"optional"` (or short alias `q:"opt"`) directive. Uses
+// reflect.StructTag.Get for the parse, matching how go/types tags
+// are spelled.
 func hasOptionalTag(tag string) bool {
 	v := reflect.StructTag(tag).Get("q")
-	return v == "optional"
+	return v == "optional" || v == "opt"
 }
 
 // fnParamsLiteralTypeName returns a human-friendly type name for the
