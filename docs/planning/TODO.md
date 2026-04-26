@@ -44,6 +44,20 @@ The persistent backlog for `q`. A cold-state reader can pick up here without re-
   wrap on top if real codebases want it. The explicit helper can
   layer alongside as a non-q option.
 
+  **Hard invariant: capture-once.** A stack must be attached to an
+  error AT MOST ONE TIME — at the original creation / first-bubble
+  site. Subsequent wrap layers (a deeper q.Try bubbling an already-
+  stacked err, an `fmt.Errorf("ctx: %w", err)`, an
+  `errors.Join(...)`) MUST detect the existing stack via
+  `errors.As(err, *qStackErr{})` and NOT attach a fresh one. Two
+  motivations: (a) repeated capture across N wrap layers makes the
+  attached trace useless — only the innermost is the real call site,
+  the outer ones are just where the bubble passed through; (b)
+  stack capture is the dominant per-error cost, so doing it N times
+  per bubble chain regresses error-loop hot paths badly. The shim's
+  constructor must be the single point that decides "attach or
+  pass-through".
+
   **slog integration:** a custom `slog.Handler` (or a thin wrapper
   on top of `q.SlogContextHandler`) inspects every error-typed attr,
   pulls the stack via `errors.As(err, *qStackErr{})`, and emits it
@@ -64,10 +78,15 @@ The persistent backlog for `q`. A cold-state reader can pick up here without re-
     wraps via `fmt.Errorf("ctx: %w", err)`, the q-injected stack
     needs to flow through `Unwrap` so `errors.Is` / `errors.As`
     keep working. The shim must implement `Unwrap() error`.
-  - **Existing stack-carrying errors.** If the wrapped err already
-    carries a stack (the user pulled it in via pkg/errors or wrapped
-    a stdlib error explicitly), don't double-wrap. `errors.As`
-    against the q stack-error type before wrapping.
+  - **Foreign stack-carrying errors.** Capture-once handles q's own
+    shim trivially via `errors.As(*qStackErr)`, but third-party
+    stack-carriers (pkg/errors, cockroachdb/errors, go-errors) are a
+    grey zone. Decide whether to (a) detect them via interface probe
+    (`interface{ StackTrace() []runtime.Frame }` etc., enumerate the
+    common shapes), (b) always defer to upstream when ANY foreign
+    stack-carrier is present, or (c) attach our own anyway and let
+    the slog handler de-dup at log time. (a) is most accurate, (c)
+    is simplest.
   - **Goroutine boundaries.** Stack captured at error creation,
     naturally — but a stack at the *return* site (where q.Try fires)
     might be more useful for tracing the bubble chain. Decide
