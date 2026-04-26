@@ -138,6 +138,7 @@ const (
 	familyAtomOf         // q.AtomOf[T]() — q.Atom("name-of-T") for switch-case ergonomics
 	familyAsOneOf        // q.AsOneOf[T](v) — wrap v as a OneOfN-derived sum type T
 	familySealed         // var _ = q.Sealed[I](Variant{}, …) — directive: synthesise marker methods
+	familyConvert        // q.Convert[Target, Source any](src Source) Target — Chimney-style struct conversion
 )
 
 // form is the syntactic position of a recognised q.* call:
@@ -436,6 +437,19 @@ type qSubCall struct {
 	TernThen           ast.Expr
 	TernElse           ast.Expr
 	TernResultTypeText string
+
+	// q.Convert family — Chimney-style struct conversion.
+	//
+	// ConvertSrc is the single src argument captured at scan time.
+	// AsType already carries the explicit Target type-arg expression.
+	// ConvertTargetTypeText / ConvertFields are populated by
+	// resolveConvert: TargetTypeText is Target's spelling under the
+	// call's package qualifier; ConvertFields is the per-target-field
+	// mapping (in declaration order) that the rewriter emits as a
+	// struct literal.
+	ConvertSrc             ast.Expr
+	ConvertTargetTypeText  string
+	ConvertFields          []convertField
 
 	// q.At family — nested-nil safe traversal with a chain of fallbacks.
 	//
@@ -2174,6 +2188,22 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 			TernThen:  call.Args[1],
 			TernElse:  call.Args[2],
 			OuterCall: expr,
+		}, true, nil
+	}
+	// q.Convert[Target](src) — Chimney-style struct conversion. Target
+	// is the explicit type-arg; Source is inferred from src. The
+	// rewriter walks both struct types via go/types, pairs exported
+	// fields by exact name, and emits the literal Target{F: src.F, ...}
+	// expression. Field gaps surface as build-time diagnostics.
+	if typeArg, ok := isIndexedSelector(call.Fun, alias, "Convert"); ok {
+		if len(call.Args) != 1 {
+			return qSubCall{}, false, fmt.Errorf("q.Convert[Target] takes exactly 1 argument (src); got %d", len(call.Args))
+		}
+		return qSubCall{
+			Family:      familyConvert,
+			AsType:      typeArg,
+			ConvertSrc:  call.Args[0],
+			OuterCall:   expr,
 		}, true, nil
 	}
 	// q.At(chain).OrElse(alt)*.{Or(fallback)|OrDefault()} — nested-nil
