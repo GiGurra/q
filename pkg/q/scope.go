@@ -51,11 +51,11 @@ import (
 // serialise writes under a single lock; a concurrent Close either
 // sees the entire batch or none of it.
 type Scope struct {
-	mu        sync.Mutex
-	cache     map[string]any
-	cleanups  []scopeCleanup
-	closed    bool
-	closeOnce sync.Once
+	mu       sync.Mutex
+	cache    map[string]any
+	cleanups []scopeCleanup
+	parents  []*Scope // scopes that have Attach'd this *Scope as a child
+	closed   bool
 }
 
 // scopeCleanup is one entry in the scope's cleanup list. handle is
@@ -132,20 +132,50 @@ func (s *Scope) BoundTo(ctx context.Context) *Scope {
 }
 
 // Close fires every registered cleanup in reverse registration
-// order. Idempotent — sync.Once-wrapped; duplicate calls are safe.
+// order. Idempotent and safe for concurrent / recursive use:
+//
+//   - Concurrent: the lock + closed-flag transition guarantees
+//     exactly one goroutine runs the body. Other concurrent
+//     callers bail immediately (they don't block waiting for the
+//     first close to finish — closures are independent units of
+//     work and waiting buys nothing).
+//   - Recursive (cleanup calls scope.Close again, directly or via
+//     a cycle like A.Attach(B); B.Attach(A); A.Close): the bail
+//     check fires before re-entering the body, so no deadlock.
+//   - Mutex is released before firing cleanups so cleanup
+//     callbacks can re-enter the scope (Attach / Detach / Load
+//     all acquire the lock briefly).
+//
 // After Close, Load returns (nil, false) for any key, Commit /
-// Attach* return ErrScopeClosed, and Detach is a no-op.
+// Attach* still accept input but auto-fire cleanups eagerly (and
+// return ErrScopeClosed informationally), and Detach is a no-op.
+//
+// If this scope was Attach'd as a child of one or more parent
+// scopes, Close also calls parent.Detach(self) on each so the
+// parents drop their reference to this scope (avoiding a GC
+// retention chain when children close independently).
 func (s *Scope) Close() {
-	s.closeOnce.Do(func() {
-		s.mu.Lock()
-		s.closed = true
-		cleanups := s.cleanups
-		s.cleanups = nil
+	s.mu.Lock()
+	if s.closed {
 		s.mu.Unlock()
-		for i := len(cleanups) - 1; i >= 0; i-- {
-			cleanups[i].fn()
-		}
-	})
+		return
+	}
+	s.closed = true
+	cleanups := s.cleanups
+	parents := s.parents
+	s.cleanups = nil
+	s.parents = nil
+	s.mu.Unlock()
+	for i := len(cleanups) - 1; i >= 0; i-- {
+		cleanups[i].fn()
+	}
+	// Tell each parent to forget us. Detach is a no-op on a
+	// closed parent, so this is safe in any teardown order.
+	// Synchronous — there's no deadlock risk because parent.Detach
+	// only takes parent.mu (we don't hold s.mu here).
+	for _, p := range parents {
+		p.Detach(s)
+	}
 }
 
 // Closed reports whether Close has been called.
@@ -172,9 +202,13 @@ func (s *Scope) Load(key string) (any, bool) {
 
 // Attach binds a Closer (anything with `Close()`) to the scope.
 // scope.Close fires c.Close along with everything else, in
-// reverse registration order. Returns ErrScopeClosed if the
-// scope is already closed (the caller should fire c.Close
-// directly in that case).
+// reverse registration order.
+//
+// If the scope is already closed at Attach time, c.Close is fired
+// eagerly and ErrScopeClosed is returned (informationally — the
+// caller does NOT need to fall back; the resource has been
+// disposed). This avoids the leak risk of returning an error and
+// trusting the caller to handle teardown.
 //
 // *Scope itself satisfies the Closer interface, so subscopes
 // nest naturally:
@@ -183,15 +217,22 @@ func (s *Scope) Load(key string) (any, bool) {
 //	child := q.NewScope()
 //	parent.Attach(child)
 //	// when parent closes, child closes too.
+//	// when child closes independently, it removes itself from
+//	// parent's cleanup list so parent doesn't retain it past its
+//	// useful lifetime.
 //
 // Pass c again to scope.Detach to remove the binding before
 // scope.Close runs.
 func (s *Scope) Attach(c interface{ Close() }) error {
+	if child, ok := c.(*Scope); ok && child != nil {
+		child.addParent(s)
+	}
 	return s.attachWithHandle(c, c.Close)
 }
 
 // AttachE is Attach for resources whose Close returns an error.
-// Errors from Close at scope-close time are routed through
+// Errors from Close at scope-close time (or at eager auto-fire
+// when the scope is already closed) are routed through
 // q.LogCloseErr — the same sink q.Assemble's auto-cleanup uses,
 // so failed teardown is logged structurally rather than silently
 // dropped.
@@ -204,11 +245,20 @@ func (s *Scope) AttachE(c interface{ Close() error }) error {
 // interface holding such); pass it back to scope.Detach to remove
 // the binding before scope.Close runs.
 //
+// If the scope is already closed at AttachFn time, cleanup is
+// fired eagerly and ErrScopeClosed is returned (informationally —
+// the resource is already disposed; the caller doesn't need to
+// fall back).
+//
 //	conn := openConnection()
 //	if err := scope.AttachFn(conn, func() { conn.Drain(); conn.Close() }); err != nil {
-//	    conn.Close() // scope was already closed; fall back
+//	    // scope was closed; conn has already been drained + closed.
 //	    return err
 //	}
+//
+// If handle is a *Scope, AttachFn also wires the auto-detach
+// (independent close removes the entry from this scope) — same
+// shape as Attach when the closer happens to be a *Scope.
 //
 // A nil handle or nil cleanup is rejected.
 func (s *Scope) AttachFn(handle any, cleanup func()) error {
@@ -218,11 +268,15 @@ func (s *Scope) AttachFn(handle any, cleanup func()) error {
 	if cleanup == nil {
 		return errors.New("q.Scope.AttachFn: cleanup is nil")
 	}
+	if child, ok := handle.(*Scope); ok && child != nil {
+		child.addParent(s)
+	}
 	return s.attachWithHandle(handle, cleanup)
 }
 
 // AttachFnE is AttachFn for cleanup funcs that return an error.
-// The returned error at scope-close time is routed through
+// The returned error at scope-close time (or at eager auto-fire
+// when the scope is already closed) is routed through
 // q.LogCloseErr.
 func (s *Scope) AttachFnE(handle any, cleanup func() error) error {
 	if handle == nil {
@@ -231,7 +285,27 @@ func (s *Scope) AttachFnE(handle any, cleanup func() error) error {
 	if cleanup == nil {
 		return errors.New("q.Scope.AttachFnE: cleanup is nil")
 	}
+	if child, ok := handle.(*Scope); ok && child != nil {
+		child.addParent(s)
+	}
 	return s.attachWithHandle(handle, func() { LogCloseErr(cleanup(), "scope.AttachFnE") })
+}
+
+// addParent records p as a parent of s. Called by the various
+// Attach* paths when the closer / handle IS a *Scope, so s.Close
+// can later call p.Detach(s) and avoid retaining s past its
+// independent close.
+//
+// Idempotent under the same parent — a parent that Attaches the
+// child twice gets two parent-list entries; on Close, both
+// Detach calls succeed (peeling the registrations one at a time).
+func (s *Scope) addParent(p *Scope) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	s.parents = append(s.parents, p)
 }
 
 // Detach removes the cleanup registered under handle's identity.
@@ -258,14 +332,22 @@ func (s *Scope) Detach(handle any) bool {
 	return false
 }
 
-// attachWithHandle is the shared impl: lock, check closed, append.
+// attachWithHandle is the shared impl: lock, check closed, append
+// (or auto-fire on closed). Auto-fire runs cleanup OUTSIDE the
+// lock so cleanup callbacks are free to re-enter the scope.
 func (s *Scope) attachWithHandle(handle any, cleanup func()) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
+		s.mu.Unlock()
+		// Eagerly fire so the resource doesn't leak — the caller
+		// would otherwise need bespoke fallback code, easy to forget.
+		// ErrScopeClosed is returned informationally; the resource
+		// has already been disposed.
+		cleanup()
 		return ErrScopeClosed
 	}
 	s.cleanups = append(s.cleanups, scopeCleanup{handle: handle, fn: cleanup})
+	s.mu.Unlock()
 	return nil
 }
 
@@ -281,22 +363,30 @@ type ScopeEntry struct {
 // Commit atomically writes a batch of cache entries and (if non-
 // nil) attaches child as a single cleanup entry under the same
 // lock acquisition. A concurrent Close either sees the whole
-// batch or none of it. Returns ErrScopeClosed if s was closed
-// before the call.
+// batch or none of it.
+//
+// If s is already closed at Commit time, cache entries are
+// dropped and child.Close is fired eagerly so its cleanups run
+// (no leak). ErrScopeClosed is returned informationally — the
+// WithScope IIFE then returns this error to its caller.
 //
 // The WithScope IIFE pattern: build fresh deps into a per-call
 // internal scope (via internal.AttachE / internal.AttachFn etc.),
 // then call external.Commit(freshCache, internal). Closing
 // external cascades through internal in reverse-attach order so
 // the per-call deps close together, after later-registered scope
-// entries.
+// entries. When child is auto-detached on independent close, this
+// scope's reference to it is removed (no GC retention chain).
 //
 // child can be nil — Commit then writes only the cache entries.
 // Use that shape for non-resource bulk loads.
 func (s *Scope) Commit(entries []ScopeEntry, child *Scope) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
+		s.mu.Unlock()
+		if child != nil {
+			child.Close()
+		}
 		return ErrScopeClosed
 	}
 	for _, e := range entries {
@@ -304,6 +394,10 @@ func (s *Scope) Commit(entries []ScopeEntry, child *Scope) error {
 	}
 	if child != nil {
 		s.cleanups = append(s.cleanups, scopeCleanup{handle: child, fn: child.Close})
+	}
+	s.mu.Unlock()
+	if child != nil {
+		child.addParent(s)
 	}
 	return nil
 }
