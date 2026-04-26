@@ -45,6 +45,8 @@ The persistent backlog for `q`. A cold-state reader can pick up here without re-
 
   **Open question:** does running multiple toolexec passes on the same compile produce correct results, or does pass N+1 trip on temp paths from pass N? Likely fine since each pass writes its own tempdir and the final argv just lists them all, but worth a smoke test before going deeper.
 
+- **#91 follow-up — `q.At` bubble terminals.** v1 of `q.At` ships `.OrElse`, `.Or`, `.OrZero`. The bubble terminals (analogous to the q.NotNilE chain vocabulary) are still pending: `.OrErr(err)`, `.OrErrF(fn)`, `.OrWrap(msg)`, `.OrWrapf(format, args…)`, plus a `.OrCatch(fn func() (T, error))` for the recovery-or-bubble shape. Same chain machinery as today; the rewriter just emits `if err != nil { return zero, <err-expr> }` instead of returning the fallback when every path is nil. Park until users actually want them — most fallback patterns suit `.Or` / `.OrZero`, and a leaf nil that needs to bubble can already be handled with `q.NotNilE(q.At(chain).OrZero())`.
+
 ### Resource lifetime + dependency injection
 
 - **#83 ARC for non-RAM resources (long-term).** "Last-usage-site closes" is what Rust gets through linear types and what Swift / Objective-C get through reference counting. q's seed is already half-built: `q.Open` is the resource constructor, `.DeferCleanup` is the destructor, the rewriter knows where every resource binding flows, and the resource-escape detection pass identifies when a binding outlives its function.
@@ -136,6 +138,28 @@ The persistent backlog for `q`. A cold-state reader can pick up here without re-
 
   Inspiration: Qt's signal/slot, observable patterns from RxJava / RxJS, but simpler — no operator zoo, just connect/emit/disconnect.
 
+### Lazy / memoisation
+
+- **#92 — `q.Lazy[T]` deferred-evaluation values.** Runtime helper for memoised one-shot evaluation, with a preprocessor pass that turns `q.Lazy(calculateValue())` into a thunk-bound constructor so the call site reads naturally — no manual `func() T { … }` wrapping. Same trick as `q.Tern`, just one branch.
+
+  **Surface:**
+  - `type Lazy[T any] struct { /* opaque */ }`
+  - `func Lazy[T any](v T) *Lazy[T]` — user-facing; rewriter wraps the eager arg expression in a thunk closure. Bare runtime body is link-gated (panics if the rewriter didn't run, matching the existing `q.Tern` pattern).
+  - `func (l *Lazy[T]) Value() T` — sync.Once-backed; computes on first access, returns cached value thereafter.
+  - `func (l *Lazy[T]) IsForced() bool` — diagnostic; has the value been computed yet?
+
+  **Mechanism.** Rewriter intercepts `q.Lazy(<expr>)` and emits `qLazyFromThunk(func() T { return <expr> })`. The expression is captured by the closure; locals it references must be in scope at the call site (they already are, since the user wrote the expression there).
+
+  **Open design questions.**
+  - **Thread safety default.** `sync.Once` (concurrent-safe). Microsecond-scale cost; not worth a `q.LazyUnsafe` variant.
+  - **Error-bubbling thunks.** `q.Lazy(loadConfig())` where `loadConfig() (Config, error)`: introduce `q.LazyE[T]` mirroring the bubble-family E-variant, with `.Value() (T, error)` so users can write `cfg := q.Try(l.Value())`. Don't reshape `Lazy[T]` automatically based on the arg's arity — keep the surface explicit.
+  - **Reset / invalidate.** Out of scope at first. Users who want this wrap in their own struct.
+  - **Recursive `Value()` inside the thunk.** Deadlocks via sync.Once. Document; don't guard.
+  - **`q.AtCompileTime` interaction.** `q.Lazy(q.AtCompileTime(...))` is a no-op for the lazy part — comptime evaluates eagerly at preprocess time. Document; safe.
+  - **Closure capture of mutable locals.** The thunk captures locals by reference like any Go closure. If the user mutates a captured local between the `q.Lazy(...)` call and the first `.Value()`, the thunk sees the mutated value. This is normal Go-closure behaviour but worth one line in the docs.
+
+  **Why a quick win.** Tiny rewriter pass (one-arg version of the q.Tern trick), no new bubble surface, immediate ergonomic payoff. The runtime helper is ~30 lines.
+
 ### Future / parking lot
 
 - **#84 — `q.Assemble` parallel construction (Phase 4).** Surface: `q.WithAssemblyPar(ctx, n)` rides on the ctx like `q.WithAssemblyDebug`; rewriter emits topo waves with `sync.WaitGroup` per wave. Phases 1–3 shipped (single-entry auto-derived DI, `AssembleAll`, `AssembleStruct`, AssemblyResult chain with `.DeferCleanup()` / `.NoDeferCleanup()`). Parked because the sequential path is fast enough for current workloads — revisit if profiles show construction time as a measurable cost. Plan still lives in [`docs/planning/assemble.md`](assemble.md) for when it's picked back up.
@@ -193,6 +217,42 @@ The persistent backlog for `q`. A cold-state reader can pick up here without re-
   **Realistic scope if pursued:** start with fixed-layout primitive arrays (`[N]int`, `[N]float64`, `[N]byte`) where Go's layout is well-defined. Emit a `var _qCt0_value = [...]int{1, 2, 3, ...}` Go literal at file scope. The Go compiler's existing constant-folding optimisations turn this into `.rodata` placement automatically — no preprocessor relocation work needed. That covers the "embed a 64KB CRC table" use case at zero runtime cost. Defer the pointer-relocation tier indefinitely; the codec route is good enough for everything else.
 
   **When this matters:** if a real workload shows q.AtCompileTime decode time as a measurable startup-cost line item OR if the encoded JSON/Gob blob bloats the binary noticeably. Until then, the codec route earns its keep.
+
+- **#93 — Required-by-default parameter structs (opt-out via `q:"optional"`).** `func Foo(p Params)` with a struct param is the standard Go alternative to named arguments. The gap: Go can't distinguish "user explicitly set this to its zero value" from "user didn't set it," so a "required field" check on top of plain struct literals has no clean shape in pure Go. Distinct from the dropped `q.Call` / `q.Named` shape (see "Considered and dropped"); that attached named semantics at the call site, this attaches required-by-default semantics to the parameter struct's *definition* and lets callers keep plain Go literal syntax.
+
+  **Mechanism.** Flip the polarity: every field is required by default; mark optional fields explicitly.
+
+  ```go
+  type Params struct {
+      A       int                                 // required
+      B       string                              // required
+      Timeout time.Duration `q:"optional"`        // optional, zero = use default
+      Logger  *slog.Logger  `q:"optional"`        // optional
+  }
+  ```
+
+  Preprocessor inspects each struct type's AST and tag set (same machinery as the per-package q.* scan; conceptually similar to what `q.AtCompileTime` does for arbitrary expressions, but specialised to struct-tag reading). For each function whose param is one of these types, every call site whose arg is a struct literal must syntactically name every required (= non-optional) field. Missing required field → preprocess-time error.
+
+  **Why flip the polarity from required-marker to optional-marker.**
+  - **Fail-safe default.** With a "mark required" tag, forgetting the tag silently degrades to "no check." Required-by-default makes forgetting fail loud — the call site won't compile, which is the right direction.
+  - **Lower tag noise.** In real Go param structs most fields are mandatory; you put them there because the function needed them. Tagging the minority (optionals) is shorter than tagging the majority.
+  - **Composes with existing tooling.** `golangci-lint`'s `exhaustruct` enforces "every field set" but lacks a clean opt-out for legitimately-optional fields. Required-by-default + `q:"optional"` opt-out is exactly that opt-out.
+
+  **Hard limit (deliberately accepted — no data-flow analysis).** Only struct literals at the call site are checkable.
+  - `Foo(Params{A: 1, B: "x"})` ✓ — checked, every required field present.
+  - `Foo(Params{1, "x", 0, nil})` ✓ — positional literal, every field set by construction.
+  - `Foo(Params{A: 1})` ✗ — required field `B` missing, preprocess-time error.
+  - `Foo(p)` where `p := Params{A: 1, B: "x"}` — *not* checked. Document; users who want stricter coverage do their own entry-time check or rely on `exhaustruct`.
+  - `Foo(getParams())` — not checked. Same reasoning.
+
+  **Open design questions.**
+  - **Cross-package struct.** `Foo(otherpkg.Params{A: 1})` — preprocessor reads otherpkg's struct definition via go/types like the rest of q. Works the same.
+  - **Embedded fields with tags.** Punt for v1; rare, and the recursion semantics (does an untagged embedded struct count as one required field, or do its inner required fields propagate?) deserve their own design pass.
+  - **Zero-as-explicit-default.** `Foo(Params{A: 0, B: "x"})` — A is syntactically present, treat as set. Users wanting "non-zero required" semantics layer `q.NonZero(p.A)` runtime check on top.
+  - **Tag value extension.** Start with bare `q:"optional"`. If documentation hints become useful later (`q:"optional,doc:request timeout"`), extend incrementally.
+  - **Migration of existing code.** Adding the convention to a struct that already has callers immediately turns previously-passing `Foo(Params{A: 1})` calls into preprocess errors. That's correct (those calls were probably bugs), but document the migration step: tag every field that wasn't always set in practice with `q:"optional"`, then tighten over time.
+
+  **Why now-ish.** The flipped polarity makes this an actual ergonomic win: most fields don't need tags, optionals are visibly marked, forgetting fails loud. Preprocessor work is bounded — AST tag scan + per-call-site keyed-field verification, no flow analysis.
 
 ### Considered and dropped
 

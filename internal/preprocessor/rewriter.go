@@ -354,6 +354,8 @@ func renderShape(fset *token.FileSet, src []byte, sh callShape, counter *int, al
 			subTexts[i] = buildAssembleSubText(fset, src, sh.Calls[i], sh.Calls, subTexts, alias, counters[i])
 		case familyTern:
 			subTexts[i] = buildTernReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts)
+		case familyAt:
+			subTexts[i] = buildAtReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts)
 		case familyAtCompileTime, familyAtCompileTimeCode:
 			subTexts[i] = buildAtCompileTimeReplacement(sh.Calls[i])
 		case familyGenerator:
@@ -844,6 +846,7 @@ func isInPlaceFamily(f family) bool {
 		familyMatch,
 		familyAssemble, familyAssembleAll, familyAssembleStruct,
 		familyTern,
+		familyAt,
 		familyAtCompileTime, familyAtCompileTimeCode,
 		familyGenerator:
 		return true
@@ -1108,6 +1111,9 @@ func renderSubCall(fset *token.FileSet, src []byte, sh callShape, subIdx int, su
 		return "", fmtUsed, false, false, nil
 	case familyTern:
 		// q.Tern emits an IIFE in-place; no extra bind/check block.
+		return "", false, false, false, nil
+	case familyAt:
+		// q.At chain emits an IIFE in-place; no extra bind/check block.
 		return "", false, false, false, nil
 	case familyAwait:
 		text, err := renderAwait(fset, src, sh, sub, counter, alias, subs, subTexts)

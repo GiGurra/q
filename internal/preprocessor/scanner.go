@@ -130,6 +130,7 @@ const (
 	familyAssembleAll    // q.AssembleAll[T](recipes...) ([]T, error) — multi-provider aggregation
 	familyAssembleStruct // q.AssembleStruct[T](recipes...) (T, error) — field-decomposed multi-output
 	familyTern           // q.Tern[T](cond, ifTrue, ifFalse) T — conditional expression
+	familyAt             // q.At[T](chain).OrElse(alt)*.Or(fallback) | .OrDefault() — nested-nil safe traversal
 )
 
 // form is the syntactic position of a recognised q.* call:
@@ -421,7 +422,37 @@ type qSubCall struct {
 	TernThen           ast.Expr
 	TernElse           ast.Expr
 	TernResultTypeText string
+
+	// q.At family — nested-nil safe traversal with a chain of fallbacks.
+	//
+	// Source shape recognised by the scanner:
+	//
+	//	q.At(<chain>).OrElse(<alt>)*.{Or(<fallback>) | OrDefault()}
+	//
+	// AtPaths carries the chain expression + every .OrElse arg in
+	// source order (entry first). AtTerminal identifies which terminal
+	// closes the chain. AtTerminalArg is the .Or fallback argument
+	// (nil for OrDefault). AtHopNilable is parallel to AtPaths: each
+	// inner []bool gives the per-hop nilability of that path's chain;
+	// non-chain alts (any expression that isn't a SelectorExpr) carry
+	// a nil inner slice (the rewriter just splices the value in).
+	// AtResultTypeText is T's spelling under the call's package
+	// qualifier. Populated by the typecheck pass.
+	AtPaths            []ast.Expr
+	AtHopNilable       [][]bool
+	AtTerminal         atTerminal
+	AtTerminalArg      ast.Expr
+	AtResultTypeText   string
 }
+
+// atTerminal identifies which terminal method closes a q.At chain.
+type atTerminal int
+
+const (
+	atTerminalNone     atTerminal = iota
+	atTerminalOr                   // .Or(fallback) — return fallback when every path is nil
+	atTerminalOrZero            // .OrDefault()  — return zero value of T
+)
 
 // assembleChain enumerates the chain terminator on an Assemble*
 // family call. None means the user wrote a bare `q.Assemble[T](...)`
@@ -1318,6 +1349,14 @@ func hasQRefInSub(sub qSubCall, alias string) bool {
 			return true
 		}
 	}
+	for _, p := range sub.AtPaths {
+		if hasQRef(p, alias) {
+			return true
+		}
+	}
+	if hasQRef(sub.AtTerminalArg, alias) {
+		return true
+	}
 	if hasQRef(sub.TernCond, alias) || hasQRef(sub.TernThen, alias) || hasQRef(sub.TernElse, alias) {
 		return true
 	}
@@ -1699,6 +1738,17 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 			TernElse:  call.Args[2],
 			OuterCall: expr,
 		}, true, nil
+	}
+	// q.At(chain).OrElse(alt)*.{Or(fallback)|OrDefault()} — nested-nil
+	// safe traversal with a fallback chain. The terminal method (.Or or
+	// .OrDefault) is the outer-most call; the scanner unwinds inward
+	// through any .OrElse hops to find the q.At entry, collecting every
+	// path expression in source order.
+	if sub, ok, err := matchAtChain(call, alias); err != nil {
+		return qSubCall{}, false, err
+	} else if ok {
+		sub.OuterCall = expr
+		return sub, true, nil
 	}
 	// q.Tag[T](field, key) — both args MUST be string literals so
 	// the rewriter can resolve the tag at compile time.

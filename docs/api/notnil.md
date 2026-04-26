@@ -61,7 +61,17 @@ q.NotNil(somePtr)                  // fail loudly and early if nil
 // ... use somePtr.Field freely below
 ```
 
+## When `q.At` is the better fit
+
+`q.NotNil` / `q.NotNilE` guard a *single* pointer. If you're chasing
+a value through *multiple* nilable hops (`a.b.c.d`), reach for
+[`q.At`](at.md) instead — it nil-guards every intermediate, supports
+multiple fallback paths, and reads better than nested `q.NotNilE`
+calls. Use `q.NotNil` when you genuinely have one pointer to check;
+`q.At` when the chain has two or more hops.
+
 ## See also
 
+- [q.At](at.md) — nested-nil safe traversal across selector chains
 - [q.Try](try.md) — for `(T, error)` values
 - [Design](../design.md#2-the-user-facing-surface) — why the two families split

@@ -289,6 +289,24 @@ tier := q.Tern(score >= 90, "A",
 
 `q.Tern(cond, ifTrue, ifFalse)` returns `ifTrue` when `cond` is true, otherwise `ifFalse`. The preprocessor splices each branch's source span into its own arm of an IIFE — so only the matching branch is evaluated, despite Go's eager arg-eval semantics. Lazy by source-splicing, not by func-thunks.
 
+### Nested-nil safe traversal
+
+```go
+theme := q.At(user.Profile.Settings.Theme).Or("light")
+// → "light" if user, Profile, or Settings is nil; user.Profile.Settings.Theme otherwise.
+
+// Multiple fallback paths — try in source order, first non-nil wins:
+endpoint := q.At(opts.Endpoint).
+    OrElse(env.Endpoint).
+    OrElse(globalConfig.DefaultEndpoint).
+    Or("https://example.com")
+
+// Zero-value terminal:
+name := q.At(user.Profile.DisplayName).OrZero()  // "" if any hop is nil
+```
+
+`q.At(<chain>)` opens an optional-chaining-style traversal. The rewriter walks each hop, asks go/types whether it's nil-checkable, and emits per-hop guards inside an IIFE. `.OrElse(<alt>)` chains additional paths / values to try; `.Or(<fallback>)` and `.OrZero()` close the chain. Each path's expression is single-eval and evaluated lazily — only when reached. See [`docs/api/at.md`](docs/api/at.md).
+
 ### Auto-derived dependency injection
 
 ```go
