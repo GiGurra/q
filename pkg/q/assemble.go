@@ -4,13 +4,15 @@ package q
 // preprocess time. List the recipe functions or inline values; the
 // preprocessor reads each recipe's signature, builds a dep graph
 // keyed by output type, topo-sorts it, and emits a flat sequence of
-// calls building the requested target T. Always returns (T, error);
-// compose at the call site:
+// calls building the requested target T. Returns AssemblyResult[T];
+// pick the chain terminator to set the resource-lifetime policy:
 //
-//	server, err := q.Assemble[*Server](newConfig, newDB, newServer)
-//	server      := q.Try(q.Assemble[*Server](...))    // inside (T, error)-returning fn
-//	server      := q.Unwrap(q.Assemble[*Server](...)) // panic on err (main, init, tests)
-//	server      := q.TryE(q.Assemble[*Server](...)).Wrap("server init") // chain shape
+//	server, err := q.Assemble[*Server](newConfig, newDB, newServer).Release()
+//	server      := q.Try(q.Assemble[*Server](...).Release())    // inside (T, error)-returning fn
+//	server      := q.Unwrap(q.Assemble[*Server](...).Release()) // panic on err (main, init, tests)
+//	server      := q.TryE(q.Assemble[*Server](...).Release()).Wrap("server init") // chain shape
+//
+//	server, shutdown, err := q.Assemble[*Server](...).NoRelease() // caller owns shutdown
 //
 // context.Context isn't special — it's just another dependency. If
 // a recipe takes context.Context as an input, supply ctx as an
@@ -26,13 +28,25 @@ package q
 //
 //   - A function reference — top-level func, package-qualified func, method
 //     value, or any function-typed expression. Inputs become required deps;
-//     the first return value provides its type. (T, error) returns let the
-//     recipe bubble its own failure into the assembly's error path.
+//     the first return value provides its type. Five return shapes are
+//     accepted: (T), (T, error), (T, func()), (T, func(), error), and any
+//     of those wrapped via q.PermitNil(...) to opt out of the runtime nil-
+//     check. Resource shapes (with cleanup func) feed onto the cleanup
+//     chain; pure ones don't.
 //
 //   - An inline value (precomputed value / constant / call result) — any
 //     non-function expression. Its type IS the provided type; no inputs
 //     required. The ZIO `ZLayer.succeed` analogue. Useful for config
-//     overrides, test injections, and threading external state.
+//     overrides, test injections, and threading external state. Inline
+//     values are caller-owned: never auto-closed even if T has a Close
+//     shape.
+//
+// Auto-detected cleanup. When a function recipe returns a type with a
+// recognisable close shape (Close() / Close() error / writable channel —
+// not recv-only) and the recipe didn't already declare an explicit
+// cleanup, the resolver synthesises one. Receive-only channels are never
+// auto-closed since closing is the sender's responsibility (and Go itself
+// rejects close() on a recv-only channel).
 //
 // recipes is `...any` because Go's type system can't express "any function
 // with any number of inputs and one output". The preprocessor's typecheck
@@ -166,6 +180,29 @@ func AssembleAll[T any](recipes ...any) AssemblyResult[[]T] {
 	panicUnrewritten("q.AssembleAll")
 	return AssemblyResult[[]T]{}
 }
+
+// PermitNil wraps an Assemble recipe to opt the recipe out of the
+// runtime nil-check the rewriter would otherwise emit on the
+// recipe's bound _qDep<N> value. Use it when nil IS a valid output
+// of the recipe — for example, an optional-dependency ctor where
+// downstream consumers are written to handle a nil input.
+//
+//	// newOptionalCache may legitimately return nil ("no cache configured")
+//	cache, err := q.Assemble[*Cache](newConfig, q.PermitNil(newOptionalCache)).Release()
+//
+// PermitNil is a typed identity at runtime — outside the
+// preprocessor it just returns recipe unchanged. The preprocessor
+// detects q.PermitNil(<recipe>) at scan time, unwraps to <recipe>,
+// and marks the resulting Assemble step so the nil-check is
+// skipped. Works with both function-reference and inline-value
+// recipes.
+//
+// PermitNil affects ONLY the nil-check on the recipe's own output.
+// A nil input to a downstream consumer recipe doesn't change the
+// consumer's behaviour — that's the consumer's problem. Recipes
+// whose output type can't hold nil (struct values, basic types,
+// arrays) pass through unchanged: there's no nil-check to skip.
+func PermitNil[T any](recipe T) T { return recipe }
 
 // AssembleStruct is the field-decomposition sibling of Assemble. T
 // must be a struct; each field is treated as a separate dep target.

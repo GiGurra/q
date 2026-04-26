@@ -20,9 +20,9 @@ overhead.
   chat, scan this first.
 - [`docs/planning/atcompiletime.md`](docs/planning/atcompiletime.md) — design notes for q.AtCompileTime (mechanism,
   edge cases, fixture matrix). Reference when changing that subsystem.
-- [`docs/planning/assemble.md`](docs/planning/assemble.md) — implementation plan for q.Assemble (TODO #84). Three-
-  phase rollout: auto-derived assembly + diagnostics, AssembleAll + struct-target, resource-recipe lifetime.
-  Self-contained; cold-state implementer can resume from this doc alone.
+- [`docs/planning/assemble.md`](docs/planning/assemble.md) — Phase 4 plan for q.Assemble (TODO #84, parked).
+  Parallel topo-wave construction via `q.WithAssemblyPar`. Self-contained; cold-state implementer can resume
+  from this doc alone if Phase 4 gets unparked. Current public surface is documented in `docs/api/assemble.md`.
 
 ## No implementation history in docs
 

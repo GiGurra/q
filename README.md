@@ -308,8 +308,11 @@ func newServer(d *DB, c *Config) *Server { return &Server{db: d, cfg: c} }
 //                  use when lifetime spans more than the function
 //                  scope (main / signal handlers / background workers).
 //
-// Recipes can be (T), (T, error), or (T, func(), error). Resource
-// recipes feed cleanups onto the chain; the rest pass through.
+// Recipes can be (T), (T, error), (T, func()), (T, func(), error),
+// or an inline value. Resource shapes (and types with auto-detected
+// Close() / Close() error / writable channel) feed cleanups onto
+// the chain; the rest pass through. Wrap a recipe in q.PermitNil
+// to opt it out of the runtime nil-check when nil IS a valid output.
 server := q.Try(q.Assemble[*Server](newConfig, openDB, newServer).Release())
 
 // In main, manage shutdown explicitly:

@@ -73,18 +73,7 @@ Bare `q.Assemble[T](...)` — without `.Release()` or `.NoRelease()` — does no
 
 ## What counts as a recipe
 
-| Form                          | Example                                      | Behaviour                                                                             |
-|-------------------------------|----------------------------------------------|---------------------------------------------------------------------------------------|
-| Pure function reference       | `newDB`                                      | Inputs become deps; first return value is the provided type. No cleanup.              |
-| Errored function reference    | `newDB` (returns `(*DB, error)`)             | Same; bubbles on failure into the assembly's error path. No cleanup.                  |
-| Resource recipe               | `openDB` (returns `(*DB, func(), error)`)    | The `func()` is registered as the cleanup; fires in reverse-topo at shutdown.         |
-| Inline value                  | `cfg`, `&Config{...}`, `loadConfig()`        | The value's type IS the provided type; no inputs required. No cleanup.                |
-
-Top-level funcs, package-qualified funcs (`pkg.NewDB`), and method values (`srv.NewDB`) all work — anything `go/types` resolves as a `*types.Signature`. Function calls (`getRecipe()`) are accepted as inline values: their type is the call's return type. Function-typed *values* (a `func() *Config` variable) are treated as function references, not inline values.
-
-## Constructor return shapes
-
-Every reasonable shape works:
+Every reasonable constructor shape works:
 
 ```go
 NewX() X                    // value type
@@ -99,9 +88,11 @@ NewX() (*X, func(), error)  // resource recipe — explicit cleanup with error p
 NewX() (Ifc, func(), error) // interface resource recipe — also valid
 ```
 
-Any of these can also gain auto-detected cleanup if T has a `Close()` / `Close() error` method or is a channel — see [Resource lifetime](#resource-lifetime).
+Any of these can also gain auto-detected cleanup if T has a `Close()` / `Close() error` method or is a writable channel — see [Resource lifetime](#resource-lifetime).
 
-Pointer / interface / slice / map / chan / func outputs are checked for nil at runtime (see [Nil-recipe detection](#nil-recipe-detection)). Value-typed outputs (struct, basic types, arrays) skip the check — they can't be nil.
+Inline values (`cfg`, `&Config{...}`, `loadConfig()`) are also valid recipes — the value's type IS the provided type, no inputs required. See [Inline values as recipes](#inline-values-as-recipes).
+
+Pointer / interface / slice / map / chan / func outputs are checked for nil at runtime (see [Nil-recipe detection](#nil-recipe-detection)). Use [`q.PermitNil`](#permitting-nil--qpermitnil) to opt a single recipe out when nil IS a valid output. Value-typed outputs (struct, basic types, arrays) skip the check — they can't be nil.
 
 ## Resource lifetime
 
@@ -131,11 +122,14 @@ server, err := q.Assemble[*Server](newDB, newDoneCh, newServer).Release()
 
 The auto-detected shapes:
 
-| T shape                       | Synthesised cleanup                                              |
-|-------------------------------|------------------------------------------------------------------|
-| `chan U` / `chan<- U` / `<-chan U` | `func() { close(t) }`                                            |
-| Has `Close()`                 | `func() { t.Close() }`                                           |
-| Has `Close() error`           | `func() { q.LogCloseErr(t.Close(), "<recipe-label>") }`          |
+| T shape                | Synthesised cleanup                                     |
+|------------------------|---------------------------------------------------------|
+| `chan U` / `chan<- U`  | `func() { close(t) }`                                   |
+| `<-chan U`             | *(none — never auto-closed; see below)*                 |
+| Has `Close()`          | `func() { t.Close() }`                                  |
+| Has `Close() error`    | `func() { q.LogCloseErr(t.Close(), "<recipe-label>") }` |
+
+**Receive-only channels (`<-chan U`) are never auto-closed.** Closing a channel is the sender's responsibility, and Go itself rejects `close(c)` on a recv-only channel. A recipe whose declared output type is `<-chan U` is signalling that the channel is being *consumed*, not owned, by the assembly — the producer side lives elsewhere (a goroutine, a network source) and is responsible for its own teardown. Use a bidirectional `chan U` (or `chan<- U` if you want to expose only the send side) when the recipe owns the channel and the assembly should close it.
 
 The `Close() error` path routes through `q.LogCloseErr`, which `slog.Error`s the failure with the recipe label as a structured attr — failed teardown is loud, not silent.
 
@@ -191,18 +185,6 @@ Whether the cleanup is auto-detected or explicit, the chain terminator decides w
 - **`.NoRelease()`** — handed to the caller as an idempotent closure for explicit control.
 
 In both cases, **partial-failure cleanup is automatic.** If recipe N fails, the cleanups for recipes 0..N-1 fire in reverse-topo before the error bubbles. The chain emerges intact: nothing leaks even on failure paths.
-
-### Mixing all four shapes
-
-A single `q.Assemble` call can mix:
-
-- Pure recipes: `func newConfig() *Config` (no cleanup).
-- Errored recipes: `func newDecoder() (*Decoder, error)` (no cleanup unless T has a close shape — then auto-detect).
-- Explicit resource recipes: `func openHTTPServer(addr string) (*http.Server, func(), error)` (cleanup from the recipe).
-- Non-erroring resource recipes: `func newWorker() (*Worker, func())` (cleanup from the recipe).
-- Inline values: `cfg`, `existingDB` (no cleanup, ever — caller-owned).
-
-Each pushes (or doesn't push) a cleanup onto the chain in topo order; teardown reverses it.
 
 ## Happy path examples
 
@@ -507,13 +489,6 @@ The target type *Cache requires:
 
 **Exception:** `context.Context` recipes are exempt from this check. Supplying ctx purely for assembly-config (debug, future hooks) doesn't fail the build even when no recipe consumes it.
 
-### Recipe shape rejections
-
-- **No return values** — `recipe #N (fn) returns no values — recipes must return T or (T, error)`
-- **Three-or-more returns** — `recipe #N (fn) returns 3 values; recipes must return T or (T, error)`
-- **Non-error second return** — `recipe #N (fn) second return is *MyErr; recipes must return T or (T, error) where the second value is the built-in 'error'` (catches the typed-nil-interface pitfall the same way `q.Try` does)
-- **Variadic recipe** — `recipe #N (fn) is variadic; q.Assemble can't infer a fixed dep set for variadic inputs — wrap it in a fixed-arity adapter`
-
 ## Nil-recipe detection
 
 Constructors that return `nil` are a real bug: a recipe of type `func(*Config) *DB` returning `nil` for a configuration error means downstream consumers receive a nil pointer that, when assigned into an interface slot, becomes a non-nil interface holding a nil concrete (Go's classic typed-nil-interface pitfall). The rewriter catches this immediately after the bind, before any implicit interface conversion.
@@ -530,6 +505,34 @@ errors.Is(err, q.ErrNil) // true
 Value-typed outputs (struct, basic types, arrays) skip the check — they can't be nil.
 
 The check runs on the *bound* `_qDep<N>` value (not on the result of any subsequent interface conversion), so a typed-nil from a buggy concrete constructor can't masquerade as a non-nil interface at the consumer's call site.
+
+## Permitting nil — `q.PermitNil`
+
+Some recipes legitimately return `nil` — an "optional dependency" pattern where the absence of a value is itself meaningful, and downstream consumers are written to handle a nil input. Wrap such a recipe in `q.PermitNil(...)` at the call site to opt out of the runtime nil-check on its bound dep:
+
+```go
+// newOptionalCache may return nil ("no cache configured") — and the
+// downstream Server is written to skip caching when its cache is nil.
+server, err := q.Assemble[*Server](
+    newConfig,
+    q.PermitNil(newOptionalCache),
+    newServer,
+).Release()
+```
+
+`q.PermitNil` is a typed identity (`func PermitNil[T any](recipe T) T { return recipe }`). At runtime it returns the recipe unchanged; the preprocessor detects the wrapper at scan time, unwraps it, and marks the resulting Assemble step so the rewriter skips that step's nil-check.
+
+The wrapper works uniformly across **every** recipe shape — Go's type inference resolves `T` to the recipe's exact type (function reference of any signature, or inline value of any type), and the rest of the resolver sees the unwrapped expression:
+
+```go
+q.PermitNil(newPure)        // func() *Pure
+q.PermitNil(newErrd)        // func() (*Errd, error)
+q.PermitNil(newRes)         // func() (*Res, func(), error)
+q.PermitNil(newResNoErr)    // func() (*Res, func())
+q.PermitNil(inlineNil)      // *Inline (inline value)
+```
+
+`q.PermitNil` only suppresses the recipe's own output check; it has no effect on the consumer's behaviour. Recipes whose output type can't hold nil (struct values, basic types, arrays) pass through unchanged — there's no nil-check to skip.
 
 ## Debug tracing
 
@@ -562,7 +565,7 @@ The ctx is passed as an inline-value recipe — same as any other context.Contex
 - **Strict by default.** Unused recipes fail the build (except `context.Context` — exempt because it's expected to ride into the assembly for assembly-config). The discipline is intentional — recipe sets that drift over time stay correct only if every member is needed.
 - **No variadic recipes.** A recipe like `func newServer(plugins ...Plugin) *Server` can't be auto-resolved (the dep set isn't fixed). Wrap it in a fixed-arity adapter instead.
 - **Type identity is `go/types` identity.** Two named types with the same underlying type are still distinct providers — that's how the branded-variants pattern (`type PrimaryDB struct{ *DB }`) works. If you have unintentional collisions (e.g. two packages with `type Config struct{...}`), use named wrappers to disambiguate.
-- **Recipes can't be `q.*` calls** in the function-reference position. Inline-value recipes can wrap one (`q.Try(loadCfg())`) since the value-position rewrite triggers the standard q.* hoist.
+- **Recipes can't be `q.*` calls** in the function-reference position, with one exception: `q.PermitNil(<recipe>)` is detected and unwrapped at scan time. Inline-value recipes can wrap a regular q.* call (`q.Try(loadCfg())`) since the value-position rewrite triggers the standard q.* hoist.
 
 ## Multi-provider aggregation: `q.AssembleAll`
 
@@ -667,15 +670,17 @@ The auto-aggregation behavior may be added later as an opt-in.
 
 ## What's coming
 
-Phase 1 ships the full single-call DI surface, `q.AssembleAll` for multi-provider aggregation, and `q.AssembleStruct` for struct-target multi-output. Future phases:
+Active surface covers single-call DI, `q.AssembleAll` for multi-provider aggregation, `q.AssembleStruct` for struct-target multi-output, full resource-lifetime management (auto-detected and explicit cleanups, partial-failure rollback, `.Release()` / `.NoRelease()` chain), debug tracing, and `q.PermitNil` for opt-in nilable recipes. No phases are currently in active development.
 
-- **Phase 3 — resource lifetime.** `(T, func(), error)`-returning recipes for resources that need cleanup; defer-LIFO teardown integrates with `q.Open`'s escape detection.
-- **Phase 4 — parallel construction.** `q.WithAssemblyPar(ctx, n)` rides on the ctx like `q.WithAssemblyDebug`; the rewriter emits topo waves with a `sync.WaitGroup` per wave.
+Parked, may revisit:
 
-See [`docs/planning/assemble.md`](https://github.com/GiGurra/q/blob/main/docs/planning/assemble.md) for the full plan.
+- **Parallel construction.** `q.WithAssemblyPar(ctx, n)` riding on the ctx like `q.WithAssemblyDebug` — the rewriter would emit topo waves with a `sync.WaitGroup` per wave. Sequential construction is fast enough for current workloads; revisit if profiles show construction time as a measurable cost.
+- **Ctx-attached assembly cache.** `q.WithAssemblyCache(ctx)` to share built deps across multiple `q.Assemble` calls in the same ctx scope. Useful in long-running services; design notes live in [`docs/planning/TODO.md`](https://github.com/GiGurra/q/blob/main/docs/planning/TODO.md) under #87.
+
+See [`docs/planning/TODO.md`](https://github.com/GiGurra/q/blob/main/docs/planning/TODO.md) for the persistent backlog.
 
 ## See also
 
 - [`q.Try` / `q.TryE`](try.md) — the bubble vocabulary `q.Assemble` composes with.
-- [`q.Open`](open.md) — resource lifetime; phase 3 will integrate.
+- [`q.Open`](open.md) — single-resource lifetime helper; same auto-detected cleanup shapes as `q.Assemble` recipes.
 - [ZIO `ZLayer`](https://zio.dev/reference/di/) — the inspiration. The conceptual model maps closely; the operator-heavy composition (`++`, `>>>`, `>+>`) does not.

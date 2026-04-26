@@ -1076,7 +1076,12 @@ func inferAutoCleanup(fset *token.FileSet, sc *qSubCall, info *types.Info, errTy
 
 // inferCleanupKind reports the auto-cleanup form for type t, or
 // cleanupUnknown when no shape matches:
-//   - Channel types       → cleanupChanClose (close(v)).
+//   - Bidirectional / send-only channels → cleanupChanClose (close(v)).
+//     Receive-only channels (<-chan U) are NEVER auto-closed —
+//     closing a channel is the sender's responsibility, and Go
+//     itself forbids `close()` on a recv-only channel. A recipe
+//     producing <-chan U is signalling that the channel is
+//     consumed, not owned, by the assembly.
 //   - T has Close()       → cleanupCloseVoid (v.Close()).
 //   - T has Close() error → cleanupCloseErr  (_ = v.Close()).
 //
@@ -1087,7 +1092,10 @@ func inferCleanupKind(t, errType types.Type) cleanupKind {
 	if t == nil {
 		return cleanupUnknown
 	}
-	if _, isChan := t.Underlying().(*types.Chan); isChan {
+	if ch, isChan := t.Underlying().(*types.Chan); isChan {
+		if ch.Dir() == types.RecvOnly {
+			return cleanupUnknown
+		}
 		return cleanupChanClose
 	}
 	// Method-set lookup. The method set of *T includes methods on

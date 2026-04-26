@@ -89,6 +89,12 @@ type assembleRecipeInfo struct {
 	output            types.Type
 	outputKey         string
 	valid             bool
+	// permitNil is true when the user wrapped this recipe in
+	// q.PermitNil(...) at the call site. The scanner stripped the
+	// wrapper and set the parallel sub.AssemblePermitNil[i] flag;
+	// the resolver propagates it here, and the rewriter skips this
+	// step's runtime nil-check.
+	permitNil bool
 }
 
 // isAssembleFamily reports whether sc's family is one of the
@@ -152,6 +158,9 @@ func resolveAssemble(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPat
 
 	for i, rExpr := range sc.AssembleRecipes {
 		ri := assembleRecipeInfo{idx: i, expr: rExpr}
+		if i < len(sc.AssemblePermitNil) {
+			ri.permitNil = sc.AssemblePermitNil[i]
+		}
 		tv, ok := info.Types[rExpr]
 		if !ok || tv.Type == nil {
 			addProblem("recipe #%d (%s) has unresolvable type — pass a function reference (e.g. `newDB`) or an inline value of a known type",
@@ -237,9 +246,14 @@ func resolveAssemble(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPat
 		// Auto-detect cleanup. When a function recipe's signature
 		// didn't declare an explicit cleanup (no `(T, func())` /
 		// `(T, func(), error)`), but T's type has a recognisable
-		// Close shape (Close() / Close() error / channel), attach a
-		// synthesised cleanup so external-lib ctors with no q
-		// awareness participate in the resource lifetime chain.
+		// Close shape (Close() / Close() error / bidirectional or
+		// send-only channel), attach a synthesised cleanup so
+		// external-lib ctors with no q awareness participate in the
+		// resource lifetime chain.
+		//
+		// Receive-only channels (`<-chan U`) are NEVER auto-closed:
+		// closing a channel is the sender's responsibility, and Go
+		// itself forbids `close()` on a recv-only channel.
 		//
 		// Only function recipes get auto-cleanup; inline values are
 		// user-owned and pass through unchanged. The chain
@@ -682,6 +696,7 @@ func resolveAssemble(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPat
 			InputKeys:       append([]string(nil), r.resolvedInputKeys...),
 			OutputKey:       r.outputKey,
 			OutputIsNilable: isNilableType(r.output),
+			PermitNil:       r.permitNil,
 			Label:           recipeLabel(fset, r),
 		})
 	}
@@ -1163,7 +1178,7 @@ func buildAssembleBody(fset *token.FileSet, src []byte, sub qSubCall, subs []qSu
 			fmtUsed = true
 		}
 
-		if step.OutputIsNilable {
+		if step.OutputIsNilable && !step.PermitNil {
 			label := step.Label
 			if label == "" {
 				label = fmt.Sprintf("#%d", step.RecipeIdx+1)
@@ -1207,12 +1222,14 @@ func buildAssembleBody(fset *token.FileSet, src []byte, sub qSubCall, subs []qSu
 	return b.String(), fmtUsed
 }
 
-// assembleHasNilableStep reports whether any step has a nilable
-// output. Used by the rewriter to flag fmtUsed for the in-place
-// dispatch (the runtime nil-check emits fmt.Errorf).
+// assembleHasNilableStep reports whether any step needs the
+// runtime nil-check emitted (nilable output AND not opted out via
+// q.PermitNil). Used by the rewriter to flag fmtUsed for the in-
+// place dispatch — the nil-check is the only emit path that uses
+// fmt.Errorf, so a fully-PermitNil-wrapped graph doesn't import fmt.
 func assembleHasNilableStep(sub qSubCall) bool {
 	for _, s := range sub.AssembleSteps {
-		if s.OutputIsNilable {
+		if s.OutputIsNilable && !s.PermitNil {
 			return true
 		}
 	}

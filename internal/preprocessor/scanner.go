@@ -331,7 +331,19 @@ type qSubCall struct {
 	// function-typed expr) or an inline value expression. The typecheck
 	// pass classifies each entry against go/types and populates
 	// AssembleSteps in topo order. Unused for every other family.
+	//
+	// `q.PermitNil(x)` wrappers are stripped by the scanner: the
+	// stored expression is the inner `x`, and the parallel
+	// AssemblePermitNil[i] flag is set true so the resolver can mark
+	// the resulting step as opting out of the runtime nil-check.
 	AssembleRecipes []ast.Expr
+
+	// AssemblePermitNil is parallel to AssembleRecipes — true at
+	// index i when the user's i-th recipe was wrapped in
+	// q.PermitNil(...). The resolver propagates the flag onto the
+	// emitted assembleStep so the rewriter skips the nil-check on
+	// that step's bound _qDep<N>.
+	AssemblePermitNil []bool
 
 	// AssembleSteps is the topo-sorted recipe sequence the rewriter
 	// emits, populated by resolveAssemble. Each step carries the recipe
@@ -497,6 +509,12 @@ type assembleStep struct {
 	// fmt.Errorf("...: %%w", q.ErrNil) so callers can errors.Is the
 	// failure against the q.ErrNil sentinel.
 	OutputIsNilable bool
+
+	// PermitNil is true when the user wrapped the recipe in
+	// q.PermitNil(...) at the call site. The rewriter then skips the
+	// runtime nil-check on this step's bound _qDep<N>, allowing nil
+	// to flow through as a legitimate value.
+	PermitNil bool
 
 	// Label is the diagnostic-friendly recipe identifier
 	// ("#N (snippet)") spliced into the runtime nil-check message.
@@ -2182,13 +2200,52 @@ func classifyAssembleChain(call *ast.CallExpr, sel *ast.SelectorExpr, entry *ast
 	if len(entry.Args) == 0 {
 		return qSubCall{}, false, fmt.Errorf("q.%s[T] requires at least one recipe argument", entryNameForFamily(fam))
 	}
+	recipes := make([]ast.Expr, len(entry.Args))
+	permitNil := make([]bool, len(entry.Args))
+	for i, a := range entry.Args {
+		inner, isPermit, err := unwrapPermitNil(a, alias)
+		if err != nil {
+			return qSubCall{}, false, err
+		}
+		recipes[i] = inner
+		permitNil[i] = isPermit
+	}
 	return qSubCall{
-		Family:          fam,
-		AsType:          typeArg,
-		AssembleRecipes: append([]ast.Expr(nil), entry.Args...),
-		AssembleChain:   chain,
-		OuterCall:       ast.Expr(call),
+		Family:            fam,
+		AsType:            typeArg,
+		AssembleRecipes:   recipes,
+		AssemblePermitNil: permitNil,
+		AssembleChain:     chain,
+		OuterCall:         ast.Expr(call),
 	}, true, nil
+}
+
+// unwrapPermitNil detects `q.PermitNil(x)` (or its `q.PermitNil[T](x)`
+// explicit-type-arg form) and returns (x, true, nil). For any other
+// expression returns (expr, false, nil) unchanged. A `q.PermitNil()`
+// call with the wrong number of arguments is rejected as a scanner
+// error so the user gets a precise diagnostic at the call site.
+func unwrapPermitNil(e ast.Expr, alias string) (ast.Expr, bool, error) {
+	call, ok := e.(*ast.CallExpr)
+	if !ok {
+		return e, false, nil
+	}
+	// q.PermitNil(x) — selector form.
+	if isSelector(call.Fun, alias, "PermitNil") {
+		if len(call.Args) != 1 {
+			return e, false, fmt.Errorf("q.PermitNil(recipe) takes exactly 1 argument; got %d", len(call.Args))
+		}
+		return call.Args[0], true, nil
+	}
+	// q.PermitNil[T](x) — explicit type-arg form via IndexExpr /
+	// IndexListExpr (Go 1.18+).
+	if _, ok := isIndexedSelector(call.Fun, alias, "PermitNil"); ok {
+		if len(call.Args) != 1 {
+			return e, false, fmt.Errorf("q.PermitNil[T](recipe) takes exactly 1 argument; got %d", len(call.Args))
+		}
+		return call.Args[0], true, nil
+	}
+	return e, false, nil
 }
 
 // mustIndexed is a tiny helper around isIndexedSelector — returns
