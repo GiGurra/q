@@ -1,0 +1,8 @@
+404: /x
+got missing: /x
+403: no creds
+not a missing-resource
+201: 42
+not a missing-resource
+200: 7
+not a missing-resource

@@ -290,7 +290,7 @@ func checkArmsDistinct(fset *token.FileSet, sc *qSubCall, arms oneOfArms) (Diagn
 // with non-tag value/predicate q.Case arms (i.e. arms whose cond is
 // of the matched value's own type, or bool, or func()T/bool) is
 // rejected — the dispatch shapes are incompatible.
-func resolveMatchOneOf(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPath string, arms oneOfArms) (Diagnostic, bool) {
+func resolveMatchOneOf(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPath string, arms oneOfArms, ones map[*types.TypeName]oneOfArms) (Diagnostic, bool) {
 	sc.IsOneOfMatch = true
 	sc.OneOfArmTypeTexts = arms.Texts
 	// Detect Sealed (interface) flavour vs OneOfN (struct) flavour:
@@ -310,15 +310,43 @@ func resolveMatchOneOf(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgP
 		return p.Name()
 	}
 
-	// Classify each non-default arm. A q.Case arm whose cond's type
-	// matches a variant becomes a tag-arm. A q.OnType arm extracts T
-	// from the handler's first parameter type.
-	covered := map[int]bool{}
+	// Pre-compute the leaf list for nested-sum support (Phase C). When
+	// any arm targets a leaf at depth > 1, the rewriter emits nested
+	// switches grouped by outer tag.
+	leaves := flattenArms(arms, sc.OneOfIsInterface, ones, pkgPath, nil, nil, map[string]bool{})
+
+	// nestedMode is set true if any arm targets a leaf at depth > 1.
+	// Once flipped, ALL arms must resolve via the leaf list (no mixing
+	// immediate-arm + leaf in the same q.Match — the dispatch shape
+	// would be ambiguous).
+	nestedMode := false
+
+	// findArm returns the leaf path for armType, preferring an
+	// immediate-arm match (depth 1) when one exists. This lets the
+	// user write `q.OnType(func(ImmediateArm) ...)` to handle a sum
+	// arm "as a unit" while writing `q.OnType(func(Leaf) ...)` for
+	// fine-grained leaves; both work because the immediate-arm match
+	// is the depth-1 leaf in the flattened list.
+	findArm := func(armType types.Type) *leafPath {
+		// Prefer exact match at any depth — type-distinct arm guarantee
+		// means no two leaves have the same type.
+		for i := range leaves {
+			if types.Identical(leaves[i].LeafType, armType) {
+				return &leaves[i]
+			}
+		}
+		return nil
+	}
+
+	// Classify each non-default arm.
 	for i := range sc.MatchCases {
 		mc := &sc.MatchCases[i]
 		if mc.IsDefault {
 			continue
 		}
+		var armType types.Type
+		var armPos token.Pos
+		var armOrigin string
 		if mc.IsOnType {
 			handlerTV, ok := info.Types[mc.HandlerExpr]
 			if !ok || handlerTV.Type == nil {
@@ -334,47 +362,63 @@ func resolveMatchOneOf(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgP
 					Msg:  "q.OnType: handler must be a function with one parameter (the typed variant) and one return value (the result)",
 				}, true
 			}
-			paramT := sig.Params().At(0).Type()
-			idx := variantIndex(paramT, arms.Types)
-			if idx < 0 {
-				pos := fset.Position(mc.HandlerExpr.Pos())
-				return Diagnostic{
-					File: pos.Filename,
-					Line: pos.Line,
-					Col:  pos.Column,
-					Msg:  fmt.Sprintf("q.OnType: handler parameter type %s is not a variant of the matched sum (accepted: %s)", types.TypeString(paramT, qualifier), strings.Join(arms.Texts, ", ")),
-				}, true
-			}
-			mc.OnTypeArmIdx = idx + 1
-			mc.OnTypeArmText = arms.Texts[idx]
+			armType = sig.Params().At(0).Type()
+			armPos = mc.HandlerExpr.Pos()
+			armOrigin = "q.OnType handler parameter"
 			if r := sig.Results().At(0).Type(); r != nil {
 				if sc.ResolvedString == "" {
 					sc.ResolvedString = types.TypeString(r, qualifier)
 				}
 			}
-			covered[idx] = true
-			continue
+		} else {
+			condTV, ok := info.Types[mc.CondExpr]
+			if !ok || condTV.Type == nil {
+				continue
+			}
+			armType = condTV.Type
+			armPos = mc.CondExpr.Pos()
+			armOrigin = "q.Case cond"
 		}
-		// q.Case in a OneOf match: cond's TYPE selects the variant.
-		// The cond value itself is ignored — typically a zero literal
-		// like Pending{} or q.A[Pending]() to spell the type.
-		condTV, ok := info.Types[mc.CondExpr]
-		if !ok || condTV.Type == nil {
-			continue
-		}
-		idx := variantIndex(condTV.Type, arms.Types)
-		if idx < 0 {
-			pos := fset.Position(mc.CondExpr.Pos())
+
+		leaf := findArm(armType)
+		if leaf == nil {
+			pos := fset.Position(armPos)
 			return Diagnostic{
 				File: pos.Filename,
 				Line: pos.Line,
 				Col:  pos.Column,
-				Msg:  fmt.Sprintf("q.Case on a q.OneOfN value: cond type %s is not a variant (accepted: %s)", types.TypeString(condTV.Type, qualifier), strings.Join(arms.Texts, ", ")),
+				Msg:  fmt.Sprintf("%s type %s is not a variant of the matched sum or any of its nested arms", armOrigin, types.TypeString(armType, qualifier)),
 			}, true
 		}
-		mc.OnTypeArmIdx = idx + 1
-		mc.OnTypeArmText = arms.Texts[idx]
-		covered[idx] = true
+		// Always populate immediate-level fields (path[0]) for the
+		// flat-emit path to work for depth-1 arms.
+		mc.OnTypeArmIdx = leaf.Path[0]
+		mc.OnTypeArmText = leaf.Steps[0].ArmText
+		// Carry the full descent for the nested-emit path.
+		mc.NestedPath = leaf.Path
+		mc.NestedSteps = make([]nestedMatchStep, len(leaf.Steps))
+		for j, s := range leaf.Steps {
+			mc.NestedSteps[j] = nestedMatchStep{ArmText: s.ArmText, IsIface: s.IsIface}
+		}
+		if len(leaf.Path) > 1 {
+			nestedMode = true
+		}
+	}
+
+	if nestedMode {
+		return resolveMatchNested(fset, sc, info, pkgPath, leaves, qualifier)
+	}
+
+	// Flat (depth-1) coverage check — every immediate arm must have
+	// at least one tag-arm OR a q.Default exists.
+	covered := map[int]bool{}
+	for _, mc := range sc.MatchCases {
+		if mc.IsDefault {
+			continue
+		}
+		if mc.OnTypeArmIdx > 0 {
+			covered[mc.OnTypeArmIdx-1] = true
+		}
 	}
 
 	// Result-type inference: q.Case arms in OneOf mode produce
@@ -434,6 +478,168 @@ func resolveMatchOneOf(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgP
 		}, true
 	}
 	return Diagnostic{}, false
+}
+
+// resolveMatchNested handles q.Match coverage when at least one arm
+// targets a leaf at depth > 1 in a nested sum (Phase C). The
+// per-arm classifier already ran in resolveMatchOneOf and populated
+// each matchCase.NestedPath. This pass enforces coverage over the
+// flat leaf set: every leaf must be reachable by some arm or the
+// match must include q.Default.
+//
+// "Reachable" means: there exists a non-default arm whose
+// NestedPath is a prefix of the leaf's path. The depth-1 case is
+// the trivial "exact match"; deeper paths reach further into the
+// nested sum.
+func resolveMatchNested(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPath string, leaves []leafPath, qualifier types.Qualifier) (Diagnostic, bool) {
+	hasDefault := false
+	for _, mc := range sc.MatchCases {
+		if mc.IsDefault {
+			hasDefault = true
+			break
+		}
+	}
+
+	// Result type: prefer the first OnType handler's return type;
+	// fall back to q.Default's result expression.
+	if sc.ResolvedString == "" {
+		for _, mc := range sc.MatchCases {
+			if mc.IsDefault || !mc.IsOnType {
+				continue
+			}
+			if tv, ok := info.Types[mc.HandlerExpr]; ok && tv.Type != nil {
+				if sig, ok := tv.Type.(*types.Signature); ok && sig.Results().Len() == 1 {
+					sc.ResolvedString = types.TypeString(sig.Results().At(0).Type(), qualifier)
+					break
+				}
+			}
+		}
+	}
+	if sc.ResolvedString == "" {
+		for _, mc := range sc.MatchCases {
+			if !mc.IsDefault {
+				continue
+			}
+			if tv, ok := info.Types[mc.ResultExpr]; ok && tv.Type != nil {
+				sc.ResolvedString = types.TypeString(tv.Type, qualifier)
+				break
+			}
+		}
+	}
+
+	if hasDefault {
+		return Diagnostic{}, false
+	}
+	// Coverage: every leaf must have a covering arm.
+	armPaths := [][]int{}
+	for _, mc := range sc.MatchCases {
+		if mc.IsDefault {
+			continue
+		}
+		if len(mc.NestedPath) == 0 {
+			continue
+		}
+		armPaths = append(armPaths, mc.NestedPath)
+	}
+	covers := func(armPath, leafPath []int) bool {
+		if len(armPath) > len(leafPath) {
+			return false
+		}
+		for i, v := range armPath {
+			if leafPath[i] != v {
+				return false
+			}
+		}
+		return true
+	}
+	var missing []string
+	for _, leaf := range leaves {
+		anyCover := false
+		for _, ap := range armPaths {
+			if covers(ap, leaf.Path) {
+				anyCover = true
+				break
+			}
+		}
+		if !anyCover {
+			missing = append(missing, leaf.LeafText)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		pos := fset.Position(sc.OuterCall.Pos())
+		return Diagnostic{
+			File: pos.Filename,
+			Line: pos.Line,
+			Col:  pos.Column,
+			Msg:  fmt.Sprintf("q: q.Match (nested-sum dispatch) is missing arm(s) for leaf(s): %s. Add q.OnType(func(<leaf>) …) for each, or add a q.Default(…) arm.", strings.Join(missing, ", ")),
+		}, true
+	}
+	return Diagnostic{}, false
+}
+
+// leafPath is one entry in the flattened-leaf list for a (possibly
+// nested) sum. Path is the 1-based descent indices from the root
+// type to the leaf (e.g. [1, 2] = "outer arm 1, inner arm 2"). Steps
+// is parallel to Path: each entry describes the type at that level
+// of descent, used by the rewriter to emit the right type assertion
+// (`_vN.Value.(StepType)`) and the right inner-switch shape. The
+// LeafType is the final variant the path resolves to.
+type leafStep struct {
+	ArmType  types.Type // the arm type at this level
+	ArmText  string     // textual spelling for the type assertion
+	IsIface  bool       // parent at this level is interface (Sealed) → use type switch
+}
+
+type leafPath struct {
+	LeafType types.Type
+	LeafText string
+	Path     []int
+	Steps    []leafStep
+}
+
+// flattenArms walks `arms` (the immediate-arm list of some root sum)
+// recursively, returning every leaf with its descent path. An arm is
+// a "leaf" if it's NOT itself a sum-derived type; otherwise we
+// recurse into its arm list. Each step records whether the parent
+// at that level was a struct (OneOf) or an interface (Sealed) so
+// the rewriter can pick the right dispatch shape.
+//
+// Uses `seen` to break cycles — a recursive sum (`type T q.OneOf2[A, T]`)
+// would otherwise loop. When a cycle is detected the cycling arm is
+// treated as a leaf (its descent stops there).
+func flattenArms(arms oneOfArms, parentIsIface bool, ones map[*types.TypeName]oneOfArms, pkgPath string, prefix []int, prefixSteps []leafStep, seen map[string]bool) []leafPath {
+	var out []leafPath
+	for i, t := range arms.Types {
+		path := append(append([]int{}, prefix...), i+1)
+		step := leafStep{ArmType: t, ArmText: arms.Texts[i], IsIface: parentIsIface}
+		steps := append(append([]leafStep{}, prefixSteps...), step)
+
+		key := types.TypeString(t, nil)
+		if seen[key] {
+			out = append(out, leafPath{LeafType: t, LeafText: arms.Texts[i], Path: path, Steps: steps})
+			continue
+		}
+		subArms, ok := armsForType(t, ones, pkgPath)
+		if !ok {
+			out = append(out, leafPath{LeafType: t, LeafText: arms.Texts[i], Path: path, Steps: steps})
+			continue
+		}
+		// Recurse — record the parent's flavour for the NEXT level.
+		nextParentIsIface := false
+		if named, ok := types.Unalias(t).(*types.Named); ok {
+			if _, isIface := named.Underlying().(*types.Interface); isIface {
+				nextParentIsIface = true
+			}
+		}
+		subSeen := map[string]bool{}
+		for k := range seen {
+			subSeen[k] = true
+		}
+		subSeen[key] = true
+		out = append(out, flattenArms(subArms, nextParentIsIface, ones, pkgPath, path, steps, subSeen)...)
+	}
+	return out
 }
 
 // resolveSealedDirective validates a `var _ = q.Sealed[I](v1, v2, …)`
@@ -763,6 +969,13 @@ func buildAsOneOfReplacement(fset *token.FileSet, src []byte, sub qSubCall, subs
 //	      var _zero R; return _zero
 //	  }())
 func buildOneOfMatchReplacement(fset *token.FileSet, src []byte, sub qSubCall, subs []qSubCall, subTexts []string) string {
+	// Nested-sum dispatch (Phase C): any arm with a path deeper than 1
+	// triggers the grouped-by-outer-tag emit.
+	for _, mc := range sub.MatchCases {
+		if !mc.IsDefault && len(mc.NestedPath) > 1 {
+			return buildNestedMatchReplacement(fset, src, sub, subs, subTexts)
+		}
+	}
 	if sub.OneOfIsInterface {
 		return buildSealedMatchReplacement(fset, src, sub, subs, subTexts)
 	}
@@ -816,6 +1029,185 @@ func buildOneOfMatchReplacement(fset *token.FileSet, src []byte, sub qSubCall, s
 	}
 	return fmt.Sprintf("(func() %s { _v := %s; switch _v.Tag { %s }; var _zero %s; return _zero }())",
 		resultType, valueText, cases, resultType)
+}
+
+// buildNestedMatchReplacement emits a multi-level switch IIFE for
+// q.Match on a nested sum (Phase C). Each arm carries a NestedPath
+// of 1-based descent indices through the sum tree. The rewriter
+// groups arms by their outer prefix at each level and emits a
+// switch (Tag-switch for struct flavour, type-switch for interface
+// flavour) recursively.
+//
+// Example shape for q.Either[ErrSet, OkSet] with leaf arms:
+//
+//	(func() string {
+//	    _v0 := result
+//	    switch _v0.Tag {
+//	    case 1: {
+//	        _v1 := _v0.Value.(ErrSet)
+//	        switch _v1.Tag {
+//	        case 1: return (handler)(_v1.Value.(NotFound))
+//	        case 2: return (handler)(_v1.Value.(Forbidden))
+//	        }
+//	    }
+//	    case 2: {
+//	        _v1 := _v0.Value.(OkSet)
+//	        switch _v1.Tag {
+//	        case 1: return (handler)(_v1.Value.(Created))
+//	        case 2: return (handler)(_v1.Value.(Updated))
+//	        }
+//	    }
+//	    }
+//	    var _zero string; return _zero
+//	}())
+func buildNestedMatchReplacement(fset *token.FileSet, src []byte, sub qSubCall, subs []qSubCall, subTexts []string) string {
+	valueText := exprTextSubst(fset, src, sub.InnerExpr, subs, subTexts)
+	resultType := sub.ResolvedString
+	if resultType == "" {
+		resultType = "any"
+	}
+
+	type nestedArm struct {
+		Path     []int
+		Steps    []nestedMatchStep
+		Handler  string // OnType handler text (empty for q.Case)
+		Result   string // q.Case result text (empty for OnType)
+		IsOnType bool
+	}
+	var arms []nestedArm
+	var defaultText string
+	hasDefault := false
+	for _, mc := range sub.MatchCases {
+		if mc.IsDefault {
+			defaultText = exprTextSubst(fset, src, mc.ResultExpr, subs, subTexts)
+			hasDefault = true
+			continue
+		}
+		a := nestedArm{
+			Path:     mc.NestedPath,
+			Steps:    mc.NestedSteps,
+			IsOnType: mc.IsOnType,
+		}
+		if mc.IsOnType {
+			a.Handler = exprTextSubst(fset, src, mc.HandlerExpr, subs, subTexts)
+		} else {
+			a.Result = exprTextSubst(fset, src, mc.ResultExpr, subs, subTexts)
+		}
+		arms = append(arms, a)
+	}
+
+	sort.SliceStable(arms, func(i, j int) bool {
+		x, y := arms[i].Path, arms[j].Path
+		for k := 0; k < len(x) && k < len(y); k++ {
+			if x[k] != y[k] {
+				return x[k] < y[k]
+			}
+		}
+		return len(x) < len(y)
+	})
+
+	// emit walks the arm group at level `level` (0-based descent).
+	// `parentIsIface` is the dispatch flavour at THIS level (i.e.
+	// whether _v<level-1> is an interface that we type-switch on, or
+	// a struct whose .Tag we Tag-switch on). At level 0 the "parent"
+	// is the matched value itself.
+	var emit func(level int, arms []nestedArm, parentIsIface bool, parentArmText string) string
+	emit = func(level int, arms []nestedArm, parentIsIface bool, parentArmText string) string {
+		// Group arms by their path[level].
+		groups := map[int][]nestedArm{}
+		var orderedKeys []int
+		for _, a := range arms {
+			if len(a.Path) <= level {
+				continue
+			}
+			k := a.Path[level]
+			if _, exists := groups[k]; !exists {
+				orderedKeys = append(orderedKeys, k)
+			}
+			groups[k] = append(groups[k], a)
+		}
+		sort.Ints(orderedKeys)
+
+		var caseStmts []string
+		for _, k := range orderedKeys {
+			groupArms := groups[k]
+			armText := groupArms[0].Steps[level].ArmText
+			// Split: arms terminating at this level vs arms going deeper.
+			var direct []nestedArm
+			var deeper []nestedArm
+			for _, a := range groupArms {
+				if len(a.Path) == level+1 {
+					direct = append(direct, a)
+				} else {
+					deeper = append(deeper, a)
+				}
+			}
+			var caseBody string
+			if len(direct) > 0 {
+				// Leaf — emit the arm body using the in-scope variable.
+				// At level L, the in-scope variable (the value being
+				// dispatched) is referenced as follows:
+				//   - parentIsIface: _v<level> is the case-bound typed
+				//     value (Go's `case T: ` clause exposes it under the
+				//     switch-statement's binding name).
+				//   - !parentIsIface (struct flavour): _v<level-1>.Value
+				//     of static type any; the leaf value is
+				//     _v<level-1>.Value.(armText) — armText IS the leaf
+				//     type for a terminating arm.
+				var leafAccess string
+				if parentIsIface {
+					// Sealed flavour at this level: case clause already
+					// binds _v<level> to the typed leaf value.
+					leafAccess = fmt.Sprintf("_v%d", level)
+				} else {
+					// Struct flavour: the variable in scope at level L
+					// is _vL (bound by the level-L switch's preamble).
+					// Its .Value is the variant; type-assert into armText.
+					leafAccess = fmt.Sprintf("_v%d.Value.(%s)", level, armText)
+				}
+				if direct[0].IsOnType {
+					caseBody = fmt.Sprintf("return (%s)(%s)", direct[0].Handler, leafAccess)
+				} else {
+					caseBody = fmt.Sprintf("_ = %s; return %s", leafAccess, direct[0].Result)
+				}
+			} else {
+				// Descend. The flavour at the NEXT level is the flavour
+				// of the type at THIS level (groupArms[0].Steps[level].IsIface).
+				armIsIface := groupArms[0].Steps[level].IsIface
+				caseBody = emit(level+1, deeper, armIsIface, armText)
+			}
+			if parentIsIface {
+				caseStmts = append(caseStmts, fmt.Sprintf("case %s: %s", armText, caseBody))
+			} else {
+				caseStmts = append(caseStmts, fmt.Sprintf("case %d: %s", k, caseBody))
+			}
+		}
+
+		body := strings.Join(caseStmts, "\n")
+		// Bind the variable at this level + emit the switch.
+		if level == 0 {
+			if parentIsIface {
+				return fmt.Sprintf("switch _v0 := (%s).(type) {\n%s\n}", valueText, body)
+			}
+			return fmt.Sprintf("_v0 := %s; switch _v0.Tag {\n%s\n}", valueText, body)
+		}
+		// Inner level: parentArmText was already type-asserted at the
+		// PARENT case clause to bind a variable of that type.
+		if parentIsIface {
+			// The case-bound _v<level-1> (already the typed value).
+			return fmt.Sprintf("{ switch _v%d := _v%d.(type) {\n%s\n} }", level, level-1, body)
+		}
+		// Struct parent: bind _v<level> by descending into Value.
+		return fmt.Sprintf("{ _v%d := _v%d.Value.(%s); switch _v%d.Tag {\n%s\n} }", level, level-1, parentArmText, level, body)
+	}
+
+	body := emit(0, arms, sub.OneOfIsInterface, "")
+	if hasDefault {
+		return fmt.Sprintf("(func() %s { %s; _ = %s; return %s }())",
+			resultType, body, valueText, defaultText)
+	}
+	return fmt.Sprintf("(func() %s { %s; var _zero %s; return _zero }())",
+		resultType, body, resultType)
 }
 
 // buildSealedMatchReplacement emits the type-switch IIFE for q.Match

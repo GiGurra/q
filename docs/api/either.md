@@ -148,6 +148,28 @@ e := either.Either[Error, Response]{Tag: 9, Value: 42}  // well-typed but malfor
 
 Always go through `Left` / `Right` / `AsEither`.
 
+## Nested-sum dispatch
+
+Either values nest cleanly with `q.OneOfN`. When `L` and `R` are
+themselves sums, `q.Match` arms can target the LEAF variants
+directly — see [`q.OneOfN` nested-sum dispatch](oneof.md#nested-sum-dispatch-leaf-flattening)
+for the semantics. Example:
+
+```go
+type ErrSet q.OneOf2[NotFound, Forbidden]
+type OkSet  q.OneOf2[Created, Updated]
+type Result = either.Either[ErrSet, OkSet]
+
+desc := q.Match(result,
+    q.OnType(func(NotFound) string  { return "404" }),
+    q.OnType(func(Forbidden) string { return "403" }),
+    q.OnType(func(Created) string   { return "201" }),
+    q.OnType(func(Updated) string   { return "200" }),
+)
+```
+
+Coverage is enforced over the flat leaf set; `q.Default` opts out.
+
 ## Use it for actor-style message returns
 
 The shape that motivates Either:

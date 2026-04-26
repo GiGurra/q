@@ -561,6 +561,25 @@ type matchCase struct {
 	// is the variant type's textual spelling for the .(T) assertion.
 	OnTypeArmIdx  int
 	OnTypeArmText string
+
+	// Populated by resolveMatch when this arm targets a leaf in a
+	// nested-sum dispatch (q.Match leaf-flattening, Phase C). Path
+	// is the 1-based descent indices from the root sum to the leaf;
+	// PathSteps describes the type at each level along the descent
+	// (so the rewriter can spell each `.Value.(StepType)` cast and
+	// pick the right per-level dispatch shape — Tag switch for
+	// struct, type switch for Sealed interface).
+	NestedPath  []int
+	NestedSteps []nestedMatchStep
+}
+
+// nestedMatchStep mirrors the rewriter-facing fields of leafStep
+// (the typecheck-time helper) — preserved on matchCase so the
+// rewriter can emit the right descent code without re-resolving
+// types at rewrite time.
+type nestedMatchStep struct {
+	ArmText string
+	IsIface bool
 }
 
 // assembleStep is one entry in the topo-sorted recipe sequence the
@@ -911,22 +930,64 @@ func scanFile(fset *token.FileSet, path string, file *ast.File) ([]callShape, []
 
 	if eitherAlias != "" {
 		scanEitherCalls(fset, file, eitherAlias, &shapes)
+		// Re-sort each shape's Calls into source pre-order (parent
+		// before child) so the rewriter's reverse-iteration assumption
+		// holds for in-place nested substitution. The regular q scanner
+		// produces pre-order naturally; scanEitherCalls's append after
+		// merge can break that — restore it here.
+		for i := range shapes {
+			calls := shapes[i].Calls
+			if len(calls) > 1 {
+				sortCallsByPos(fset, calls)
+			}
+		}
 	}
 
 	return shapes, diags, nil
 }
 
+// sortCallsByPos sorts Calls into source-position order (ascending).
+// Parents (which start before their children) come first; the
+// rewriter's reverse iteration then visits children-first.
+func sortCallsByPos(fset *token.FileSet, calls []qSubCall) {
+	type kv struct {
+		pos  int
+		call qSubCall
+	}
+	tmp := make([]kv, len(calls))
+	for i, c := range calls {
+		var p int
+		if c.OuterCall != nil {
+			p = fset.Position(c.OuterCall.Pos()).Offset
+		}
+		tmp[i] = kv{pos: p, call: c}
+	}
+	for i := 1; i < len(tmp); i++ {
+		for j := i; j > 0 && tmp[j-1].pos > tmp[j].pos; j-- {
+			tmp[j-1], tmp[j] = tmp[j], tmp[j-1]
+		}
+	}
+	for i := range tmp {
+		calls[i] = tmp[i].call
+	}
+}
+
 // scanEitherCalls walks the file for either.AsEither[T](v) calls and
-// adds an in-place hoist shape for each. Structurally identical to
-// q.AsOneOf — same OneOf machinery, different selector LHS. The
+// adds an in-place hoist sub-call for each. Structurally identical
+// to q.AsOneOf — same OneOf machinery, different selector LHS. The
 // typecheck pass routes these through resolveAsOneOf and the rewriter
 // emits the same composite-literal replacement.
 //
-// The walker descends function/closure bodies and emits one shape
-// per (immediately-enclosing statement) for each either.AsEither call
-// found. "Immediately-enclosing" matters: binding the call to its
-// outermost block would make the rewriter substitute the entire block,
-// blowing away anything else inside it.
+// IMPORTANT: when the enclosing statement already contains a q.*
+// shape (e.g. a return that mixes either.AsEither and q.AsOneOf),
+// the either sub-call must be ATTACHED to that existing shape's
+// Calls list — not added as a separate shape. Otherwise both shapes
+// would target the same statement span and overwrite each other,
+// dropping one substitution.
+//
+// "Immediately-enclosing" matters: binding the call to its outermost
+// block would make the rewriter substitute the entire block, blowing
+// away anything else inside it.
 func scanEitherCalls(fset *token.FileSet, file *ast.File, eitherAlias string, shapes *[]callShape) {
 	// addCall finds either.AsEither calls inside `host` (a single
 	// statement's own expressions, not its nested statements) and
@@ -953,12 +1014,25 @@ func scanEitherCalls(fset *token.FileSet, file *ast.File, eitherAlias string, sh
 				InnerExpr: call.Args[0],
 				OuterCall: call,
 			}
-			*shapes = append(*shapes, callShape{
-				Stmt:              host,
-				Form:              formHoist,
-				Calls:             []qSubCall{sub},
-				EnclosingFuncType: fnType,
-			})
+			// Merge into an existing shape for this same statement, if
+			// any — otherwise the rewriter would emit two overlapping
+			// edits and the last one to apply would clobber the other.
+			attached := false
+			for i := range *shapes {
+				if (*shapes)[i].Stmt == host {
+					(*shapes)[i].Calls = append((*shapes)[i].Calls, sub)
+					attached = true
+					break
+				}
+			}
+			if !attached {
+				*shapes = append(*shapes, callShape{
+					Stmt:              host,
+					Form:              formHoist,
+					Calls:             []qSubCall{sub},
+					EnclosingFuncType: fnType,
+				})
+			}
 			return true
 		})
 	}

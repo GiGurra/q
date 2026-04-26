@@ -628,7 +628,7 @@ func resolveMatch(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPath s
 	// across the variant list.
 	if matchedType != nil {
 		if arms, ok := armsForType(matchedType, oneOfTypes, pkgPath); ok {
-			return resolveMatchOneOf(fset, sc, info, pkgPath, arms)
+			return resolveMatchOneOf(fset, sc, info, pkgPath, arms, oneOfTypes)
 		}
 	}
 

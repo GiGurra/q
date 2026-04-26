@@ -155,6 +155,81 @@ Coverage check fires the same way as `q.Exhaustive`: every variant
 must have an arm or the call must include `q.Default`. The output
 is an IIFE-wrapped switch on `_v.Tag`.
 
+## Nested-sum dispatch (leaf-flattening)
+
+`q.Match` arms can target leaves of nested sums directly. When the
+matched value is a sum whose arms are themselves sums (e.g.
+`q.Either[ErrSet, OkSet]` where each is a `q.OneOf2`), `q.OnType`
+arms can name the LEAF variant types — the typecheck pass walks the
+sum tree, the coverage check operates on the flat leaf list, and the
+rewriter emits nested switches.
+
+```go
+type NotFound  struct{ Path string }
+type Forbidden struct{ Reason string }
+type Created   struct{ ID int }
+type Updated   struct{ ID int }
+
+type ErrSet q.OneOf2[NotFound, Forbidden]
+type OkSet  q.OneOf2[Created, Updated]
+type Result = either.Either[ErrSet, OkSet]
+
+// Flat-leaf dispatch — arms target NotFound / Forbidden / Created /
+// Updated, NOT the immediate ErrSet / OkSet arms:
+desc := q.Match(r,
+    q.OnType(func(n NotFound)  string { return "404: " + n.Path }),
+    q.OnType(func(f Forbidden) string { return "403: " + f.Reason }),
+    q.OnType(func(c Created)   string { return "201" }),
+    q.OnType(func(u Updated)   string { return "200" }),
+)
+```
+
+The build fails if any leaf is missing:
+
+```
+q.Match (nested-sum dispatch) is missing arm(s) for leaf(s): Updated.
+Add q.OnType(func(<leaf>) …) for each, or add a q.Default(…) arm.
+```
+
+Mixed depths work too — `q.OnType(func(ErrSet) ...)` catches both
+NotFound and Forbidden via the immediate-arm path; `q.OnType(func(NotFound) ...)`
+catches just that leaf. Type-distinct variants ensure no ambiguity:
+each leaf is reached by exactly one arm.
+
+`q.Default` opts out of the leaf coverage check the same way it does
+for flat dispatch:
+
+```go
+desc := q.Match(r,
+    q.OnType(func(n NotFound) string { return "got missing: " + n.Path }),
+    q.Default("not a missing-resource"),
+)
+```
+
+The rewriter emits nested switches grouped by outer tag — equivalent
+hand-written code would be:
+
+```go
+desc := (func() string {
+    _v0 := r
+    switch _v0.Tag {
+    case 1: { _v1 := _v0.Value.(ErrSet); switch _v1.Tag {
+        case 1: return "404: " + _v1.Value.(NotFound).Path
+        case 2: return "403: " + _v1.Value.(Forbidden).Reason
+    }}
+    case 2: { _v1 := _v0.Value.(OkSet); switch _v1.Tag {
+        case 1: return "201"
+        case 2: return "200"
+    }}
+    }
+    var _zero string; return _zero
+}())
+```
+
+`either.Either` integrates here for free — it's structurally a 2-arm
+OneOf, so `q.Either[ErrSet, OkSet]` is just another sum the
+flattening machinery walks through.
+
 ## Construction surface in detail
 
 `q.AsOneOf[T](v)` accepts:
