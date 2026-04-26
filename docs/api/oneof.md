@@ -239,9 +239,9 @@ allocation as a measurable cost.
 | Variants pass as themselves    | Through `.Value.(T)`          | Naturally (each is its own type)     |
 | Single concrete carrier type   | `T` (the alias) — just one    | `M` (the interface) — just one       |
 
-A future `q.Sealed` family will give the interface-based form with
-auto-synthesised markers + the same `q.Exhaustive` coverage; tracked
-in TODO.
+For the interface-based sibling — variants flow as themselves through
+`chan Message`, no `.Value.(T)` unwrap, with the same `q.Exhaustive` /
+`q.Match` coverage — see [`q.Sealed`](sealed.md).
 
 ## Caveats
 
@@ -257,6 +257,9 @@ in TODO.
 
 ## See also
 
+- [`q.Sealed`](sealed.md) — interface-based sibling. Variants live as
+  themselves at runtime; pick this for message-passing systems where
+  variants flow through `chan Message` directly.
 - [`either.Either`](either.md) — Scala-flavoured 2-arm sibling
   (Left / Right + Fold / Map / FlatMap). Structurally a 2-arm OneOf;
   reuses every integration point here.

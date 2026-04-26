@@ -10,110 +10,19 @@ The persistent backlog for `q`. A cold-state reader can pick up here without re-
 
 ### Rejected-Go-proposal expansion
 
-- **#74 Phase B — `q.Sealed` interface-based sum types.** Phase A
-  shipped the struct-based form (`q.OneOfN`, `q.AsOneOf`, `q.OnType`,
-  `q.Exhaustive` on type switches over `.Value`); see
-  [`docs/api/oneof.md`](../api/oneof.md). Phase B is the
-  interface-based companion where each variant lives as its own type
-  at runtime (no `Tag` / `Value` boxing) — the win for actor-style
-  message handlers and event pipelines where variants flow as
-  themselves through channels and stores.
-
-  **Surface (no arity suffix — variadic value args carry the variant
-  types since Go has no variadic type parameters):**
-
-  ```go
-  // In pkg/q:
-  func Sealed[I any](variants ...any) GenMarker
-
-  // User code:
-  type Message interface{ message() }   // 1-line marker interface
-
-  type Ping       struct{ ID int }
-  type Pong       struct{ ID int }
-  type Disconnect struct{ Reason string }
-
-  var _ = q.Sealed[Message](Ping{}, Pong{}, Disconnect{})
-
-  func handle(m Message) {
-      switch v := q.Exhaustive(m).(type) {  // coverage-checked
-      case Ping:       fmt.Println(v.ID)
-      case Pong:       fmt.Println(v.ID)
-      case Disconnect: fmt.Println(v.Reason)
-      }
-  }
-  ```
-
-  **Mechanism.** The preprocessor inspects `Message` (the type-arg)
-  to find its single marker method (name and signature both come
-  from the user's interface declaration — no naming convention
-  imposed). Then it synthesises a companion file containing one
-  `func (Ping) message() {}` per variant, so each implements
-  `Message`. `q.Exhaustive` on a type switch over an `I`-typed value
-  consults the closed-set list to enforce coverage. Same machinery
-  as `q.GenStringer` for the synthesis step.
-
-  **Constraints:**
-
-  - **Marker interface must have exactly one method** with no args,
-    no results. Multi-method interfaces are rejected — q.Sealed is
-    the marker pattern, not a general impl-injector.
-  - **Same-package variants only.** Go forbids method declarations
-    on types defined in another package, so each variant must live
-    in the same package as the `q.Sealed[...]` declaration.
-    Cross-package variants need an explicit marker method written
-    by the user — fall back to plain Go in that case.
-  - **Zero-value type carriers** at the call site — only the variadic
-    args' *types* matter; the values are throwaway. Recommend the
-    `Variant{}` form for clarity.
-
-  **Why no arity suffix.** Variadic value args (`...any`) lift the
-  arity ceiling without spawning a `Sealed2` … `SealedN` family.
-  The type-arg `[I any]` is fixed at exactly one (the marker
-  interface). Future `type Message q.SealedN[...]` alias-style
-  spelling could layer on top later if users want it for compactness,
-  but the variadic form is the load-bearing surface.
-
-  **Tradeoff vs Phase A.** The interface form keeps each variant's
-  own type at runtime (no `any` box, no `Tag` field), so values can
-  be returned / embedded / serialised exactly like normal Go types.
-  The cost is companion-file synthesis (a real escalation) and the
-  same-package variant restriction.
-
-  **Producer / consumer ergonomics.** The design must keep both
-  sides minimal — actor-style message passing is the load-bearing
-  use case:
-
-  - Producer: `ch <- Ping{ID: 1}` reads as plain Go. Ping flows as
-    itself; Go's type system enforces "must implement Message" at
-    the channel send site (via the synthesised marker method).
-  - Consumer (statement form, the standard for handlers):
-    `switch v := q.Exhaustive(m).(type) { case Ping: …; case Pong: … }`
-    — exhaustiveness checked at build, payload bound in scope.
-  - Consumer (expression form, for value-returning handlers): the
-    same `q.Match` + `q.OnType` machinery Phase A uses on OneOfN
-    works on Sealed-marked interfaces too:
-
-    ```go
-    desc := q.Match(m,
-        q.OnType(func(p Ping) string { return fmt.Sprintf("ping %d", p.ID) }),
-        q.OnType(func(p Pong) string { return fmt.Sprintf("pong %d", p.ID) }),
-        q.OnType(func(d Disconnect) string { return fmt.Sprintf("dc: %s", d.Reason) }),
-    )
-    ```
-
-    Both forms enforce coverage. `q.Default` opts out at either site.
-
-  **Order of work.** Add `q.Sealed[I any](variants ...any) GenMarker`
-  to pkg/q. Scanner: recognise the family at package level. Typecheck:
-  inspect I (single marker method), record variants by type from the
-  variadic args, validate uniqueness. Companion-file synthesiser:
-  emit the marker method body on each variant. Extend
-  `validateExhaustive`'s OneOfN branch to also accept Sealed-marked
-  interfaces as the type-switch tag, and `resolveMatch` to recognise
-  Sealed-marked interface values as a tag-dispatch shape (q.OnType
-  arms only — q.Case has no analogue without a .Tag field to dispatch
-  on).
+- **#74 follow-up — `q.SealedN` alias-style spelling on top of
+  `q.Sealed`.** The variadic-value-args form
+  `var _ = q.Sealed[Message](Ping{}, Pong{}, Disconnect{})` shipped;
+  see [`docs/api/sealed.md`](../api/sealed.md). The alias-style
+  spelling `type Message q.Sealed3[Ping, Pong, Disconnect]` would let
+  users avoid the separate marker-interface declaration entirely —
+  the preprocessor would synthesise BOTH the marker interface
+  (`type Message interface { _q_marker_Message() }`) AND the per-
+  variant marker impls. Smaller surface at the call site; more invasive
+  preprocessor work (synthesising the interface itself, not just
+  methods on existing types). Park until users ask for it — the
+  variadic form already eliminates the per-variant boilerplate, so
+  the gap is one declaration line.
 
 - **#78 — Embed `rewire` and `proven` into q's toolexec dispatcher.** Right now a project that wants q + proven + rewire has to run them as a chain or pick one. q's `cmd/q` could become an umbrella dispatcher that detects which patterns are present in each compiled package and routes to the appropriate rewriter pass.
 

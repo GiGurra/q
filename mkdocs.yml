@@ -61,6 +61,7 @@ nav:
     - q.FnParams / ValidatedStruct (required-by-default literals): api/fnparams.md
     - q.Match / Case / Default (value-returning switch): api/match.md
     - q.OneOfN / AsOneOf / OnType (discriminated sum types): api/oneof.md
+    - q.Sealed (interface-based sealed sums for messages): api/sealed.md
     - either.Either / Left / Right / Fold (Scala-flavoured 2-arm sum): api/either.md
     - q.Tern (conditional expression):  api/tern.md
     - q.F / q.Ferr / q.Fln (string interpolation): api/format.md

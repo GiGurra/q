@@ -1,0 +1,1 @@
+q.Sealed[I]: I (Message) must have exactly one method

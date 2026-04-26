@@ -343,6 +343,31 @@ Real sum types — the headline rejected proposal. `q.OneOfN` is the struct-base
 
 The Scala-flavoured 2-arm sibling lives in its own subpackage: [`either.Either[L, R]`](docs/api/either.md) with `either.Left` / `either.Right` / `either.AsEither` constructors, right-biased `either.Map` / `either.FlatMap` / `either.GetOrElse`, and `either.Fold` for the value-returning 2-arm dispatch. Reuses every `q.OneOfN` integration point — `q.Match`, `q.OnType`, `q.Exhaustive` — for free.
 
+For message-passing systems where each variant carries its own typed payload and you want it to flow through `chan Message` as itself (no Tag/Value wrapper), use [`q.Sealed`](docs/api/sealed.md):
+
+```go
+type Message interface{ message() }                       // 1-line marker
+
+type Ping       struct{ ID int }
+type Pong       struct{ ID int }
+type Disconnect struct{ Reason string }
+
+var _ = q.Sealed[Message](Ping{}, Pong{}, Disconnect{})    // synthesises the markers
+
+ch := make(chan Message, 4)
+ch <- Ping{ID: 1}                                          // flows as itself
+
+for m := range ch {
+    switch v := q.Exhaustive(m).(type) {                    // coverage-checked at build
+    case Ping:       handlePing(v)
+    case Pong:       handlePong(v)
+    case Disconnect: handleDisconnect(v)
+    }
+}
+```
+
+`q.Sealed[I](variants...)` registers the closed set; the preprocessor synthesises one marker-method impl per variant in a companion file so each implements `I`. Variadic value-args = no arity ceiling. Same-package variants only (Go's method-decl restriction). Pick `q.Sealed` for actor-style message dispatch, `q.OneOfN` when you need a single concrete carrier (cross-package or primitive variants).
+
 ### Typed-string atoms (Erlang-flavoured)
 
 ```go

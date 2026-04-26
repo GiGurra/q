@@ -175,3 +175,4 @@ walks the variant list to drive the coverage check.
 
 - [`q.EnumValues` / `q.EnumName` / …](enums.md) — the value-level enum helpers `q.Exhaustive` is a sibling of.
 - [`q.OneOfN`](oneof.md) — discriminated sum types; uses this `q.Exhaustive` form for statement-level dispatch.
+- [`q.Sealed`](sealed.md) — interface-based sealed sums; the type-switch coverage path also handles these.

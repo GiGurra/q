@@ -1,0 +1,13 @@
+ping 1
+m-ping 1
+p
+only-ping 1
+pong 2
+m-pong 2
+P
+not a ping
+dc: timeout
+m-dc: timeout
+D
+not a ping
+direct: ping 99

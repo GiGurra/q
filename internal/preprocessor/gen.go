@@ -20,14 +20,19 @@ import (
 	"strings"
 )
 
-// genDirective is one resolved Gen* call.
+// genDirective is one resolved Gen* call. For familySealed, typeName
+// is the marker interface's name, sealedMarker is the marker method
+// name, and sealedVariants is the per-variant type spelling (each one
+// gets a synthesised `func (V) markerMethod() {}` body).
 type genDirective struct {
-	family             family
-	typeName           string
-	constNames         []string
-	constValues        []string
-	underlying         string
-	pos                token.Position
+	family         family
+	typeName       string
+	constNames     []string
+	constValues    []string
+	underlying     string
+	pos            token.Position
+	sealedMarker   string
+	sealedVariants []string
 }
 
 // collectGenDirectives walks all shapes in a package compile and
@@ -41,20 +46,35 @@ func collectGenDirectives(fset *token.FileSet, shapes []callShape) []genDirectiv
 		for _, sc := range sh.Calls {
 			switch sc.Family {
 			case familyGenStringer, familyGenEnumJSONStrict, familyGenEnumJSONLax:
+				if sc.EnumTypeText == "" || len(sc.EnumConsts) == 0 {
+					continue
+				}
+				dirs = append(dirs, genDirective{
+					family:      sc.Family,
+					typeName:    sc.EnumTypeText,
+					constNames:  sc.EnumConsts,
+					constValues: sc.EnumConstValues,
+					underlying:  sc.EnumUnderlyingKind,
+					pos:         fset.Position(sc.OuterCall.Pos()),
+				})
+			case familySealed:
+				if sc.SealedMarkerName == "" || len(sc.SealedVariantNames) == 0 {
+					continue
+				}
+				// typeName here doubles as a stable key for dedup —
+				// use the marker method name, which is unique per
+				// marker interface within a package (interfaces
+				// share methods via embedding, not naming).
+				dirs = append(dirs, genDirective{
+					family:         sc.Family,
+					typeName:       sc.SealedMarkerName,
+					sealedMarker:   sc.SealedMarkerName,
+					sealedVariants: sc.SealedVariantNames,
+					pos:            fset.Position(sc.OuterCall.Pos()),
+				})
 			default:
 				continue
 			}
-			if sc.EnumTypeText == "" || len(sc.EnumConsts) == 0 {
-				continue
-			}
-			dirs = append(dirs, genDirective{
-				family:      sc.Family,
-				typeName:    sc.EnumTypeText,
-				constNames:  sc.EnumConsts,
-				constValues: sc.EnumConstValues,
-				underlying:  sc.EnumUnderlyingKind,
-				pos:         fset.Position(sc.OuterCall.Pos()),
-			})
 		}
 	}
 	// Stable ordering: by family then type name. Multiple directives
@@ -116,6 +136,8 @@ func synthesizeGenFile(pkgName string, dirs []genDirective) string {
 		case familyGenEnumJSONLax:
 			addImport("encoding/json")
 			bodies = append(bodies, generateJSONLaxMethods(d))
+		case familySealed:
+			bodies = append(bodies, generateSealedMarkerMethods(d))
 		}
 	}
 
@@ -180,6 +202,22 @@ func generateJSONStrictMethods(d genDirective) string {
 		fmt.Fprintf(&b, "\tcase %q:\n\t\t*v = %s\n\t\treturn nil\n", name, name)
 	}
 	fmt.Fprintf(&b, "\t}\n\treturn fmt.Errorf(\"q.GenEnumJSONStrict[%s]: unknown name %%q\", s)\n}\n", d.typeName)
+	return b.String()
+}
+
+// generateSealedMarkerMethods emits one
+//
+//	func (V) markerMethod() {}
+//
+// per variant in the q.Sealed directive — so each variant satisfies
+// the marker interface via the synthesised method. Same-package
+// declaration is enforced by the typecheck pass; this code assumes
+// the variants live in the user's package.
+func generateSealedMarkerMethods(d genDirective) string {
+	var b strings.Builder
+	for _, v := range d.sealedVariants {
+		fmt.Fprintf(&b, "func (%s) %s() {}\n", v, d.sealedMarker)
+	}
 	return b.String()
 }
 

@@ -1,28 +1,44 @@
 package preprocessor
 
-// oneof.go — typecheck + rewrite for the q.OneOfN sum-type family.
+// oneof.go — typecheck + rewrite for the q.OneOfN AND q.Sealed
+// sum-type families. Both sums share dispatch machinery; they differ
+// only in the runtime carrier:
 //
-// Three call shapes are wired into the preprocessor by this file:
+//   - q.OneOfN: struct{Tag uint8; Value any}. Construction via
+//     q.AsOneOf[T](v); dispatch via switch on .Tag.
+//   - q.Sealed: marker interface with auto-synthesised marker
+//     methods on each variant. Construction is direct (`Variant{...}`
+//     already implements the marker); dispatch via Go type switch.
+//
+// Five call shapes are wired into the preprocessor by this file:
 //
 //   1. q.AsOneOf[T](v) — wrap v as a OneOfN-derived sum type T.
-//      Validates T is OneOfN-derived, finds v's type's position in
-//      T's arm list, emits T{Tag: <pos>, Value: v}.
+//      Validates T is OneOfN-derived (struct flavour), finds v's
+//      type's position in T's arm list, emits T{Tag: <pos>, Value: v}.
 //
-//   2. q.Match(s, q.Case(VariantZero, result), q.OnType(handler)…)
-//      where s's type is OneOfN-derived. Each q.Case arm's cond type
-//      maps to a variant; q.OnType binds the unwrapped variant value
-//      via its handler's first parameter. Rewriter emits a switch on
-//      _v.Tag with type-asserted Value access for handler arms.
+//   2. q.Match(s, …) where s is a OneOfN-derived sum (struct or
+//      Sealed interface). q.Case arms select by cond type; q.OnType
+//      arms bind the unwrapped payload; q.Default catches the rest.
+//      Rewriter emits an IIFE-wrapped switch — on .Tag for the struct
+//      flavour, on .(type) for the Sealed flavour.
 //
-//   3. switch v := q.Exhaustive(s.Value).(type) { case T1: … } where
-//      s's type is OneOfN-derived. Coverage check enforces every
-//      variant has a case (or default: opt-out).
+//   3. switch v := q.Exhaustive(s.Value).(type) { … } where s is a
+//      q.OneOfN struct. Coverage check enforces every variant has a
+//      case (or default: opt-out).
 //
-// Discovery flow. resolveAsOneOf and resolveMatch both need the arm
-// list for a OneOfN-derived type T. We walk the package's TypeSpecs
-// once at typecheck entry and build a map TypeName → arms. For T
-// declared as the bare q.OneOfN[…] (no alias), the arm list is
-// recovered via TypeArgs() directly.
+//   4. switch v := q.Exhaustive(m).(type) { … } where m is a Sealed
+//      marker-interface value. Coverage check uses the registered
+//      closed set.
+//
+//   5. var _ = q.Sealed[I](Variant{}, …) — package-level directive
+//      that registers the closed set for I and triggers companion-
+//      file synthesis of the per-variant marker methods.
+//
+// Discovery flow. resolveOneOfTypes walks TypeSpecs to find OneOfN-
+// derived alias types. resolveSealedDirective walks q.Sealed
+// directives to find Sealed-marker interfaces and their variants.
+// Both populate the same `oneOfArms`-keyed map so armsForType serves
+// both dispatch shapes uniformly.
 
 import (
 	"fmt"
@@ -185,6 +201,20 @@ func resolveAsOneOf(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPath
 		return Diagnostic{}, false
 	}
 	pos := fset.Position(sc.OuterCall.Pos())
+	// q.AsOneOf is the struct-flavour constructor — for Sealed-marker
+	// interfaces, variants flow as themselves and the user just writes
+	// `var m T = Variant{...}` directly. Reject early with a directed
+	// diagnostic.
+	if named, ok := types.Unalias(tv.Type).(*types.Named); ok {
+		if _, isIface := named.Underlying().(*types.Interface); isIface {
+			return Diagnostic{
+				File: pos.Filename,
+				Line: pos.Line,
+				Col:  pos.Column,
+				Msg:  fmt.Sprintf("q.AsOneOf[T]: T (%s) is a Sealed-marker interface — variants implement it via the synthesised marker, so just construct the variant value directly (e.g. `var m %s = Variant{...}`)", named.Obj().Name(), named.Obj().Name()),
+			}, true
+		}
+	}
 	arms, ok := armsForType(tv.Type, ones, pkgPath)
 	if !ok {
 		return Diagnostic{
@@ -263,6 +293,15 @@ func checkArmsDistinct(fset *token.FileSet, sc *qSubCall, arms oneOfArms) (Diagn
 func resolveMatchOneOf(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPath string, arms oneOfArms) (Diagnostic, bool) {
 	sc.IsOneOfMatch = true
 	sc.OneOfArmTypeTexts = arms.Texts
+	// Detect Sealed (interface) flavour vs OneOfN (struct) flavour:
+	// the rewriter emits a Go type switch instead of a Tag switch.
+	if matchedTV, ok := info.Types[sc.InnerExpr]; ok && matchedTV.Type != nil {
+		if named, isNamed := types.Unalias(matchedTV.Type).(*types.Named); isNamed {
+			if _, isIface := named.Underlying().(*types.Interface); isIface {
+				sc.OneOfIsInterface = true
+			}
+		}
+	}
 
 	qualifier := func(p *types.Package) string {
 		if p == nil || p.Path() == pkgPath {
@@ -397,6 +436,135 @@ func resolveMatchOneOf(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgP
 	return Diagnostic{}, false
 }
 
+// resolveSealedDirective validates a `var _ = q.Sealed[I](v1, v2, …)`
+// directive at typecheck time and registers the closed set in the
+// shared sealed-arms map.
+//
+// Validates:
+//   - I is a defined named interface type with exactly one method.
+//   - That method takes no args and returns no values (a marker).
+//   - Each variadic arg's static type is a same-package named type.
+//   - Each variant's type is type-distinct from the others.
+//
+// Populates sc.SealedMarkerName and sc.SealedVariantNames so the
+// synthesis pass can emit the per-variant marker method bodies.
+func resolveSealedDirective(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPath string, sealedMap map[*types.TypeName]oneOfArms) (Diagnostic, bool) {
+	if sc.AsType == nil {
+		return Diagnostic{}, false
+	}
+	tv, ok := info.Types[sc.AsType]
+	if !ok || tv.Type == nil {
+		return Diagnostic{}, false
+	}
+	pos := fset.Position(sc.OuterCall.Pos())
+	iNamed, ok := tv.Type.(*types.Named)
+	if !ok {
+		return Diagnostic{
+			File: pos.Filename,
+			Line: pos.Line,
+			Col:  pos.Column,
+			Msg:  fmt.Sprintf("q.Sealed[I]: I must be a defined named interface type; got %s", types.TypeString(tv.Type, nil)),
+		}, true
+	}
+	iface, ok := iNamed.Underlying().(*types.Interface)
+	if !ok {
+		return Diagnostic{
+			File: pos.Filename,
+			Line: pos.Line,
+			Col:  pos.Column,
+			Msg:  fmt.Sprintf("q.Sealed[I]: I (%s) must be an interface type; got underlying %s", iNamed.Obj().Name(), iNamed.Underlying().String()),
+		}, true
+	}
+	// Must have exactly one method, no embedded interfaces.
+	if iface.NumMethods() != 1 || iface.NumEmbeddeds() != 0 {
+		return Diagnostic{
+			File: pos.Filename,
+			Line: pos.Line,
+			Col:  pos.Column,
+			Msg:  fmt.Sprintf("q.Sealed[I]: I (%s) must have exactly one method (the marker), no embeddings; got %d methods, %d embeddings", iNamed.Obj().Name(), iface.NumMethods(), iface.NumEmbeddeds()),
+		}, true
+	}
+	method := iface.Method(0)
+	sig, ok := method.Type().(*types.Signature)
+	if !ok || sig.Params().Len() != 0 || sig.Results().Len() != 0 {
+		return Diagnostic{
+			File: pos.Filename,
+			Line: pos.Line,
+			Col:  pos.Column,
+			Msg:  fmt.Sprintf("q.Sealed[I]: I's marker method (%s) must take no args and return no values", method.Name()),
+		}, true
+	}
+	sc.SealedMarkerName = method.Name()
+
+	// Validate variants and accumulate arms.
+	qualifier := func(p *types.Package) string {
+		if p == nil || p.Path() == pkgPath {
+			return ""
+		}
+		return p.Name()
+	}
+	arms := oneOfArms{}
+	for i, v := range sc.SealedVariants {
+		vtv, ok := info.Types[v]
+		if !ok || vtv.Type == nil {
+			pos := fset.Position(v.Pos())
+			return Diagnostic{
+				File: pos.Filename,
+				Line: pos.Line,
+				Col:  pos.Column,
+				Msg:  fmt.Sprintf("q.Sealed[I]: variant arg %d has no resolvable type — pass a zero value of the variant type (e.g. Variant{})", i+1),
+			}, true
+		}
+		vt := vtv.Type
+		named, isNamed := vt.(*types.Named)
+		if !isNamed {
+			pos := fset.Position(v.Pos())
+			return Diagnostic{
+				File: pos.Filename,
+				Line: pos.Line,
+				Col:  pos.Column,
+				Msg:  fmt.Sprintf("q.Sealed[I]: variant arg %d (%s) must be a named type — pass a zero value of a defined type (e.g. Variant{})", i+1, types.TypeString(vt, nil)),
+			}, true
+		}
+		obj := named.Obj()
+		if obj.Pkg() == nil || obj.Pkg().Path() != pkgPath {
+			pos := fset.Position(v.Pos())
+			return Diagnostic{
+				File: pos.Filename,
+				Line: pos.Line,
+				Col:  pos.Column,
+				Msg:  fmt.Sprintf("q.Sealed[I]: variant %s must be declared in the same package as the q.Sealed call — Go disallows method declarations on types defined in another package, so the marker can't be synthesised on a foreign type", types.TypeString(vt, nil)),
+			}, true
+		}
+		// Check distinct.
+		for _, prev := range arms.Types {
+			if types.Identical(prev, vt) {
+				pos := fset.Position(v.Pos())
+				return Diagnostic{
+					File: pos.Filename,
+					Line: pos.Line,
+					Col:  pos.Column,
+					Msg:  fmt.Sprintf("q.Sealed[I]: duplicate variant %s — variants must be type-distinct", obj.Name()),
+				}, true
+			}
+		}
+		arms.Types = append(arms.Types, vt)
+		arms.Texts = append(arms.Texts, types.TypeString(vt, qualifier))
+		sc.SealedVariantNames = append(sc.SealedVariantNames, obj.Name())
+	}
+	if len(arms.Types) == 0 {
+		return Diagnostic{
+			File: pos.Filename,
+			Line: pos.Line,
+			Col:  pos.Column,
+			Msg:  fmt.Sprintf("q.Sealed[I] (%s): no variants supplied — pass at least one variant zero value", iNamed.Obj().Name()),
+		}, true
+	}
+
+	sealedMap[iNamed.Obj()] = arms
+	return Diagnostic{}, false
+}
+
 // variantIndex returns the 0-based position of t within arms, or -1
 // when t isn't one of the variants. Comparison uses types.Identical
 // (so a defined type and its underlying are distinct, which is what
@@ -412,23 +580,44 @@ func variantIndex(t types.Type, arms []types.Type) int {
 
 // validateExhaustiveOneOf is invoked from validateExhaustive when the
 // q.Exhaustive call is the X of an `.(type)` assertion in a type
-// switch, AND the inner expression is `<x>.Value` where <x>'s type is
-// OneOfN-derived. Validates each case clause type matches a variant
-// and enforces coverage. default: opts out.
+// switch. Two shapes are accepted:
+//
+//   - q.Exhaustive(<x>.Value).(type) — OneOfN struct flavour. <x>'s
+//     type is OneOfN-derived; coverage uses its variant list.
+//   - q.Exhaustive(<m>).(type) — Sealed flavour. <m>'s static type
+//     is the marker interface; coverage uses the registered closed
+//     set.
+//
+// Validates each case clause type matches a variant and enforces
+// coverage. default: opts out.
 func validateExhaustiveOneOf(fset *token.FileSet, sw *ast.TypeSwitchStmt, sc *qSubCall, info *types.Info, pkgPath string, ones map[*types.TypeName]oneOfArms) (Diagnostic, bool) {
-	// sc.InnerExpr should be a SelectorExpr <x>.Value.
-	sel, ok := sc.InnerExpr.(*ast.SelectorExpr)
-	if !ok || sel.Sel == nil || sel.Sel.Name != "Value" {
-		return Diagnostic{}, false
+	innerTV, hasInner := info.Types[sc.InnerExpr]
+	var arms oneOfArms
+	var found bool
+	// Sealed flavour: the inner expression is itself the marker
+	// interface value (not <x>.Value). Look up by the type's TypeName.
+	if hasInner && innerTV.Type != nil {
+		if a, ok := armsForType(innerTV.Type, ones, pkgPath); ok {
+			arms = a
+			found = true
+		}
 	}
-	xtv, ok := info.Types[sel.X]
-	if !ok || xtv.Type == nil {
-		return Diagnostic{}, false
-	}
-	arms, ok := armsForType(xtv.Type, ones, pkgPath)
-	if !ok {
-		// Not a OneOfN — let regular q.Exhaustive validation try.
-		return Diagnostic{}, false
+	// OneOfN struct flavour: the inner expression is <x>.Value.
+	if !found {
+		sel, ok := sc.InnerExpr.(*ast.SelectorExpr)
+		if !ok || sel.Sel == nil || sel.Sel.Name != "Value" {
+			return Diagnostic{}, false
+		}
+		xtv, ok := info.Types[sel.X]
+		if !ok || xtv.Type == nil {
+			return Diagnostic{}, false
+		}
+		a, ok := armsForType(xtv.Type, ones, pkgPath)
+		if !ok {
+			// Not a OneOfN — let regular q.Exhaustive validation try.
+			return Diagnostic{}, false
+		}
+		arms = a
 	}
 	if d, ok := checkArmsDistinct(fset, sc, arms); ok {
 		return d, true
@@ -456,7 +645,7 @@ func validateExhaustiveOneOf(fset *token.FileSet, sw *ast.TypeSwitchStmt, sc *qS
 					File: pos.Filename,
 					Line: pos.Line,
 					Col:  pos.Column,
-					Msg:  fmt.Sprintf("q.Exhaustive on q.OneOfN.Value: case type %s is not a variant (accepted: %s)", types.TypeString(tv.Type, nil), strings.Join(arms.Texts, ", ")),
+					Msg:  fmt.Sprintf("q.Exhaustive on sealed sum: case type %s is not a variant (accepted: %s)", types.TypeString(tv.Type, nil), strings.Join(arms.Texts, ", ")),
 				}, true
 			}
 			covered[idx] = true
@@ -478,7 +667,7 @@ func validateExhaustiveOneOf(fset *token.FileSet, sw *ast.TypeSwitchStmt, sc *qS
 			File: pos.Filename,
 			Line: pos.Line,
 			Col:  pos.Column,
-			Msg:  fmt.Sprintf("q.Exhaustive type switch on q.OneOfN-derived value is missing case(s) for: %s. Add the missing case(s), or use `default:` to opt out.", strings.Join(missing, ", ")),
+			Msg:  fmt.Sprintf("q.Exhaustive type switch on sealed sum is missing case(s) for: %s. Add the missing case(s), or use `default:` to opt out.", strings.Join(missing, ", ")),
 		}, true
 	}
 	return Diagnostic{}, false
@@ -546,18 +735,37 @@ func buildAsOneOfReplacement(fset *token.FileSet, src []byte, sub qSubCall, subs
 }
 
 // buildOneOfMatchReplacement emits the IIFE-wrapped switch for a
-// q.Match call whose matched value is a OneOfN-derived sum.
+// q.Match call whose matched value is a OneOfN-derived sum. Two
+// flavours:
 //
-//	(func() R {
-//	    _v := <value>
-//	    switch _v.Tag {
-//	    case 1: return <r1 expression or handler call>
-//	    case 2: ...
-//	    default: return <defaultResult>      // when q.Default present
-//	    }
-//	    var _zero R; return _zero            // when no q.Default
-//	}())
+//   - struct (OneOfN): switch on _v.Tag; arms unwrap via _v.Value.(T).
+//   - interface (Sealed): Go type switch on _v.(type); arms bind the
+//     unwrapped variant via the case clause's named binding.
+//
+//	struct flavour:
+//	  (func() R {
+//	      _v := <value>
+//	      switch _v.Tag {
+//	      case 1: return <r1>
+//	      case 2: return (handler2)(_v.Value.(T2))
+//	      default: return <defaultResult>      // when q.Default present
+//	      }
+//	      var _zero R; return _zero            // when no q.Default
+//	  }())
+//
+//	interface flavour:
+//	  (func() R {
+//	      switch _v := <value>.(type) {
+//	      case T1: return <r1>; _ = _v
+//	      case T2: return (handler2)(_v)
+//	      default: return <defaultResult>
+//	      }
+//	      var _zero R; return _zero
+//	  }())
 func buildOneOfMatchReplacement(fset *token.FileSet, src []byte, sub qSubCall, subs []qSubCall, subTexts []string) string {
+	if sub.OneOfIsInterface {
+		return buildSealedMatchReplacement(fset, src, sub, subs, subTexts)
+	}
 	valueText := exprTextSubst(fset, src, sub.InnerExpr, subs, subTexts)
 	resultType := sub.ResolvedString
 	if resultType == "" {
@@ -607,6 +815,71 @@ func buildOneOfMatchReplacement(fset *token.FileSet, src []byte, sub qSubCall, s
 			resultType, valueText, cases, defaultText)
 	}
 	return fmt.Sprintf("(func() %s { _v := %s; switch _v.Tag { %s }; var _zero %s; return _zero }())",
+		resultType, valueText, cases, resultType)
+}
+
+// buildSealedMatchReplacement emits the type-switch IIFE for q.Match
+// on a Sealed-marker interface value.
+func buildSealedMatchReplacement(fset *token.FileSet, src []byte, sub qSubCall, subs []qSubCall, subTexts []string) string {
+	valueText := exprTextSubst(fset, src, sub.InnerExpr, subs, subTexts)
+	resultType := sub.ResolvedString
+	if resultType == "" {
+		resultType = "any"
+	}
+
+	type armEmit struct {
+		idx       int
+		variant   string
+		body      string
+		bindsVar  bool // whether the case body uses _v (true for OnType, false for q.Case)
+	}
+	var armLines []armEmit
+	var defaultText string
+	hasDefault := false
+	for _, mc := range sub.MatchCases {
+		if mc.IsDefault {
+			defaultText = exprTextSubst(fset, src, mc.ResultExpr, subs, subTexts)
+			hasDefault = true
+			continue
+		}
+		if mc.IsOnType {
+			handlerText := exprTextSubst(fset, src, mc.HandlerExpr, subs, subTexts)
+			armLines = append(armLines, armEmit{
+				idx:      mc.OnTypeArmIdx,
+				variant:  mc.OnTypeArmText,
+				body:     fmt.Sprintf("return (%s)(_v)", handlerText),
+				bindsVar: true,
+			})
+			continue
+		}
+		resultText := exprTextSubst(fset, src, mc.ResultExpr, subs, subTexts)
+		armLines = append(armLines, armEmit{
+			idx:      mc.OnTypeArmIdx,
+			variant:  mc.OnTypeArmText,
+			body:     "return " + resultText,
+			bindsVar: false,
+		})
+	}
+
+	sort.SliceStable(armLines, func(a, b int) bool { return armLines[a].idx < armLines[b].idx })
+
+	var caseStmts []string
+	for _, a := range armLines {
+		body := a.body
+		if !a.bindsVar {
+			// q.Case form: `case T: _ = _v; return …` so the binding
+			// stays referenced even when the result expression doesn't
+			// touch the payload.
+			body = "_ = _v; " + body
+		}
+		caseStmts = append(caseStmts, fmt.Sprintf("case %s: %s", a.variant, body))
+	}
+	cases := strings.Join(caseStmts, "; ")
+	if hasDefault {
+		return fmt.Sprintf("(func() %s { switch _v := (%s).(type) { %s; default: _ = _v; return %s } }())",
+			resultType, valueText, cases, defaultText)
+	}
+	return fmt.Sprintf("(func() %s { switch _v := (%s).(type) { %s }; var _zero %s; return _zero }())",
 		resultType, valueText, cases, resultType)
 }
 

@@ -136,6 +136,7 @@ const (
 	familyAtom           // q.A[T]() — typed-string atom with value = bare name of T
 	familyAtomOf         // q.AtomOf[T]() — q.Atom("name-of-T") for switch-case ergonomics
 	familyAsOneOf        // q.AsOneOf[T](v) — wrap v as a OneOfN-derived sum type T
+	familySealed         // var _ = q.Sealed[I](Variant{}, …) — directive: synthesise marker methods
 )
 
 // form is the syntactic position of a recognised q.* call:
@@ -471,13 +472,32 @@ type qSubCall struct {
 	// textual spelling for the composite literal (e.g. "Status").
 	//
 	// For familyMatch: IsOneOfMatch flips when the matched value's
-	// type is a OneOfN-derived sum. OneOfArmTypeTexts carries every
-	// variant's textual spelling in declaration order — used by the
-	// coverage check and by the rewriter's exhaustive-switch emit.
+	// type is a OneOfN-derived sum (struct OR Sealed-marked
+	// interface). OneOfArmTypeTexts carries every variant's textual
+	// spelling in declaration order — used by the coverage check and
+	// by the rewriter's exhaustive-switch emit. OneOfIsInterface
+	// flips for the Sealed (interface) flavour: the rewriter emits a
+	// type switch instead of a Tag switch, and arms unwrap via type
+	// assertion rather than .Value.(T).
 	OneOfArmIdx       int
 	OneOfTypeText     string
 	IsOneOfMatch      bool
+	OneOfIsInterface  bool
 	OneOfArmTypeTexts []string
+
+	// Sealed-family fields. SealedVariants is the variadic-arg list
+	// from a `var _ = q.Sealed[I](Variant{}, …)` directive — each
+	// expression's static type is the variant. Captured at scan time;
+	// the typecheck pass extracts each one's *types.Type to record
+	// the closed set, and the synthesis pass generates one marker
+	// method per variant.
+	//
+	// SealedMarkerName / SealedVariantNames are populated at
+	// typecheck. The synthesis pass reads them to emit the companion
+	// file methods.
+	SealedVariants     []ast.Expr
+	SealedMarkerName   string
+	SealedVariantNames []string
 }
 
 // atTerminal identifies which terminal method closes a q.At chain.
@@ -1137,6 +1157,25 @@ func scanTopLevelVarSpec(fset *token.FileSet, path string, gd *ast.GenDecl, alia
 						Stmt:  &ast.ExprStmt{X: call},
 						Form:  formDiscard,
 						Calls: []qSubCall{{Family: fam, AsType: typeArg, OuterCall: call}},
+					})
+					continue
+				}
+				// q.Sealed[I](Variant{}, …) — directive that registers a
+				// closed-set sealed interface. The scanner captures the
+				// type-arg (the marker interface) and the variadic args
+				// (the variants). Typecheck pass validates the marker
+				// shape and synthesises the per-variant marker methods
+				// in the companion file.
+				if typeArg, ok := isIndexedSelector(call.Fun, alias, "Sealed"); ok {
+					*shapes = append(*shapes, callShape{
+						Stmt:  &ast.ExprStmt{X: call},
+						Form:  formDiscard,
+						Calls: []qSubCall{{
+							Family:        familySealed,
+							AsType:        typeArg,
+							OuterCall:     call,
+							SealedVariants: call.Args,
+						}},
 					})
 					continue
 				}

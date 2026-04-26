@@ -1,1 +1,1 @@
-q.Exhaustive type switch on q.OneOfN-derived value is missing case(s) for: Failed
+q.Exhaustive type switch on sealed sum is missing case(s) for: Failed

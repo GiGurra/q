@@ -171,6 +171,22 @@ func checkErrorSlotsWithInfo(fset *token.FileSet, pkgPath, importcfgPath string,
 	// q.AsOneOf, q.Match-on-sum, and q.Exhaustive type-switch coverage.
 	oneOfTypes := resolveOneOfTypes(files, info, pkgPath)
 
+	// Pass 1.4 — q.Sealed directives register their interface +
+	// variant set into the SAME map (oneOfTypes) so q.Match /
+	// q.Exhaustive on a Sealed-marked interface look up arms via the
+	// same machinery as OneOfN. Runs before the AsOneOf pass so any
+	// Sealed-tagged type is visible.
+	for i := range shapes {
+		for j := range shapes[i].Calls {
+			sc := &shapes[i].Calls[j]
+			if sc.Family == familySealed {
+				if d, ok := resolveSealedDirective(fset, sc, info, pkgPath, oneOfTypes); ok {
+					diags = append(diags, d)
+				}
+			}
+		}
+	}
+
 	// Pass 1.5 — q.AsOneOf depends on the OneOf type map.
 	for i := range shapes {
 		for j := range shapes[i].Calls {
@@ -256,13 +272,19 @@ func validateExhaustive(fset *token.FileSet, sh *callShape, sc *qSubCall, info *
 			return d, true
 		}
 		// Even if validateExhaustiveOneOf returned no diagnostic, when
-		// the inner expression IS a OneOfN's .Value access we are done
-		// — the regular const-coverage path below would be misleading.
+		// the inner expression IS a OneOfN's .Value access OR is itself
+		// a Sealed-marker interface, we are done — the regular const-
+		// coverage path below would be misleading.
 		if sel, ok := sc.InnerExpr.(*ast.SelectorExpr); ok && sel.Sel != nil && sel.Sel.Name == "Value" {
 			if xtv, ok := info.Types[sel.X]; ok && xtv.Type != nil {
 				if _, isOne := armsForType(xtv.Type, oneOfTypes, pkgPath); isOne {
 					return Diagnostic{}, false
 				}
+			}
+		}
+		if itv, ok := info.Types[sc.InnerExpr]; ok && itv.Type != nil {
+			if _, isSealed := armsForType(itv.Type, oneOfTypes, pkgPath); isSealed {
+				return Diagnostic{}, false
 			}
 		}
 	}
