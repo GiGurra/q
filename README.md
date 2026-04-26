@@ -349,7 +349,7 @@ The Scala-flavoured 2-arm sibling lives in its own subpackage: [`either.Either[L
 type Pending q.Atom              // each atom is its own type — no const decl
 type Done    q.Atom
 
-p := q.A[Pending]()              // p: Pending = "Pending" (auto-derived from T)
+p := q.A[Pending]()              // p: Pending = "<importpath>.Pending" — globally unique across pkgs
 
 func classify(a q.Atom) string {
     switch a {

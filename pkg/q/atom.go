@@ -11,37 +11,45 @@ package q
 //	type Done    q.Atom
 //	type Failed  q.Atom
 //
-//	p := q.A[Pending]()    // p is Pending("Pending"), derived from T's name
-//	d := q.A[Done]()       // d is Done("Done")
+//	// In package "github.com/me/proj":
+//	p := q.A[Pending]()    // p is Pending("github.com/me/proj.Pending")
+//	d := q.A[Done]()       // d is Done("github.com/me/proj.Done")
 //
 // Properties.
 //
 //   - Each atom is its own TYPE. The Go type system protects against
 //     mixing: you can't assign Pending to Done or pass one where the
 //     other is expected.
-//   - The value is the bare name of T as a string — no separate const
-//     declaration needed.
+//   - The value is the declaring package's import path + the type's
+//     bare name (canonical form via go/types) — globally unique
+//     across the binary, no central registry needed.
 //   - Equality across instances of the same atom type is plain string
 //     equality (free).
-//   - The preprocessor rewrites q.A[T]() to T("<bare name of T>"), so
-//     each call site folds to a typed-string constant — zero runtime
-//     cost. The runtime body is link-gated.
+//   - The preprocessor rewrites q.A[T]() to T("<importPath>.<TypeName>"),
+//     so each call site folds to a typed-string constant — zero
+//     runtime cost. The runtime body is link-gated.
 //
 // Compared to Erlang atoms, this gives you the type-distinct value
 // (Erlang atoms are all one type) but keeps the "no central
 // declaration" win: each atom needs only `type X q.Atom` at its
 // point of use, no const block, no shared type list to maintain.
+//
+// JSON / wire formats: the qualified value is the load-bearing
+// identity, but it's rarely the right thing to put on a wire. See
+// docs/api/atom.md for the rationale and the recommended patterns
+// (custom MarshalJSON per atom type, or closed-set enums via
+// q.GenEnumJSONStrict / q.GenEnumJSONLax for wire-bound enums).
 
 // Atom is the parent typed-string type from which user-declared atom
 // types derive: `type MyAtom q.Atom`. The underlying string value of
-// each atom is its type's bare name, set by q.A[T]() via the
-// preprocessor rewrite.
+// each atom is its declaring package's import path + the type's bare
+// name, set by q.A[T]() via the preprocessor rewrite.
 type Atom string
 
 // A summons an instance of atom type T. The preprocessor rewrites
-// each call site to T("<bare name of T>") — a typed-string cast that
-// folds at compile time. The runtime body is unreachable in a
-// successful build.
+// each call site to T("<importPath>.<TypeName>") — a typed-string
+// cast that folds at compile time. The runtime body is unreachable
+// in a successful build.
 //
 // Example:
 //
@@ -65,7 +73,7 @@ func A[T ~string]() T {
 // AtomOf is q.A's case-friendly sibling: it returns the value cast as
 // the parent q.Atom type, so it slots into a `switch a q.Atom { case … }`
 // directly without the boilerplate q.Atom(...) wrap. The preprocessor
-// rewrites each call site to q.Atom("<bare name of T>").
+// rewrites each call site to q.Atom("<importPath>.<TypeName>").
 //
 // Compare:
 //
