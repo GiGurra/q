@@ -1,43 +1,42 @@
 # Conditional expression: `q.Tern`
 
-`q.Tern[T](cond, t)` is the conditional-expression sugar Go's syntax doesn't have. Returns `t` when `cond` is true; otherwise the zero value of `T`.
+`q.Tern(cond, ifTrue, ifFalse)` is the conditional-expression sugar Go's syntax doesn't have. Returns `ifTrue` when `cond` is true; otherwise `ifFalse`. Only the matching branch is evaluated.
 
 ```go
-display := q.Tern[string](user != nil, user.Name)
-// → "" when user is nil; user.Name when not
+display := q.Tern(user != nil, user.Name, "anonymous")
+// → "anonymous" when user is nil; user.Name when not
 ```
 
 ## Signature
 
 ```go
-func Tern[T any](cond bool, t T) T
+func Tern[T any](cond bool, ifTrue, ifFalse T) T
 ```
 
-Two args, strict types — the kind of signature gopls likes. Type-arg `T` is required.
+Three args, strict types — the kind of signature gopls likes.
 
 ## Why a preprocessor pass for what looks like a runtime helper
 
-A naïve runtime implementation would always evaluate `t` (Go's standard arg-evaluation semantics). That breaks the whole point: `q.Tern[string](user != nil, user.Name)` would panic-deref on a nil `user` *before* `Tern` ever got to choose a branch.
+A naïve runtime implementation would always evaluate BOTH branches (Go's standard arg-evaluation semantics). That breaks the whole point: `q.Tern(user != nil, user.Name, "anonymous")` would panic-deref on a nil `user` *before* `Tern` ever got to choose a branch.
 
-The preprocessor rewrites every call site to an IIFE that splices each arg's source text into the chosen branch — so `t` is only evaluated when `cond` is true. The rewrite for the example above:
+The preprocessor rewrites every call site to an IIFE that splices each branch's source text into its own arm — so a branch is only evaluated when its arm is taken. The rewrite for the example above:
 
 ```go
 display := (func() string {
     if user != nil {
         return user.Name
     }
-    var _zero string
-    return _zero
+    return "anonymous"
 }())
 ```
 
-`user.Name` lives only inside the `if` body. When `user` is nil the if-branch never runs and the zero value (`""`) is returned. No nil-deref.
+`user.Name` lives only inside the `if` body. When `user` is nil the if-branch never runs and `"anonymous"` is returned. No nil-deref.
 
 ## What you get
 
-- **Lazy evaluation of `t`.** Side-effects, expensive calls, nil-deref-prone field access — only run on the true path.
+- **Lazy evaluation of both branches.** Side-effects, expensive calls, nil-deref-prone field access — only the taken branch runs.
 - **Single-eval of `cond`.** `cond` evaluates exactly once, at the IIFE's `if`. Same evaluation point you'd get with a hand-written `if`.
-- **Zero-value default.** When `cond` is false, `T`'s zero value is returned (`""`, `0`, `nil`, etc.).
+- **Chains naturally.** Nested `q.Tern` calls rewrite cleanly because the inner call's IIFE becomes the outer's branch text. Use this for multi-way picks where a `switch` would be heavier than the call site warrants.
 - **No runtime overhead.** The IIFE is one closure call. Go's escape analysis usually inlines it.
 
 ## When to reach for `q.Tern` vs plain `if`
@@ -45,44 +44,52 @@ display := (func() string {
 Use `q.Tern` when:
 
 - You need a value-returning conditional in an expression position (struct literal field, function arg, return statement, etc.) where Go's statement-shaped `if` doesn't fit.
-- The "false" path is naturally the zero value (`""` / `0` / `nil`).
-- The expression is short enough to fit on one line.
+- The expression is short enough to fit on one line — or chains of `q.Tern` give a cleaner multi-way pick than a `switch`.
 
-Reach for plain `if` when:
+Reach for plain `if/else` when:
 
-- Both branches are explicit and meaningful — q.Tern's implicit zero-value-on-false is a footgun if you wanted a different default.
 - The branches are large enough that the IIFE form hurts readability.
 - You need any control-flow shape beyond pick-one (break/continue/return mid-branch, etc.).
+
+For a multi-arm value-returning conditional with predicates and exhaustive checks, [`q.Match`](match.md) is purpose-built.
 
 ## Examples
 
 ```go
 // Field defaults via lazy nil-deref:
-displayName := q.Tern[string](user != nil, user.Name)
-maxConn     := q.Tern[int](cfg != nil, cfg.MaxConn)
+displayName := q.Tern(user != nil, user.Name, "anonymous")
+maxConn     := q.Tern(cfg != nil, cfg.MaxConn, defaultMaxConn)
 
 // Lazy expensive computation — slowLookup() only when cache misses:
-v := q.Tern[*Conn](missing, slowLookup(key))
+v := q.Tern(cached, fast(), slowLookup(key))
 
 // In a struct literal (Go's plain `if` doesn't fit here):
 req := Request{
-    Timeout:  q.Tern[time.Duration](opts.Timeout > 0, opts.Timeout),
-    Endpoint: q.Tern[string](opts.Endpoint != "", opts.Endpoint),
+    Timeout:  q.Tern(opts.Timeout > 0, opts.Timeout, defaultTimeout),
+    Endpoint: q.Tern(opts.Endpoint != "", opts.Endpoint, defaultEndpoint),
 }
 
 // In a return statement:
 func sign(n int) int {
-    return q.Tern[int](n >= 0, 1) - q.Tern[int](n < 0, 1)
+    return q.Tern(n > 0, 1, q.Tern(n < 0, -1, 0))
 }
+
+// Chained for multi-way pick — nested terns nest cleanly:
+tier := q.Tern(score >= 90, "A",
+         q.Tern(score >= 80, "B",
+          q.Tern(score >= 70, "C", "F")))
+
+// Explicit T when you want to widen the result type:
+var iface fmt.Stringer = q.Tern[fmt.Stringer](ok, concreteImpl, fallbackImpl)
 ```
 
 ## Caveats
 
-- **No "false" branch expression.** If you need both branches to be non-zero, use a plain `if/else` block. q.Tern intentionally avoids the three-arg shape (`q.Tern(cond, a, b)`) because that surface is harder to read at most call sites — and Go's `if/else` already handles it.
-- **`cond` is always evaluated.** It has to be — that's how the if knows which branch to take. Lazy semantics apply only to `t`.
-- **Type-arg `T` is required.** `q.Tern[int](...)` not `q.Tern(...)`. Go can't always infer it from `t` alone (e.g. when `t` is an untyped constant or a function returning the wrong type).
+- **`cond` is always evaluated.** It has to be — that's how the if knows which branch to take. Lazy semantics apply only to the branch values.
+- **Both branches must agree on type.** Go's type inference resolves `T` from the branches; mismatched types fail at compile time.
+- **Untyped constants follow Go's default-type rule.** `q.Tern(cond, 1, 2)` infers `T` as `int`. If you need a different type, widen at the call site (`q.Tern(cond, int64(1), int64(2))`) or use the explicit form (`q.Tern[int64](cond, 1, 2)`).
 
 ## See also
 
-- [`q.Match`](match.md) — value-returning switch with multiple branches.
-- [`q.Try`](try.md) — bubble shape; q.Tern is the value-form sibling for "yes-or-zero" choices.
+- [`q.Match`](match.md) — value-returning switch with multiple branches and exhaustiveness.
+- [`q.Try`](try.md) — bubble shape; q.Tern is the value-form sibling for binary picks.

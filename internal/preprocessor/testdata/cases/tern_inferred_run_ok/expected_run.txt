@@ -1,0 +1,11 @@
+max: 5
+greeting: hello
+flag (false branch): false
+user: alice
+ints: [1 2 3]
+map: map[y:2]
+usr: carol
+after false-pick: trueCalls= 0 falseCalls= 1
+after true-pick: trueCalls= 1 falseCalls= 1
+x == y: true
+tier: B

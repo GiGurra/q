@@ -408,17 +408,18 @@ type qSubCall struct {
 	// emits a guiding diagnostic.
 	AssembleChain assembleChain
 
-	// TernCond / TernT are the two q.Tern args captured at scan time.
-	// TernResultTypeText is T's spelling under the q.Tern call's
-	// package qualifier (populated by resolveTern). All zero for
-	// non-Tern families.
+	// TernCond / TernThen / TernElse are the three q.Tern args
+	// captured at scan time. TernResultTypeText is T's spelling under
+	// the q.Tern call's package qualifier (populated by resolveTern).
+	// All zero for non-Tern families.
 	//
-	// Lazy semantics for TernT come from source-splicing rather than
-	// a runtime func() T — the rewriter places TernT's source span
-	// inside the IIFE's true-branch only, so its expression is only
-	// evaluated when cond is true.
+	// Lazy semantics for TernThen / TernElse come from source-splicing
+	// rather than runtime func() T thunks — the rewriter places each
+	// branch's source span inside its own IIFE arm, so a branch is
+	// only evaluated when its arm is taken.
 	TernCond           ast.Expr
-	TernT              ast.Expr
+	TernThen           ast.Expr
+	TernElse           ast.Expr
 	TernResultTypeText string
 }
 
@@ -1317,6 +1318,9 @@ func hasQRefInSub(sub qSubCall, alias string) bool {
 			return true
 		}
 	}
+	if hasQRef(sub.TernCond, alias) || hasQRef(sub.TernThen, alias) || hasQRef(sub.TernElse, alias) {
+		return true
+	}
 	return false
 }
 
@@ -1663,18 +1667,36 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 	// through to the unsupported-shape diagnostic; Go's typechecker
 	// will also reject the call because q.Assemble returns
 	// AssemblyResult[T] rather than (T, error).
-	// q.Tern[T](cond, t) — conditional expression sugar. cond is a
-	// plain bool, t is a T value; the rewriter splices their source
-	// text into an IIFE so t is only evaluated when cond is true.
+	// q.Tern(cond, ifTrue, ifFalse) or q.Tern[T](cond, ifTrue, ifFalse) —
+	// conditional-expression sugar. cond is a plain bool; ifTrue and
+	// ifFalse are T values; the rewriter splices their source text
+	// into an IIFE so only the branch matching cond is evaluated.
+	//
+	// T is inferable from the branch values, so the explicit `[T]`
+	// form is optional. Bare q.Tern(cond, ifTrue, ifFalse) leaves
+	// AsType nil; resolveTern falls back to the type of ifTrue.
 	if typeArg, ok := isIndexedSelector(call.Fun, alias, "Tern"); ok {
-		if len(call.Args) != 2 {
-			return qSubCall{}, false, fmt.Errorf("q.Tern[T] takes exactly 2 arguments (cond, t); got %d", len(call.Args))
+		if len(call.Args) != 3 {
+			return qSubCall{}, false, fmt.Errorf("q.Tern[T] takes exactly 3 arguments (cond, ifTrue, ifFalse); got %d", len(call.Args))
 		}
 		return qSubCall{
 			Family:    familyTern,
 			AsType:    typeArg,
 			TernCond:  call.Args[0],
-			TernT:     call.Args[1],
+			TernThen:  call.Args[1],
+			TernElse:  call.Args[2],
+			OuterCall: expr,
+		}, true, nil
+	}
+	if isSelector(call.Fun, alias, "Tern") {
+		if len(call.Args) != 3 {
+			return qSubCall{}, false, fmt.Errorf("q.Tern takes exactly 3 arguments (cond, ifTrue, ifFalse); got %d", len(call.Args))
+		}
+		return qSubCall{
+			Family:    familyTern,
+			TernCond:  call.Args[0],
+			TernThen:  call.Args[1],
+			TernElse:  call.Args[2],
 			OuterCall: expr,
 		}, true, nil
 	}

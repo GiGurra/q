@@ -273,15 +273,21 @@ Folds to an IIFE-wrapped switch — value-returning switch as an expression, the
 ### Conditional expression
 
 ```go
-display := q.Tern[string](user != nil, user.Name)
-// → "" when user is nil; user.Name when not — and user.Name is
-//   never evaluated when user is nil (no nil-deref panic).
+display := q.Tern(user != nil, user.Name, "anonymous")
+// → "anonymous" when user is nil; user.Name when not — and user.Name
+//   is never evaluated when user is nil (no nil-deref panic).
 
-v := q.Tern[*Conn](missing, slowLookup(key))
-// → slowLookup(key) only runs when `missing` is true
+v := q.Tern(cached, fast(), slowLookup(key))
+// → slowLookup(key) only runs when `cached` is false; fast() never
+//   runs when `cached` is false either.
+
+// Chains naturally for multi-way picks:
+tier := q.Tern(score >= 90, "A",
+         q.Tern(score >= 80, "B",
+          q.Tern(score >= 70, "C", "F")))
 ```
 
-`q.Tern[T](cond, t)` returns `t` when `cond` is true, otherwise `T`'s zero value. The preprocessor splices `t`'s source span into the chosen branch of an IIFE — so `t` is only evaluated on the true path despite Go's eager arg-eval semantics. Lazy by source-splicing, not by func-thunks.
+`q.Tern(cond, ifTrue, ifFalse)` returns `ifTrue` when `cond` is true, otherwise `ifFalse`. The preprocessor splices each branch's source span into its own arm of an IIFE — so only the matching branch is evaluated, despite Go's eager arg-eval semantics. Lazy by source-splicing, not by func-thunks.
 
 ### Auto-derived dependency injection
 

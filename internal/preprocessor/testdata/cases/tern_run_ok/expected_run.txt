@@ -1,16 +1,17 @@
 a: 1
-b: 0
+b: 22
 trueCalls: 1
-falseCalls: 0
-falseCalls after 100 false-loops: 0
-nil-user display empty: true
-name on false: true
+falseCalls: 1
+trueCalls after 100 false-loops: 1
+nil-user display: anonymous
+name on false: fallback
 lookups (false path): 0
 name on true: named
 lookups (true path): 1
-string zero: true
-int zero: true
-bool zero: true
-ptr zero: true
-slice zero: true
+string pick: no
+int pick: 42
+bool pick: false
+ptr pick: y
+slice pick: [9]
 condCalls: 1
+tier: C

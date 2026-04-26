@@ -264,7 +264,15 @@ func renderShape(fset *token.FileSet, src []byte, sh callShape, counter *int, al
 	}
 	// Second pass for in-place families so innerText can already
 	// substitute non-in-place children.
-	for i := range sh.Calls {
+	//
+	// Iterate in REVERSE order so a parent in-place family (e.g.
+	// q.Tern wrapping another q.Tern, or q.Match wrapping q.Tern)
+	// sees its child's already-computed in-place text rather than
+	// the placeholder "_qTmpN" set by the first init loop. Pre-order
+	// ast.Inspect produces parent-before-child in sh.Calls, so the
+	// reverse iteration is child-before-parent — what's needed for
+	// nested in-place rewrites to compose correctly.
+	for i := len(sh.Calls) - 1; i >= 0; i-- {
 		switch sh.Calls[i].Family {
 		case familyDebugPrintln:
 			subTexts[i] = buildDebugPrintlnReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts, alias)
