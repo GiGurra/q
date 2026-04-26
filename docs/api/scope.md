@@ -142,6 +142,10 @@ All `*Scope` operations are safe under concurrent access. `Commit` and `Attach*`
 
 Closing mid-flight while a `q.Assemble[T](...).WithScope(s)` is running is supported: the in-flight assembly observes the closed state on its next `Load` or at the final `Commit`, fires any locally-built fresh deps, and returns `q.ErrScopeClosed`. Cached entries that were already in the scope when it closed get cleaned up by the close itself.
 
+## Internal: `q.ScopeEntry` and `Commit`
+
+`q.Assemble`'s `.WithScope(s)` chain rewrites into a sequence of `s.Load(key)` cache reads followed by a single `s.Commit(entries, child)` write that publishes any freshly-built deps. `q.ScopeEntry` is the record shape used by that batch — one entry per fresh build, carrying the cache key plus the cleanup closure. End users never construct these directly; they're documented here so the ABI between `q.Assemble`'s rewrite output and the `*Scope` runtime is discoverable.
+
 ## See also
 
 - [`q.Assemble`](assemble.md) — the recipe-driven DI framework whose `.WithScope(scope)` chain leaf is the primary consumer of scopes.

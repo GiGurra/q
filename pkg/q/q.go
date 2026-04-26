@@ -1176,36 +1176,6 @@ func (r OkResult[T]) Wrapf(format string, args ...any) T {
 	return r.v
 }
 
-// Bubble is a cancellation/deadline checkpoint. Statement-only:
-// when ctx has been cancelled (ctx.Err() != nil), the preprocessor
-// rewrites the call site into the inlined `if err := ctx.Err(); err
-// != nil { return zero, err }` shape; otherwise execution falls
-// through. Use Bubble at natural yield points in long-running
-// work (between iterations, between expensive calls) to surface
-// context cancellation as a normal error bubble.
-//
-// Example:
-//
-//	for _, item := range items {
-//	    q.CheckCtx(ctx)
-//	    process(item)
-//	}
-//
-// Reach for q.CheckCtxE to shape the bubbled error via the ErrResult
-// vocabulary (Err / ErrF / Catch / Wrap / Wrapf).
-func Bubble(ctx context.Context) {
-	panicUnrewritten("q.CheckCtx")
-}
-
-// BubbleE starts a chain on a context-cancellation checkpoint. The
-// chain method shapes the bubbled error (Err / ErrF / Wrap / Wrapf /
-// Catch). Reuses CheckResult — BubbleE has no value to thread, only
-// an error to shape.
-func BubbleE(ctx context.Context) CheckResult {
-	panicUnrewritten("q.CheckCtxE")
-	return CheckResult{}
-}
-
 // RecvRawCtx is the runtime helper for q.RecvCtx. select-blocks on
 // ch and ctx.Done(); returns (v, nil) on a successful receive,
 // (zero, ErrChanClosed) on a closed channel, and (zero, ctx.Err())

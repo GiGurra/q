@@ -584,6 +584,8 @@ _ = q.Unwrap(q.Assemble[*Server](ctx, newConfig, newDB, newServer))
 // buf.String() now contains the trace.
 ```
 
+`q.AssemblyDebugWriter(ctx)` is the corresponding getter — returns the writer registered via `q.WithAssemblyDebug` / `q.WithAssemblyDebugWriter`, or `nil` when neither is on the ctx. Useful inside custom recipes that want to feed the same debug stream.
+
 The ctx is passed as an inline-value recipe — same as any other context.Context. The rewriter detects when a recipe provides `context.Context` and binds the debug writer from it; the conditional is one ctx.Value lookup per step (microseconds when debug is off).
 
 ## Caveats

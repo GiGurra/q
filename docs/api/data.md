@@ -69,6 +69,22 @@ func Chunk[T any](slice []T, n int) [][]T                      // panics if n <=
 func Count[T any](slice []T, pred func(T) bool) int            // walks all (no short-circuit)
 func Take[T any](slice []T, n int) []T                         // first n
 func Drop[T any](slice []T, n int) []T                         // skip first n
+
+// Sort — returns a new slice; never mutates the input.
+func Sort[T cmp.Ordered](slice []T) []T                                  // ascending
+func SortBy[T any, K cmp.Ordered](slice []T, fn func(T) K) []T           // by derived key
+func SortFunc[T any](slice []T, less func(a, b T) int) []T               // by comparator
+
+// Aggregations (comma-ok where empty is meaningful)
+func Sum[T cmp.Ordered](slice []T) T                                     // additive identity on empty
+func Min[T cmp.Ordered](slice []T) (T, bool)                             // (zero, false) on empty
+func Max[T cmp.Ordered](slice []T) (T, bool)
+func MinBy[T any, K cmp.Ordered](slice []T, fn func(T) K) (T, bool)
+func MaxBy[T any, K cmp.Ordered](slice []T, fn func(T) K) (T, bool)
+
+// Side-effect iteration
+func ForEach[T any](slice []T, fn func(T))
+func ForEachErr[T any](slice []T, fn func(T) error) error                // first error short-circuits
 ```
 
 ## `Fold` vs `Reduce`

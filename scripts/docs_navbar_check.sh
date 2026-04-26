@@ -1,77 +1,125 @@
 #!/usr/bin/env bash
-# docs_navbar_check.sh — diff the docs navbar's API entry list against
-# the actual exported function surface in pkg/q (and subpackages).
+# docs_navbar_check.sh — verify the docs navbar's API section.
 #
-# Lists every exported func name as `q.<Name>` (top-level) or
-# `<subpkg>.<Name>` (e.g. `either.Left`), then extracts the same
-# pattern from mkdocs.yml's nav:.API section. Reports the symmetric
-# difference: API symbols missing from the navbar (= undocumented
-# in the index) and navbar symbols not found in the API (= stale
-# entries).
+# Three invariants:
 #
-# Many-to-one is fine — multiple navbar entries can link to the
-# same docs page (e.g. q.Try and q.TryE both point at api/try.md).
-# This script only checks the *index*, not the page bodies.
+#   1. **Sorted (case-insensitive).** Entries inside the API: block
+#      must be in case-insensitive alphabetical order by label.
+#   2. **No duplicate destinations.** No two entries may point at the
+#      same .md file. Each docs page gets exactly one nav entry.
+#   3. **Completeness.** Every exported function and type in pkg/q
+#      (and pkg/q/either) must be mentioned by name in some docs page
+#      (any of docs/api/*.md or docs/typed-nil-guard.md). Names not
+#      currently covered surface as "missing".
 #
-# Exit status: 0 when the lists match exactly, 1 when there is any
-# missing or stale entry.
+# Exit status: 0 when all invariants hold, 1 otherwise.
 
 set -euo pipefail
 
 cd "$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 
-# ---- API surface --------------------------------------------------
+status=0
 
-# Top-level pkg/q exported funcs. Skip _test files and panicUnrewritten.
-api_q=$(grep -h '^func [A-Z]' pkg/q/*.go 2>/dev/null \
-    | sed -E 's/[(\[].*//;s/^func //' \
-    | sort -u \
-    | grep -vE '^(Test|panicUnrewritten)' \
-    | sed 's/^/q./')
+# ---- Extract the API navbar block --------------------------------
 
-# Subpackages — for now, just pkg/q/either. Extend when more land.
-api_either=$(grep -h '^func [A-Z]' pkg/q/either/*.go 2>/dev/null \
-    | sed -E 's/[(\[].*//;s/^func //' \
-    | sort -u \
-    | sed 's/^/either./')
-
-api=$(printf "%s\n%s\n" "$api_q" "$api_either" | sort -u | grep -v '^$')
-
-# ---- Navbar -------------------------------------------------------
-
-# Extract every `<word>.<Name>` pattern from the API navbar block of
-# mkdocs.yml. The API block runs from the `- API:` line through the
-# next top-level navbar entry.
-navbar=$(awk '
+# Pull the lines between `- API:` and the next top-level navbar entry.
+api_block=$(awk '
     /^  - API:/ { in_api = 1; next }
     in_api && /^  - [A-Z]/ { in_api = 0 }
     in_api { print }
-' mkdocs.yml \
-    | grep -oE '(q|either)\.[A-Z][A-Za-z0-9]*' \
-    | sort -u)
+' mkdocs.yml)
 
-# ---- Diff ---------------------------------------------------------
+# Each navbar entry looks like `    - <label>: <path>`. Pull labels
+# and paths; preserve order.
+labels=$(echo "$api_block" | sed -nE 's/^    - (.+): [^ ]+$/\1/p')
+paths=$(echo "$api_block"  | sed -nE 's/^    - .+: ([^ ]+)$/\1/p')
 
-missing=$(comm -23 <(echo "$api") <(echo "$navbar"))
-stale=$(comm -13 <(echo "$api") <(echo "$navbar"))
+# ---- Invariant 1: sorted (case-insensitive) ----------------------
 
-status=0
+sorted_labels=$(echo "$labels" | sort -f)
+if ! diff <(echo "$labels") <(echo "$sorted_labels") >/dev/null; then
+    echo "Navbar API entries are out of order (case-insensitive sort expected):"
+    diff <(echo "$labels") <(echo "$sorted_labels") | sed 's/^/  /'
+    status=1
+fi
+
+# ---- Invariant 2: no duplicate destinations ----------------------
+
+dupes=$(echo "$paths" | sort | uniq -d)
+if [[ -n "$dupes" ]]; then
+    [[ $status -ne 0 ]] && echo
+    echo "Navbar has multiple entries pointing at the same docs page:"
+    while IFS= read -r p; do
+        echo "  $p:"
+        echo "$api_block" | grep -F ": $p" | sed 's/^/    /'
+    done <<< "$dupes"
+    status=1
+fi
+
+# ---- Invariant 3: completeness ------------------------------------
+
+# Non-test source files for each package.
+q_srcs=$(find pkg/q -maxdepth 1 -name '*.go' -not -name '*_test.go')
+either_srcs=$(find pkg/q/either -maxdepth 1 -name '*.go' -not -name '*_test.go' 2>/dev/null)
+
+# Exported funcs in pkg/q (top-level).
+api_q_funcs=$(grep -h '^func [A-Z]' $q_srcs 2>/dev/null \
+    | sed -E 's/[(\[].*//;s/^func //' \
+    | sort -u \
+    | grep -vE '^panicUnrewritten$' \
+    | sed 's/^/q./')
+
+# Exported types in pkg/q.
+api_q_types=$(grep -hE '^type [A-Z]' $q_srcs 2>/dev/null \
+    | awk '{print $2}' | sed 's/\[.*//' | sort -u | sed 's/^/q./')
+
+# Exported funcs + types in pkg/q/either.
+api_either_funcs=$(grep -h '^func [A-Z]' $either_srcs 2>/dev/null \
+    | sed -E 's/[(\[].*//;s/^func //' \
+    | sort -u \
+    | sed 's/^/either./')
+api_either_types=$(grep -hE '^type [A-Z]' $either_srcs 2>/dev/null \
+    | awk '{print $2}' | sed 's/\[.*//' | sort -u | sed 's/^/either./')
+
+api=$(printf "%s\n%s\n%s\n%s\n" \
+    "$api_q_funcs" "$api_q_types" "$api_either_funcs" "$api_either_types" \
+    | sort -u | grep -v '^$')
+
+# A symbol counts as "mentioned" if any docs page references it as
+# either the qualified form (`q.FlatMap`) OR the bare name in a
+# word-bounded context. Code blocks inside pkg/q's own examples
+# use the bare form (`func FlatMap[…]`); narrative uses the
+# qualified form. Two-char-and-shorter bare names (`A`, `F`,
+# `At`, `Ok`) require the qualified form to avoid spurious matches.
+docs_files=$(find docs -maxdepth 2 -name '*.md' \
+    -not -path 'docs/planning/*' -not -name 'index.md')
+
+missing=""
+for sym in $api; do
+    bare="${sym#*.}"
+    qualified_pat="${sym//./\\.}"
+    if grep -hEq "$qualified_pat" $docs_files 2>/dev/null; then
+        continue
+    fi
+    if (( ${#bare} >= 3 )) && grep -hwq "$bare" $docs_files 2>/dev/null; then
+        continue
+    fi
+    missing+="$sym"$'\n'
+done
+
 if [[ -n "$missing" ]]; then
-    echo "Missing from docs navbar (defined in pkg/q, no entry in mkdocs.yml nav):"
-    echo "$missing" | sed 's/^/  /'
+    [[ $status -ne 0 ]] && echo
+    echo "Exported symbols not mentioned in any docs page:"
+    printf "%s" "$missing" | sed 's/^/  /'
     status=1
 fi
 
-if [[ -n "$stale" ]]; then
-    [[ -n "$missing" ]] && echo
-    echo "Stale in docs navbar (mkdocs.yml lists, not in pkg/q):"
-    echo "$stale" | sed 's/^/  /'
-    status=1
-fi
+# ---- Verdict ------------------------------------------------------
 
 if [[ $status -eq 0 ]]; then
-    n=$(echo "$api" | wc -l | tr -d ' ')
-    echo "navbar API list matches code ($n entries)"
+    n_entries=$(echo "$labels" | wc -l | tr -d ' ')
+    n_symbols=$(echo "$api" | wc -l | tr -d ' ')
+    echo "navbar OK — $n_entries entries, $n_symbols exported symbols all mentioned"
 fi
 
 exit $status
