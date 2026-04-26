@@ -109,4 +109,45 @@ func main() {
 		Or("never")
 	fmt.Println("lazy-alt hit:", hit)
 	fmt.Println("altCalls (should be 0):", altCalls)
+
+	// (10) .OrError — bubble a sentinel.
+	if err := orErrorRun(noProfile); err != nil {
+		fmt.Println("orErrorRun err:", err)
+	}
+	if err := orErrorRun(full); err != nil {
+		fmt.Println("orErrorRun err (happy):", err)
+	}
+
+	// (11) .OrE — delegate to a (T, error) fetcher.
+	if err := orERun(); err != nil {
+		fmt.Println("orERun err:", err)
+	}
+}
+
+var ErrThemeMissing = fmt.Errorf("theme missing")
+
+// orErrorRun bubbles ErrThemeMissing if every path is nil, otherwise
+// returns the leaf theme through Println.
+func orErrorRun(u *User) error {
+	theme := q.At(u.Profile.Settings.Theme).OrError(ErrThemeMissing)
+	fmt.Println("orError theme:", theme)
+	return nil
+}
+
+func orERun() error {
+	noProfile := &User{ID: 99}
+	// First call — path is nil, fetcher hits, succeeds.
+	cfg := q.At(noProfile.Profile.Settings.Theme).OrE(loadThemeFromDisk(true))
+	fmt.Println("orE cfg (fetched):", cfg)
+	// Second call — path is nil, fetcher fails, error bubbles.
+	cfg2 := q.At(noProfile.Profile.Settings.Theme).OrE(loadThemeFromDisk(false))
+	fmt.Println("orE cfg2 (should not print):", cfg2)
+	return nil
+}
+
+func loadThemeFromDisk(ok bool) (string, error) {
+	if ok {
+		return "from-disk", nil
+	}
+	return "", fmt.Errorf("disk on fire")
 }

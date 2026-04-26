@@ -458,10 +458,19 @@ type qSubCall struct {
 type atTerminal int
 
 const (
-	atTerminalNone     atTerminal = iota
-	atTerminalOr                   // .Or(fallback) — return fallback when every path is nil
-	atTerminalOrZero            // .OrDefault()  — return zero value of T
+	atTerminalNone    atTerminal = iota
+	atTerminalOr                  // .Or(fallback) — return fallback when every path is nil
+	atTerminalOrZero              // .OrZero()     — return zero value of T
+	atTerminalOrError             // .OrError(err) — bubble err through the enclosing function's error return
+	atTerminalOrE                 // .OrE(call())  — call a (T, error) fetcher; bubble its err or return its T
 )
+
+// isErroredAtTerminal reports whether the terminal needs the
+// enclosing function's error return slot (i.e. produces a bubble
+// shape rather than a plain in-place value).
+func isErroredAtTerminal(t atTerminal) bool {
+	return t == atTerminalOrError || t == atTerminalOrE
+}
 
 // assembleChain enumerates the chain terminator on an Assemble*
 // family call. None means the user wrote a bare `q.Assemble[T](...)`

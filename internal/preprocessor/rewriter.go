@@ -355,7 +355,14 @@ func renderShape(fset *token.FileSet, src []byte, sh callShape, counter *int, al
 		case familyTern:
 			subTexts[i] = buildTernReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts)
 		case familyAt:
-			subTexts[i] = buildAtReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts)
+			// Only the in-place terminals (.Or, .OrZero) get a substitution
+			// text here. Errored terminals (.OrError, .OrE) emit a bind +
+			// bubble check via renderAtErr; their subTexts entry stays
+			// "_qTmpN" so the original q.At span is replaced with the temp
+			// at substitution time.
+			if !isErroredAtTerminal(sh.Calls[i].AtTerminal) {
+				subTexts[i] = buildAtReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts)
+			}
 		case familyLazy, familyLazyE:
 			subTexts[i] = buildLazyReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts, alias)
 		case familyAtCompileTime, familyAtCompileTimeCode:
@@ -822,6 +829,11 @@ func isInPlaceSub(sub qSubCall) bool {
 	switch sub.Family {
 	case familyAssemble, familyAssembleAll, familyAssembleStruct:
 		return sub.AssembleChain != assembleChainDeferCleanup
+	case familyAt:
+		// .OrError / .OrE produce a (T, error) IIFE that needs a
+		// bind-and-bubble check; they're NOT in-place. .Or / .OrZero
+		// stay in-place.
+		return !isErroredAtTerminal(sub.AtTerminal)
 	}
 	return isInPlaceFamily(sub.Family)
 }
@@ -1116,7 +1128,11 @@ func renderSubCall(fset *token.FileSet, src []byte, sh callShape, subIdx int, su
 		// q.Tern emits an IIFE in-place; no extra bind/check block.
 		return "", false, false, false, nil
 	case familyAt:
-		// q.At chain emits an IIFE in-place; no extra bind/check block.
+		if isErroredAtTerminal(sub.AtTerminal) {
+			text, err := renderAtErr(fset, src, sh, sub, counter, subs, subTexts)
+			return text, false, false, false, err
+		}
+		// .Or / .OrZero — in-place IIFE; no extra bind/check block.
 		return "", false, false, false, nil
 	case familyLazy, familyLazyE:
 		// q.Lazy / q.LazyE rewrite in-place to q.LazyFromThunk / q.LazyEFromThunk;

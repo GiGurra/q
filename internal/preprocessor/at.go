@@ -31,6 +31,52 @@ import (
 	"go/types"
 )
 
+// renderAtErr renders a q.At chain whose terminal is .OrError or .OrE.
+// The IIFE built by buildAtReplacement returns (T, error); this
+// function wraps it with the standard bind-and-bubble shape so the
+// error flows through to the enclosing function's error return slot.
+//
+// Form-aware (matches tryBindLine's branches):
+//
+//	formDefine:           v, _qErrN := <iife>
+//	formAssign:           var _qErrN error; v, _qErrN = <iife>
+//	formDiscard:          _, _qErrN := <iife>
+//	formReturn / formHoist: _qTmpN, _qErrN := <iife>
+//
+// followed by `if _qErrN != nil { return <zeros> }`.
+func renderAtErr(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, counter int, subs []qSubCall, subTexts []string) (string, error) {
+	results := sh.EnclosingFuncType.Results
+	if results == nil || results.NumFields() == 0 {
+		return "", fmt.Errorf("q.At(...).%s used in a function with no return values; the bubble has nowhere to go", atTerminalName(sub.AtTerminal))
+	}
+	zeros, err := zeroExprs(fset, src, results)
+	if err != nil {
+		return "", err
+	}
+	iife := buildAtReplacement(fset, src, sub, subs, subTexts)
+	errVar := fmt.Sprintf("_qErr%d", counter)
+	indent := indentOf(src, fset.Position(sh.Stmt.Pos()).Offset)
+	bindLine := tryBindLine(fset, src, sh, errVar, iife, indent, counter)
+	zeros[len(zeros)-1] = errVar
+	return assembleErrBlock(bindLine, errVar, indent, zeros), nil
+}
+
+// atTerminalName returns the user-facing method name for a terminal,
+// used in diagnostics so the message mentions what the user wrote.
+func atTerminalName(t atTerminal) string {
+	switch t {
+	case atTerminalOr:
+		return "Or"
+	case atTerminalOrZero:
+		return "OrZero"
+	case atTerminalOrError:
+		return "OrError"
+	case atTerminalOrE:
+		return "OrE"
+	}
+	return ""
+}
+
 // matchAtChain inspects a CallExpr and, if it is a terminal call on a
 // q.At chain (.Or(...) or .OrZero()), unwinds inward through any
 // .OrElse hops to find the q.At entry and returns a populated
@@ -56,6 +102,30 @@ func matchAtChain(call *ast.CallExpr, alias string) (qSubCall, bool, error) {
 			return qSubCall{}, false, nil
 		}
 		terminal = atTerminalOrZero
+	case "OrError":
+		if len(call.Args) != 1 {
+			return qSubCall{}, false, nil
+		}
+		terminal = atTerminalOrError
+		terminalArg = call.Args[0]
+	case "OrE":
+		// q.At(...).OrE(<call>) where <call> returns (T, error). Go's
+		// f(g()) multi-spread rule means call.Args is a single CallExpr
+		// in the spread form. Two-arg form (.OrE(v, err)) is also
+		// syntactically legal at the call site; we capture both.
+		if len(call.Args) == 1 {
+			terminalArg = call.Args[0]
+		} else if len(call.Args) == 2 {
+			// Wrap the two args in a synthetic ParenExpr-Tuple isn't
+			// possible directly; we capture them as a CompositeExpr-like
+			// hack: store the first arg here and stash the second arg in
+			// AtPaths-via-side-channel. For v1, only support the spread
+			// form so the common case works without surface complexity.
+			return qSubCall{}, false, fmt.Errorf("q.At(...).OrE takes a single (T, error)-returning call; got two args (use q.At(...).OrE(myFetcher()) or wrap your two args in a helper)")
+		} else {
+			return qSubCall{}, false, nil
+		}
+		terminal = atTerminalOrE
 	default:
 		return qSubCall{}, false, nil
 	}
@@ -183,7 +253,7 @@ func collectAtChain(e ast.Expr) []ast.Expr {
 
 // buildAtReplacement emits the IIFE for a q.At chain.
 //
-// Output shape (one path, .Or terminal, every hop nilable):
+// Non-errored shape (one path, .Or terminal, every hop nilable):
 //
 //	(func() T {
 //	    for {
@@ -196,26 +266,40 @@ func collectAtChain(e ast.Expr) []ast.Expr {
 //	    return <fallback>
 //	}())
 //
+// Errored shape (.OrError or .OrE terminal) — the IIFE returns
+// (T, error); the rewriter wraps it with a bind-and-bubble check so
+// the error flows through the enclosing function's error return:
+//
+//	(func() (T, error) {
+//	    for { ... return val, nil }
+//	    return *new(T), <err>             // .OrError(err)
+//	    // OR:
+//	    return <fetcher-call>             // .OrE(call())
+//	}())
+//
 // Each path lives in its own one-iteration `for { ... break ... }` so
 // per-path variable declarations are scoped to the loop body — no
-// `goto`-over-decl violations, and the outer IIFE returns from inside
-// the loop on success or falls through to the next path's loop / the
-// terminal on break.
+// `goto`-over-decl violations.
 func buildAtReplacement(fset *token.FileSet, src []byte, sub qSubCall, subs []qSubCall, subTexts []string) string {
 	resultText := sub.AtResultTypeText
 	if resultText == "" {
 		resultText = "any"
 	}
+	errored := isErroredAtTerminal(sub.AtTerminal)
 
 	var b []byte
 	b = append(b, "(func() "...)
-	b = append(b, resultText...)
+	if errored {
+		b = append(b, "("...)
+		b = append(b, resultText...)
+		b = append(b, ", error)"...)
+	} else {
+		b = append(b, resultText...)
+	}
 	b = append(b, " { "...)
 
 	for pi, path := range sub.AtPaths {
 		chain := collectAtChain(path)
-		// hops may be absent in tests that bypass typecheck — fall back
-		// to no guards so the output still parses.
 		var hops []bool
 		if pi < len(sub.AtHopNilable) {
 			hops = sub.AtHopNilable[pi]
@@ -237,7 +321,11 @@ func buildAtReplacement(fset *token.FileSet, src []byte, sub qSubCall, subs []qS
 				b = append(b, fmt.Sprintf("if %s == nil { break }; ", varName)...)
 			}
 		}
-		b = append(b, fmt.Sprintf("return _qAt%d_%d ", pi, len(chain)-1)...)
+		if errored {
+			b = append(b, fmt.Sprintf("return _qAt%d_%d, nil ", pi, len(chain)-1)...)
+		} else {
+			b = append(b, fmt.Sprintf("return _qAt%d_%d ", pi, len(chain)-1)...)
+		}
 		b = append(b, "}; "...)
 	}
 
@@ -251,6 +339,18 @@ func buildAtReplacement(fset *token.FileSet, src []byte, sub qSubCall, subs []qS
 		b = append(b, "var _qAtZero "...)
 		b = append(b, resultText...)
 		b = append(b, "; return _qAtZero "...)
+	case atTerminalOrError:
+		errText := exprTextSubst(fset, src, sub.AtTerminalArg, subs, subTexts)
+		b = append(b, "var _qAtZero "...)
+		b = append(b, resultText...)
+		b = append(b, "; return _qAtZero, "...)
+		b = append(b, errText...)
+		b = append(b, " "...)
+	case atTerminalOrE:
+		argText := exprTextSubst(fset, src, sub.AtTerminalArg, subs, subTexts)
+		b = append(b, "return "...)
+		b = append(b, argText...)
+		b = append(b, " "...)
 	}
 	b = append(b, "}())"...)
 	return string(b)

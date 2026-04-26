@@ -45,7 +45,7 @@ The persistent backlog for `q`. A cold-state reader can pick up here without re-
 
   **Open question:** does running multiple toolexec passes on the same compile produce correct results, or does pass N+1 trip on temp paths from pass N? Likely fine since each pass writes its own tempdir and the final argv just lists them all, but worth a smoke test before going deeper.
 
-- **#91 follow-up — `q.At` bubble terminals.** v1 of `q.At` ships `.OrElse`, `.Or`, `.OrZero`. The bubble terminals (analogous to the q.NotNilE chain vocabulary) are still pending: `.OrErr(err)`, `.OrErrF(fn)`, `.OrWrap(msg)`, `.OrWrapf(format, args…)`, plus a `.OrCatch(fn func() (T, error))` for the recovery-or-bubble shape. Same chain machinery as today; the rewriter just emits `if err != nil { return zero, <err-expr> }` instead of returning the fallback when every path is nil. Park until users actually want them — most fallback patterns suit `.Or` / `.OrZero`, and a leaf nil that needs to bubble can already be handled with `q.NotNilE(q.At(chain).OrZero())`.
+- **#91 follow-up — additional `q.At` bubble terminals.** v1 ships `.OrError(err)` and `.OrE(call())` for the bubble shapes. Sibling vocabularies from the q.NotNilE chain are still pending: `.OrErrF(fn func() error)`, `.OrWrap(msg)`, `.OrWrapf(format, args…)`, `.OrCatch(fn func() (T, error))`. Same machinery as `.OrError` — just different ways of shaping the bubbled error. Park until users actually want them.
 
 ### Resource lifetime + dependency injection
 

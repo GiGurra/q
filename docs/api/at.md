@@ -11,19 +11,26 @@ theme := q.At(user.Profile.Settings.Theme).
     Or("light")
 ```
 
-## Surface (v1)
+## Surface
 
 ```go
 func At[T any](expr T) PathChain[T]
 
-func (PathChain[T]) OrElse(alt T) PathChain[T] // chain another path / value
-func (PathChain[T]) Or(fallback T) T            // terminal: literal/expr fallback
-func (PathChain[T]) OrZero() T               // terminal: zero value of T
+func (PathChain[T]) OrElse(alt T) PathChain[T]   // chain another path / value
+func (PathChain[T]) Or(fallback T) T              // terminal: literal/expr fallback
+func (PathChain[T]) OrZero() T                    // terminal: zero value of T
+func (PathChain[T]) OrError(err error) T          // terminal: bubble err
+func (PathChain[T]) OrE(v T, err error) T         // terminal: delegate to a (T, error) fetcher
 ```
 
 The argument to `q.At` and to each `.OrElse` is any expression. The
 common case is a selector chain (`a.b.c.d`); a single identifier or a
 function-call result also works.
+
+`.OrError` and `.OrE` produce a *bubble shape* — the enclosing
+function MUST have a trailing `error` return so the rewriter has
+somewhere to send the bubble (same constraint as `q.Try`). `.Or` and
+`.OrZero` produce an in-place value with no bubble requirement.
 
 ## What the rewriter does
 
@@ -98,6 +105,18 @@ maxConn := q.At(cfg.DB.MaxConn).OrElse(loadDefault()).Or(10)
 // Nested method call as the root — single-eval applies, the call
 // runs at most once per path:
 v := q.At(getUser().Profile.Settings.Theme).Or("light")
+
+// Bubble shape — return error if every path is nil:
+func loadTheme(u *User) (string, error) {
+    return q.At(u.Profile.Settings.Theme).OrError(ErrThemeMissing), nil
+}
+
+// Bubble shape — delegate to a (T, error) fetcher when every path is nil:
+func resolveTheme(u *User) (string, error) {
+    return q.At(u.Profile.Settings.Theme).OrE(loadFromDisk(u.ID)), nil
+    // Cache hit -> use it. Cache miss -> call loadFromDisk; its error
+    // bubbles, its T becomes the chain result.
+}
 ```
 
 ## Caveats

@@ -91,3 +91,38 @@ func (c PathChain[T]) OrZero() T {
 	panicUnrewritten("q.At(...).OrZero")
 	return c.v
 }
+
+// OrError terminates the chain with an error bubble. Returns the
+// first non-nil path's value; if every path is nil, the rewriter
+// emits an early return that bubbles err through the enclosing
+// function's error return slot. The enclosing function MUST have a
+// trailing `error` return — same constraint as q.Try.
+//
+// Example:
+//
+//	cfg := q.At(opts.Config).OrError(ErrConfigMissing)
+//	// Returns opts.Config when non-nil; bubbles ErrConfigMissing
+//	// otherwise (function must return ..., error).
+func (c PathChain[T]) OrError(err error) T {
+	panicUnrewritten("q.At(...).OrError")
+	return c.v
+}
+
+// OrE terminates the chain by delegating to a (T, error)-returning
+// fallback fetcher. Returns the first non-nil path's value; if every
+// path is nil, the fetcher's call result drives the result — its T
+// becomes the chain's value, its error (if non-nil) bubbles through
+// the enclosing function's error return slot.
+//
+// Spread form: pass a single (T, error)-returning call so Go's
+// f(g())-multi-spread rule applies.
+//
+// Example:
+//
+//	cfg := q.At(cache.Config).OrE(loadFromDisk(path))
+//	// Cache hit -> use cached. Cache miss -> call loadFromDisk; its
+//	// error (if any) bubbles, its value (if ok) becomes the result.
+func (c PathChain[T]) OrE(v T, err error) T {
+	panicUnrewritten("q.At(...).OrE")
+	return c.v
+}

@@ -10,3 +10,7 @@ single-eval calls: 1
 mid-chain hit: mid
 lazy-alt hit: mid
 altCalls (should be 0): 0
+orErrorRun err: theme missing
+orError theme: light
+orE cfg (fetched): from-disk
+orERun err: disk on fire
