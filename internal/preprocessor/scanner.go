@@ -440,16 +440,20 @@ type qSubCall struct {
 
 	// q.Convert family — Chimney-style struct conversion.
 	//
-	// ConvertSrc is the single src argument captured at scan time.
+	// ConvertSrc is the src argument captured at scan time.
+	// ConvertOptArgs is the variadic options list (q.Set / q.SetFn
+	// calls) captured raw — resolveConvert parses each option's AST
+	// to build the override map.
 	// AsType already carries the explicit Target type-arg expression.
 	// ConvertTargetTypeText / ConvertFields are populated by
 	// resolveConvert: TargetTypeText is Target's spelling under the
 	// call's package qualifier; ConvertFields is the per-target-field
 	// mapping (in declaration order) that the rewriter emits as a
 	// struct literal.
-	ConvertSrc             ast.Expr
-	ConvertTargetTypeText  string
-	ConvertFields          []convertField
+	ConvertSrc            ast.Expr
+	ConvertOptArgs        []ast.Expr
+	ConvertTargetTypeText string
+	ConvertFields         []convertField
 
 	// q.At family — nested-nil safe traversal with a chain of fallbacks.
 	//
@@ -2196,14 +2200,15 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 	// fields by exact name, and emits the literal Target{F: src.F, ...}
 	// expression. Field gaps surface as build-time diagnostics.
 	if typeArg, ok := isIndexedSelector(call.Fun, alias, "Convert"); ok {
-		if len(call.Args) != 1 {
-			return qSubCall{}, false, fmt.Errorf("q.Convert[Target] takes exactly 1 argument (src); got %d", len(call.Args))
+		if len(call.Args) < 1 {
+			return qSubCall{}, false, fmt.Errorf("q.Convert[Target] takes at least 1 argument (src) plus optional q.Set/q.SetFn overrides; got 0")
 		}
 		return qSubCall{
-			Family:      familyConvert,
-			AsType:      typeArg,
-			ConvertSrc:  call.Args[0],
-			OuterCall:   expr,
+			Family:         familyConvert,
+			AsType:         typeArg,
+			ConvertSrc:     call.Args[0],
+			ConvertOptArgs: call.Args[1:],
+			OuterCall:      expr,
 		}, true, nil
 	}
 	// q.At(chain).OrElse(alt)*.{Or(fallback)|OrDefault()} — nested-nil

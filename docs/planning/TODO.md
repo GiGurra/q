@@ -120,26 +120,15 @@ The persistent backlog for `q`. A cold-state reader can pick up here without re-
 
 ### Type conversion / structural typing
 
-- **#94 — Auto-derive conversions between near-compatible types.** Scala's [Chimney](https://chimney.readthedocs.io/) is the reference: derive a transformer between two case classes (or other shapes) where the source has all the fields the target needs (perhaps under different names, with implicit type widening, or wrapped in `Option`); the macro emits the per-field copy code at compile time without runtime reflection. `q.From[Source](v).To[Target]()` would be the analogue here — the preprocessor reads both struct shapes via `go/types`, walks fields, emits the literal `Target{Field: src.Field, ...}` expression, and reports unmappable fields as build-time diagnostics with the per-field gap.
+- **#94 follow-up — `q.Convert` extensions.** The struct-to-struct core (exact-name auto-derivation, recursive nested derivation, `q.Set` / `q.SetFn` overrides, target-driven field gaps) shipped — see [`docs/api/convert.md`](../api/convert.md). Open extensions:
 
-  **Surface (sketch):**
+  - **Implicit lifting.** `int → int64`, `*T → T` (non-nil-asserted deref), `T → Option[T]` / `T → sql.NullX` wrapping. Keep the bar conservative: only lifts where there's no information loss and no panic risk under any input. Anything else stays an explicit `q.SetFn`.
+  - **Slice / map / iter recursion.** `[]Foo → []Bar` when `Foo → Bar` is auto-derivable; same for `map[K]Foo → map[K]Bar`. Emit a `for` loop or `iter.Seq` call inside the IIFE. Decide whether iterators count.
+  - **Field renames.** `q.Rename("FooID", "ID")` for shape-only mismatches. Currently expressible via `q.SetFn("ID", func(s S) int { return s.FooID })` — the rename helper would be ergonomic sugar but is not load-bearing.
+  - **Duck-typed interfaces.** `Target` is an interface whose method set is a subset of Source's; emit a method-shim wrapper. Probably out of scope — Go's structural interfaces already cover most of this without a helper.
+  - **Cross-package targets with unexported fields.** Auto-derivation considers exported fields only, so unexported targets in another package fail. No clean path without breaking encapsulation.
 
-  ```go
-  // bare:
-  dst := q.From(src).To[Target]()                                 // 1:1 by name
-  // with renames / explicit overrides:
-  dst := q.From(src).To[Target](q.Rename("FooID", "ID"), q.Const("Source", "v1"))
-  // shapes:
-  // - struct -> struct (recursive); copy by exported-name match.
-  // - T -> Option/sql.Null/pointer wrapping (lift trivially).
-  // - []T -> []U if T -> U is derivable (recurse).
-  // - map[K]T -> map[K]U if T -> U derivable (recurse).
-  // - duck-typed interfaces: target needs a subset of source's methods.
-  ```
-
-  **Why preprocessor over runtime reflection:** the unmapped-field check is a compile-time error, not a runtime panic; emitted code is straight field assignment (zero overhead); IDE jump-to-definition still finds source/target struct fields naturally. The Chimney/Scala-macros story is the same trade-off: compile-time derivation beats runtime reflection in both perf and correctness signals.
-
-  **Open design questions before picking up:** how aggressive is the implicit lifting (e.g. `int → int64` yes; `int → string` no; `*T → T` deref ok if non-nil enforced); how does the surface handle nested struct mismatches (auto-recurse vs. require explicit `q.NestedFrom`); whether to support iterators/streams or only finite collections. Worth picking up when the design space feels narrow enough to commit — start with struct-to-struct exact-name + nested recursion, expand from there.
+  Pick up when the implicit-lifting cases or slice/map recursion cases show up in real code; the current strict surface forces explicit overrides for everything that isn't a 1:1 same-type field copy, and that's a feature, not a bug, until evidence says otherwise.
 
 - **#95 — Variance tags / casting tricks for covariance & contravariance.** Go's type system is strictly invariant: `[]Animal` and `[]Dog` are unrelated even when `Dog` satisfies `Animal`; `func(Animal)` and `func(Dog)` likewise. Common Go idiom is to copy element-by-element or to introduce an interface, both of which leak into call sites. The question this entry parks: can the preprocessor offer a Scala-like variance annotation (`q.Covariant[T]` / `q.Contravariant[T]` markers, or a `q.Variant[+A]` shape declaration) that gets erased at rewrite time, with the rewriter emitting the per-element copy / interface-conversion / unsafe-cast that Go won't generate itself?
 

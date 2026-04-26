@@ -76,6 +76,7 @@ nav:
     - q.Check / q.CheckE: api/check/#q-check-q-checke
     - q.Chunk: api/data/#q-chunk
     - q.Const: api/try/#q-const
+    - q.Convert: api/convert/#q-convert
     - q.Coro: api/coro/#q-coro
     - q.Count: api/data/#q-count
     - q.Deadline: api/timeout/#q-deadline
@@ -197,6 +198,8 @@ nav:
     - q.Reduce: api/data/#q-reduce
     - q.Require: api/require/#q-require
     - q.Sealed: api/sealed/#q-sealed
+    - q.Set: api/convert/#q-set
+    - q.SetFn: api/convert/#q-setfn
     - q.SlogAttr: api/slog/#q-slogattr
     - q.SlogContextHandler: api/slog/#q-slogcontexthandler
     - q.SlogCtx: api/slog/#q-slogctx

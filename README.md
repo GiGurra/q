@@ -487,6 +487,23 @@ app := q.Unwrap(q.AssembleStruct[App](newConfig, newDB, newServer, newWorker, ne
 
 When a recipe is missing or duplicated or the graph cycles, the build fails with a tree visualisation of what the resolver sees. See [`docs/api/assemble.md`](docs/api/assemble.md).
 
+### Auto-derived struct conversions (Chimney-style)
+
+```go
+type User    struct { ID int; First, Last, Email string; Internal bool }
+type UserDTO struct { ID int; Email, FullName, Source string }
+
+dto := q.Convert[UserDTO](user,
+    q.Set("Source", "v1"),
+    q.SetFn("Email",    func(u User) string { return strings.ToLower(u.Email) }),
+    q.SetFn("FullName", func(u User) string { return u.First + " " + u.Last }),
+)
+// → UserDTO{ID: user.ID, Email: ..., FullName: ..., Source: "v1"}
+// `User.Internal` is silently dropped (target-driven).
+```
+
+Resolution per target field: `q.Set` / `q.SetFn` override → same-named source field with assignable type → recursive nested derivation when both fields are structs → build-time diagnostic. No runtime reflection; the rewriter emits a plain struct literal. See [`docs/api/convert.md`](docs/api/convert.md).
+
 ### Functional data ops
 
 ```go
