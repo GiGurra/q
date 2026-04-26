@@ -297,12 +297,26 @@ func newServer(d *DB, c *Config) *Server { return &Server{db: d, cfg: c} }
 // List the recipes; the preprocessor reads each signature, builds the
 // dep graph, topo-sorts, and emits the inlined construction. ZIO ZLayer
 // in spirit, plain Go functions in shape. No codegen step. No runtime
-// reflection. Always returns (T, error); compose at the call site.
-server := q.Try(q.Assemble[*Server](newConfig, newDB, newServer))
+// reflection. The chain terminator picks the resource-lifetime policy:
+//
+//   .Release()   — returns (T, error). Cleanups fire automatically via
+//                  a `defer` injected into the enclosing function (in
+//                  reverse-topo order). The fast path.
+//
+//   .NoRelease() — returns (T, func(), error). Caller takes manual
+//                  ownership of the (idempotent) shutdown closure —
+//                  use when lifetime spans more than the function
+//                  scope (main / signal handlers / background workers).
+//
+// Recipes can be (T), (T, error), or (T, func(), error). Resource
+// recipes feed cleanups onto the chain; the rest pass through.
+server := q.Try(q.Assemble[*Server](newConfig, openDB, newServer).Release())
 
-// In main / init / tests, q.Unwrap panics on err.
+// In main, manage shutdown explicitly:
 func main() {
-    server := q.Unwrap(q.Assemble[*Server](newConfig, newDB, newServer))
+    server, shutdown, err := q.Assemble[*Server](newConfig, openDB, newServer).NoRelease()
+    if err != nil { log.Fatal(err) }
+    defer shutdown() // reverse-topo, blocking; idempotent
     server.Run()
 }
 
@@ -310,12 +324,12 @@ func main() {
 // receive it via interface satisfaction. q.WithAssemblyDebug enables
 // per-step trace output for diagnosing wiring.
 ctx := q.WithAssemblyDebug(context.Background())
-server := q.Unwrap(q.Assemble[*Server](ctx, newConfig, newDB, newServer))
+server := q.Unwrap(q.Assemble[*Server](ctx, newConfig, newDB, newServer).Release())
 
 // q.AssembleAll[T] for plugin / handler / middleware aggregation —
 // every recipe whose output is assignable to T contributes one slice
 // element, in declaration order.
-plugins := q.Unwrap(q.AssembleAll[Plugin](newAuthPlugin, newLogPlugin, newMetricsPlugin))
+plugins := q.Unwrap(q.AssembleAll[Plugin](newAuth, newLog, newMetrics).Release())
 
 // q.AssembleStruct[T] decomposes T's fields into separate dep targets.
 // Useful when several distinct products share a common dep set —
@@ -325,7 +339,7 @@ type App struct {
     Worker *Worker
     Stats  *Stats
 }
-app := q.Unwrap(q.AssembleStruct[App](newConfig, newDB, newServer, newWorker, newStats))
+app := q.Unwrap(q.AssembleStruct[App](newConfig, newDB, newServer, newWorker, newStats).Release())
 ```
 
 When a recipe is missing or duplicated or the graph cycles, the build fails with a tree visualisation of what the resolver sees. See [`docs/api/assemble.md`](docs/api/assemble.md).

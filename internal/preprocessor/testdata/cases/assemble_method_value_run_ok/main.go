@@ -21,6 +21,6 @@ func (s *Service) NewServer(d *DB) *Server { return &Server{db: d} }
 
 func main() {
 	svc := &Service{tag: "method-value"}
-	s := q.Unwrap(q.Assemble[*Server](svc.NewConfig, svc.NewDB, svc.NewServer))
+	s := q.Unwrap(q.Assemble[*Server](svc.NewConfig, svc.NewDB, svc.NewServer).Release())
 	fmt.Println("cfg:", s.db.cfg.DB)
 }

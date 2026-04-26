@@ -18,5 +18,5 @@ func unrelated() string     { return "stray" }
 
 func main() {
 	// `unrelated` produces string — *Cache doesn't need it.
-	_, _ = q.Assemble[*Cache](newConfig, newDB, newCache, unrelated)
+	_, _ = q.Assemble[*Cache](newConfig, newDB, newCache, unrelated).Release()
 }

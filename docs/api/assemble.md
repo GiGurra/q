@@ -21,38 +21,64 @@ The model is borrowed from ZIO's [`ZLayer`](https://zio.dev/reference/di/) — l
 ## Signature
 
 ```go
-func Assemble[T any](recipes ...any) (T, error)
+func Assemble[T any](recipes ...any) AssemblyResult[T]
+
+func (AssemblyResult[T]) Release() (T, error)
+func (AssemblyResult[T]) NoRelease() (T, func(), error)
 ```
 
-Just one entry. Always returns `(T, error)`; compose at the call site:
+`q.Assemble` returns a chain handle. The terminator picks the resource-lifetime policy.
+
+### `.Release()` — auto-defer (the fast path)
+
+Returns `(T, error)`. The preprocessor injects a `defer` into the *enclosing function* that fires every collected cleanup in reverse-topo order when the function returns. No bookkeeping at the call site.
 
 ```go
-// Inside (T, error)-returning function — q.Try bubbles via the error slot.
-server := q.Try(q.Assemble[*Server](newConfig, newDB, newServer))
-
-// In main / init / tests — q.Unwrap panics on err.
-server := q.Unwrap(q.Assemble[*Server](newConfig, newDB, newServer))
-
-// Custom error shaping — q.TryE chain.
-server := q.TryE(q.Assemble[*Server](...)).Wrap("server init")
-
-// Custom panic shaping in main / tests — q.UnwrapE chain.
-server := q.UnwrapE(q.Assemble[*Server](...)).Wrap("server init")
-
-// Tuple form — explicit error handling.
-server, err := q.Assemble[*Server](...)
-if err != nil { ... }
+func boot() (*Server, error) {
+    server, err := q.Assemble[*Server](newConfig, openDB, newServer).Release()
+    if err != nil { return nil, err }
+    return server, nil
+}
+// db.Close() runs when boot returns, regardless of err path.
 ```
 
-`recipes` is `...any` because Go's type system can't express "any function with any number of inputs and one output". The preprocessor's typecheck pass takes over validation — same shape as `q.Match`'s `value any`. Errors in the recipe set surface as build-time diagnostics with file:line:col plus a dependency-tree visualisation.
+Compose with q.Try / q.Unwrap to drop the err:
+
+```go
+server := q.Try(q.Assemble[*Server](recipes...).Release())
+server := q.Unwrap(q.Assemble[*Server](recipes...).Release())
+```
+
+### `.NoRelease()` — caller-managed shutdown
+
+Returns `(T, func(), error)`. The closure fires the cleanup chain in reverse-topo order on demand. Idempotent (wraps `sync.OnceFunc`); duplicate calls are safe — useful when you want both `defer shutdown()` and `context.AfterFunc(ctx, shutdown)` triggers.
+
+```go
+func main() {
+    server, shutdown, err := q.Assemble[*Server](recipes...).NoRelease()
+    if err != nil { log.Fatal(err) }
+    defer shutdown()
+    context.AfterFunc(ctx, shutdown) // optional: ctx cancel also triggers
+    server.Run()
+}
+```
+
+Use `.NoRelease()` when the assembled value's lifetime spans more than the enclosing function — main loops, signal handlers, background workers.
+
+### Mandatory chain terminator
+
+Bare `q.Assemble[T](...)` — without `.Release()` or `.NoRelease()` — does not compile (`AssemblyResult[T]` isn't `(T, error)`). The preprocessor surfaces a friendly diagnostic too. Pick one terminator at every call site.
+
+`recipes` is `...any` because Go's type system can't express "any function with any number of inputs and one output". The preprocessor's typecheck pass takes over validation. Errors in the recipe set surface as build-time diagnostics with file:line:col plus a dependency-tree visualisation.
 
 ## What counts as a recipe
 
-| Form                       | Example                                      | Behaviour                                                         |
-|----------------------------|----------------------------------------------|-------------------------------------------------------------------|
-| Pure function reference    | `newDB`                                      | Inputs become deps; first return value is the provided type.     |
-| Errored function reference | `newDB` (returns `(*DB, error)`)             | Same; bubbles on failure into the assembly's error path.          |
-| Inline value               | `cfg`, `&Config{...}`, `loadConfig()`        | The value's type IS the provided type; no inputs required.        |
+| Form                          | Example                                      | Behaviour                                                                             |
+|-------------------------------|----------------------------------------------|---------------------------------------------------------------------------------------|
+| Pure function reference       | `newDB`                                      | Inputs become deps; first return value is the provided type. No cleanup.              |
+| Errored function reference    | `newDB` (returns `(*DB, error)`)             | Same; bubbles on failure into the assembly's error path. No cleanup.                  |
+| Resource recipe               | `openDB` (returns `(*DB, func(), error)`)    | The `func()` is registered as the cleanup; fires in reverse-topo at shutdown.         |
+| Inline value                  | `cfg`, `&Config{...}`, `loadConfig()`        | The value's type IS the provided type; no inputs required. No cleanup.                |
 
 Top-level funcs, package-qualified funcs (`pkg.NewDB`), and method values (`srv.NewDB`) all work — anything `go/types` resolves as a `*types.Signature`. Function calls (`getRecipe()`) are accepted as inline values: their type is the call's return type. Function-typed *values* (a `func() *Config` variable) are treated as function references, not inline values.
 
@@ -61,15 +87,48 @@ Top-level funcs, package-qualified funcs (`pkg.NewDB`), and method values (`srv.
 Every reasonable shape works:
 
 ```go
-NewX() X            // value type
-NewX() *X           // pointer
-NewX() Ifc          // interface
-NewX() (X, error)   // value type with error path
-NewX() (*X, error)  // pointer with error path
-NewX() (Ifc, error) // interface with error path
+NewX() X                    // value type
+NewX() *X                   // pointer
+NewX() Ifc                  // interface
+NewX() (X, error)           // value type with error path
+NewX() (*X, error)          // pointer with error path
+NewX() (Ifc, error)         // interface with error path
+NewX() (*X, func(), error)  // pointer resource recipe — explicit cleanup
+NewX() (Ifc, func(), error) // interface resource recipe — also valid
 ```
 
 Pointer / interface / slice / map / chan / func outputs are checked for nil at runtime (see [Nil-recipe detection](#nil-recipe-detection)). Value-typed outputs (struct, basic types, arrays) skip the check — they can't be nil.
+
+## Resource lifetime
+
+Recipes can opt into lifetime management by returning `(T, func(), error)` — the second value is the recipe's cleanup. Examples:
+
+```go
+func openDB(c *Config) (*DB, func(), error) {
+    db, err := connectDB(c.URL)
+    if err != nil { return nil, nil, err }
+    return db, func() { _ = db.Close() }, nil
+}
+
+func openHTTPServer(addr string) (*http.Server, func(), error) {
+    s := &http.Server{Addr: addr}
+    cleanup := func() {
+        ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+        defer cancel()
+        _ = s.Shutdown(ctx)
+    }
+    return s, cleanup, nil
+}
+```
+
+The chain terminator decides what happens with the cleanups:
+
+- **`.Release()`** — defer-injected; fires on enclosing function return in reverse-topo order.
+- **`.NoRelease()`** — handed to the caller as an idempotent closure for explicit control.
+
+In both cases, **partial-failure cleanup is automatic.** If recipe N fails, the cleanups for recipes 0..N-1 fire in reverse-topo before the error bubbles. The chain emerges intact: nothing leaks even on failure paths.
+
+Pure recipes mix freely with resource recipes — they just don't push anything onto the cleanup chain.
 
 ## Happy path examples
 

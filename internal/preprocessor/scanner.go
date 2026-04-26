@@ -383,6 +383,19 @@ type qSubCall struct {
 	AssembleStructFieldNames []string
 	AssembleStructFieldKeys  []string
 
+	// AssembleChain identifies the chain terminator on a q.Assemble /
+	// q.AssembleAll / q.AssembleStruct call:
+	//   - assembleChainRelease — `.Release()` — defer-injected cleanup
+	//     in the enclosing function, returns (T, error).
+	//   - assembleChainNoRelease — `.NoRelease()` — caller-managed
+	//     shutdown closure, returns (T, func(), error).
+	// Populated by the scanner when the chain is detected. Zero
+	// (assembleChainNone) for non-chained calls — bare q.Assemble[T](...)
+	// returns AssemblyResult[T] which doesn't match (T, error), so
+	// such calls fail the build naturally; the scanner additionally
+	// emits a guiding diagnostic.
+	AssembleChain assembleChain
+
 	// TernCond / TernT are the two q.Tern args captured at scan time.
 	// TernResultTypeText is T's spelling under the q.Tern call's
 	// package qualifier (populated by resolveTern). All zero for
@@ -396,6 +409,18 @@ type qSubCall struct {
 	TernT              ast.Expr
 	TernResultTypeText string
 }
+
+// assembleChain enumerates the chain terminator on an Assemble*
+// family call. None means the user wrote a bare `q.Assemble[T](...)`
+// with no chain — invalid; the rewriter surfaces a diagnostic
+// pointing the user at .Release() or .NoRelease().
+type assembleChain int
+
+const (
+	assembleChainNone assembleChain = iota
+	assembleChainRelease
+	assembleChainNoRelease
+)
 
 // matchCase is one arm of a q.Match expression — either a
 // `q.Case(cond, result)` or a `q.Default(result)`. The scanner only
@@ -478,6 +503,28 @@ type assembleStep struct {
 	// Captured at resolve time because the rewriter doesn't have the
 	// AST snippet helper available at emit time.
 	Label string
+
+	// IsResource is true when the recipe's signature is
+	// (T, func(), error). The rewriter binds an extra
+	// _qCleanup<N> from the second return and pushes it onto the
+	// cleanups chain on success. False for (T) and (T, error)
+	// recipes whose T isn't auto-cleanup-able. (Auto-detect of
+	// Close()-able T is layered on top: a (T, error) recipe whose T
+	// has Close() / Close() error / is a channel also gets
+	// IsResource=true, with the cleanup synthesised from the type
+	// shape rather than the recipe's signature.)
+	IsResource bool
+
+	// AutoCleanup is the inferred cleanup form when IsResource is
+	// true but the recipe's signature is NOT (T, func(), error) —
+	// instead T's type itself is auto-cleanup-able. The rewriter
+	// reads this to emit the right defer line shape:
+	//   - cleanupChannelClose → `close(_qDep<N>)`
+	//   - cleanupCloseError   → `_ = _qDep<N>.Close()`
+	//   - cleanupCloseNoError → `_qDep<N>.Close()`
+	// Zero (cleanupUnknown) when IsResource came from the explicit
+	// 3-return recipe shape.
+	AutoCleanup cleanupKind
 }
 
 // cleanupKind is the inferred cleanup form for q.Open(...).Release()
@@ -1591,35 +1638,13 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 	if isSelector(call.Fun, alias, "Case") || isSelector(call.Fun, alias, "Default") {
 		return qSubCall{}, false, nil
 	}
-	// q.Assemble[T](recipes...) — pure auto-derived DI. Each variadic
-	// arg is a recipe (function reference) or inline value; the
-	// preprocessor's typecheck pass classifies them and topo-sorts.
-	if typeArg, ok := isIndexedSelector(call.Fun, alias, "Assemble"); ok {
-		if len(call.Args) == 0 {
-			return qSubCall{}, false, fmt.Errorf("q.Assemble[T] requires at least one recipe argument")
-		}
-		return qSubCall{
-			Family:          familyAssemble,
-			AsType:          typeArg,
-			AssembleRecipes: append([]ast.Expr(nil), call.Args...),
-			OuterCall:       expr,
-		}, true, nil
-	}
-	// q.AssembleAll[T](recipes...) — multi-provider aggregation.
-	// Same scan shape as q.Assemble; the typecheck pass branches on
-	// family to allow multiple providers of T (rather than rejecting
-	// duplicates) and the rewriter emits a []T literal as the result.
-	if typeArg, ok := isIndexedSelector(call.Fun, alias, "AssembleAll"); ok {
-		if len(call.Args) == 0 {
-			return qSubCall{}, false, fmt.Errorf("q.AssembleAll[T] requires at least one recipe argument")
-		}
-		return qSubCall{
-			Family:          familyAssembleAll,
-			AsType:          typeArg,
-			AssembleRecipes: append([]ast.Expr(nil), call.Args...),
-			OuterCall:       expr,
-		}, true, nil
-	}
+	// q.Assemble / q.AssembleAll / q.AssembleStruct are matched only
+	// in chain form (`q.Assemble[T](...).Release()` or `.NoRelease()`).
+	// The chain is detected at the outer `.Release` / `.NoRelease`
+	// call site below. Bare entries (without a chain terminator) fall
+	// through to the unsupported-shape diagnostic; Go's typechecker
+	// will also reject the call because q.Assemble returns
+	// AssemblyResult[T] rather than (T, error).
 	// q.Tern[T](cond, t) — conditional expression sugar. cond is a
 	// plain bool, t is a T value; the rewriter splices their source
 	// text into an IIFE so t is only evaluated when cond is true.
@@ -1633,22 +1658,6 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 			TernCond:  call.Args[0],
 			TernT:     call.Args[1],
 			OuterCall: expr,
-		}, true, nil
-	}
-	// q.AssembleStruct[T](recipes...) — field-decomposed multi-output.
-	// T must be a struct; each field is treated as a separate dep
-	// target. The rewriter emits a struct literal initialised from
-	// the dep temps. Same scan shape as q.Assemble; the typecheck
-	// pass branches on family to drive the field iteration.
-	if typeArg, ok := isIndexedSelector(call.Fun, alias, "AssembleStruct"); ok {
-		if len(call.Args) == 0 {
-			return qSubCall{}, false, fmt.Errorf("q.AssembleStruct[T] requires at least one recipe argument")
-		}
-		return qSubCall{
-			Family:          familyAssembleStruct,
-			AsType:          typeArg,
-			AssembleRecipes: append([]ast.Expr(nil), call.Args...),
-			OuterCall:       expr,
 		}, true, nil
 	}
 	// q.Tag[T](field, key) — both args MUST be string literals so
@@ -1865,9 +1874,17 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 	// Chain on q.TryE / q.NotNilE / q.CheckE, or a q.Open / q.OpenE
 	// chain terminated by .Release.
 	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-		// .Release / .NoRelease terminal — walk down through an
-		// optional shape method to find q.Open / q.OpenE.
+		// .Release / .NoRelease terminal — q.Open / q.OpenE chain OR
+		// q.Assemble / q.AssembleAll / q.AssembleStruct chain. Disambiguate
+		// by inspecting the receiver: if it's q.Assemble[T](...) (an
+		// indexed-selector call), dispatch to classifyAssembleChain;
+		// otherwise fall through to q.Open's classifier.
 		if sel.Sel.Name == "Release" || sel.Sel.Name == "NoRelease" {
+			if entry, ok := sel.X.(*ast.CallExpr); ok {
+				if isAssembleEntry(entry, alias) {
+					return classifyAssembleChain(call, sel, entry, alias)
+				}
+			}
 			return classifyOpenChain(call, sel, alias)
 		}
 		// Reject .RecoverIs / .RecoverAs as the outer (terminal)
@@ -2114,6 +2131,94 @@ func peelRecovers(entry *ast.CallExpr) (*ast.CallExpr, []recoverStep, error) {
 // call is the outer Release/NoRelease CallExpr; sel is its .Fun
 // SelectorExpr (sel.Sel.Name ∈ {"Release", "NoRelease"}). expr is
 // the source expression (== call) used for OuterCall span.
+// isAssembleEntry reports whether the given CallExpr is the entry
+// call of a q.Assemble / q.AssembleAll / q.AssembleStruct chain
+// (i.e. the receiver of `.Release()` / `.NoRelease()` in an Assemble
+// chain). The differentiator from q.Open is that Assemble-family
+// entries are *indexed* selector calls (`q.Assemble[T](...)`) — they
+// always carry an explicit type argument.
+func isAssembleEntry(call *ast.CallExpr, alias string) bool {
+	if _, ok := isIndexedSelector(call.Fun, alias, "Assemble"); ok {
+		return true
+	}
+	if _, ok := isIndexedSelector(call.Fun, alias, "AssembleAll"); ok {
+		return true
+	}
+	if _, ok := isIndexedSelector(call.Fun, alias, "AssembleStruct"); ok {
+		return true
+	}
+	return false
+}
+
+// classifyAssembleChain captures one `q.Assemble[T](...).Release()`
+// or `.NoRelease()` chain as a single call shape. The receiver
+// `entry` is the q.Assemble* call carrying the type argument and
+// recipe list; the outer `call` carries the chain method invocation
+// (no args; both terminators are zero-arg today).
+func classifyAssembleChain(call *ast.CallExpr, sel *ast.SelectorExpr, entry *ast.CallExpr, alias string) (qSubCall, bool, error) {
+	if len(call.Args) != 0 {
+		return qSubCall{}, false, fmt.Errorf("q.Assemble[T](...).%s takes no arguments; got %d", sel.Sel.Name, len(call.Args))
+	}
+	chain := assembleChainRelease
+	if sel.Sel.Name == "NoRelease" {
+		chain = assembleChainNoRelease
+	}
+
+	var fam family
+	var typeArg ast.Expr
+	switch {
+	case mustIndexed(entry.Fun, alias, "Assemble"):
+		fam = familyAssemble
+		typeArg, _ = indexedTypeArg(entry.Fun, alias, "Assemble")
+	case mustIndexed(entry.Fun, alias, "AssembleAll"):
+		fam = familyAssembleAll
+		typeArg, _ = indexedTypeArg(entry.Fun, alias, "AssembleAll")
+	case mustIndexed(entry.Fun, alias, "AssembleStruct"):
+		fam = familyAssembleStruct
+		typeArg, _ = indexedTypeArg(entry.Fun, alias, "AssembleStruct")
+	default:
+		return qSubCall{}, false, nil
+	}
+	if len(entry.Args) == 0 {
+		return qSubCall{}, false, fmt.Errorf("q.%s[T] requires at least one recipe argument", entryNameForFamily(fam))
+	}
+	return qSubCall{
+		Family:          fam,
+		AsType:          typeArg,
+		AssembleRecipes: append([]ast.Expr(nil), entry.Args...),
+		AssembleChain:   chain,
+		OuterCall:       ast.Expr(call),
+	}, true, nil
+}
+
+// mustIndexed is a tiny helper around isIndexedSelector — returns
+// just the bool so the switch above reads cleanly.
+func mustIndexed(fn ast.Expr, alias, name string) bool {
+	_, ok := isIndexedSelector(fn, alias, name)
+	return ok
+}
+
+// indexedTypeArg extracts the type argument from an indexed
+// selector. Returns (nil, false) if the shape doesn't match —
+// callers paired with mustIndexed before calling, so this is a
+// straight-line extraction in practice.
+func indexedTypeArg(fn ast.Expr, alias, name string) (ast.Expr, bool) {
+	return isIndexedSelector(fn, alias, name)
+}
+
+// entryNameForFamily returns the user-facing q.* name (without the
+// `q.` prefix) for an Assemble-family family. Used in scanner error
+// messages so the user sees the entry they wrote.
+func entryNameForFamily(f family) string {
+	switch f {
+	case familyAssembleAll:
+		return "AssembleAll"
+	case familyAssembleStruct:
+		return "AssembleStruct"
+	}
+	return "Assemble"
+}
+
 func classifyOpenChain(call *ast.CallExpr, sel *ast.SelectorExpr, alias string) (qSubCall, bool, error) {
 	expr := ast.Expr(call)
 	noRelease := sel.Sel.Name == "NoRelease"

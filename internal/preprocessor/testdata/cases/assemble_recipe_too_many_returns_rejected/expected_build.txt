@@ -1,1 +1,1 @@
-returns 3 values
+second return is string; for resource recipes the second return must be `func()`

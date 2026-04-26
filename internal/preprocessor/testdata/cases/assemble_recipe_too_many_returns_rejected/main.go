@@ -16,5 +16,5 @@ func newDBTriple() (*DB, string, error) { return &DB{}, "", nil }
 func newServer(d *DB) *Server { return &Server{} }
 
 func main() {
-	_, _ = q.Assemble[*Server](newDBTriple, newServer)
+	_, _ = q.Assemble[*Server](newDBTriple, newServer).Release()
 }

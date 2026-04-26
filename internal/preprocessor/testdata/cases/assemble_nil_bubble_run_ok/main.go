@@ -26,7 +26,7 @@ func newNilDB(c *Config) *DB   { return nil } // bug: returns nil
 func newServer(d *DB) *Server  { return &Server{db: d} }
 
 func boot() (*Server, error) {
-	return q.Assemble[*Server](newConfig, newNilDB, newServer)
+	return q.Assemble[*Server](newConfig, newNilDB, newServer).Release()
 }
 
 func main() {

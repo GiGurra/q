@@ -46,89 +46,130 @@ import (
 	"io"
 )
 
-// Assemble builds T from the supplied recipes. Always returns
-// (T, error); compose with q.Try when you want bare T.
+// AssemblyResult is the chain handle returned by Assemble /
+// AssembleAll / AssembleStruct. Pick a chain terminator to choose
+// the resource-lifetime policy:
 //
-// The preprocessor resolves the dep graph at compile time, topo-sorts
-// the recipes, and emits the inlined construction. The runtime body
-// is unreachable in a successful build.
+//   - .Release()   — returns (T, error). Cleanups fire automatically
+//                    via a `defer` injected into the enclosing
+//                    function, in REVERSE topo order. The fast path
+//                    for "build it, use it, the function takes care
+//                    of teardown when it returns".
 //
-//	server, err := q.Assemble[*Server](newConfig, newDB, newServer)
+//   - .NoRelease() — returns (T, func(), error). Caller takes manual
+//                    ownership of the shutdown closure (idempotent
+//                    via sync.OnceFunc). Use when the assembled
+//                    value's lifetime spans more than the enclosing
+//                    function — e.g. main() that hands `shutdown` to
+//                    a signal handler.
 //
-//	// Or compose with q.Try at the call site:
-//	server := q.Try(q.Assemble[*Server](newConfig, newDB, newServer))
-func Assemble[T any](recipes ...any) (T, error) {
-	panicUnrewritten("q.Assemble")
+// Cleanups can come from two sources: explicit recipes returning
+// (T, func(), error), or auto-detected from T's type (Close() /
+// Close() error / channel types). Pure (T, error) and bare-T
+// recipes whose T isn't auto-cleanup-able simply add nothing to
+// the chain — the same call composes cleanly with both.
+type AssemblyResult[T any] struct {
+	v T //nolint:unused // populated by the preprocessor-generated IIFE
+}
+
+// Release fires the assembled resource's cleanups via a `defer`
+// injected into the enclosing function (reverse topo order).
+// Returns (T, error). The runtime body is unreachable in a
+// successful build.
+//
+//	func boot() (*Server, error) {
+//	    server, err := q.Assemble[*Server](newConfig, openDB, newServer).Release()
+//	    if err != nil { return nil, err }
+//	    return server, nil
+//	}
+//	// db.Close() runs when boot returns, regardless of err path.
+//
+// Compose with q.Try / q.Unwrap to drop the err:
+//
+//	server := q.Try(q.Assemble[*Server](recipes...).Release())
+func (r AssemblyResult[T]) Release() (T, error) {
+	panicUnrewritten("q.Assemble[...].Release")
 	var zero T
 	return zero, nil
 }
 
+// NoRelease returns (T, shutdown, error) without any defer-
+// injection. The caller controls when shutdown fires. The closure
+// is idempotent (wraps sync.OnceFunc); duplicate calls are safe.
+//
+//	server, shutdown, err := q.Assemble[*Server](recipes...).NoRelease()
+//	if err != nil { log.Fatal(err) }
+//	defer shutdown()
+//	context.AfterFunc(ctx, shutdown) // ctx cancel also triggers
+func (r AssemblyResult[T]) NoRelease() (T, func(), error) {
+	panicUnrewritten("q.Assemble[...].NoRelease")
+	var zero T
+	return zero, func() {}, nil
+}
+
+// Assemble builds T from the supplied recipes. Returns an
+// AssemblyResult[T]; pick `.Release()` or `.NoRelease()` to
+// terminate the chain and choose the resource-lifetime policy.
+//
+// The preprocessor resolves the dep graph at compile time, topo-
+// sorts the recipes, and emits the inlined construction. Recipes
+// that produce closeable resources (whether by explicit
+// `(T, func(), error)` shape or by T having a Close() method)
+// have their cleanups collected and fired in reverse topo order
+// during shutdown.
+//
+//	// Auto-defer pattern (most common):
+//	server, err := q.Assemble[*Server](newConfig, openDB, newServer).Release()
+//
+//	// Manual control (graceful shutdown spans main's lifetime):
+//	server, shutdown, err := q.Assemble[*Server](recipes...).NoRelease()
+//	defer shutdown()
+//
+//	// Compose with q.Try:
+//	server := q.Try(q.Assemble[*Server](recipes...).Release())
+func Assemble[T any](recipes ...any) AssemblyResult[T] {
+	panicUnrewritten("q.Assemble")
+	return AssemblyResult[T]{}
+}
+
 // AssembleAll is the multi-provider sibling of Assemble. When several
-// recipes legitimately produce values of the same type T (plugins,
+// recipes legitimately produce values assignable to T (plugins,
 // handlers, middlewares — any aggregation pattern), q.Assemble would
-// reject with "duplicate provider for T". AssembleAll opts into the
-// multi-provider shape and returns ([]T, error) — every recipe whose
-// output is assignable to T contributes one element, in the recipe's
-// declaration order.
+// reject with "duplicate provider". AssembleAll opts into the multi-
+// provider shape: every assignable recipe contributes one slice
+// element in declaration order.
 //
-//	type Plugin interface{ Name() string }
-//
-//	func newAuthPlugin()    Plugin { return &authPlugin{} }
-//	func newLoggingPlugin() Plugin { return &loggingPlugin{} }
-//	func newMetricsPlugin() Plugin { return &metricsPlugin{} }
+// Returns AssemblyResult[[]T]; pick .Release() or .NoRelease() to
+// terminate. Same lifetime semantics as q.Assemble.
 //
 //	plugins, err := q.AssembleAll[Plugin](
 //	    newAuthPlugin, newLoggingPlugin, newMetricsPlugin,
-//	)
-//
-// Each provider's transitive deps are still resolved through the same
-// auto-derived graph as q.Assemble — providers can take inputs that
-// other recipes supply. Errored recipes still bubble; nilable outputs
-// still get the runtime nil-check.
-//
-// As with q.Assemble, compose with q.Try / q.Unwrap at the call site
-// when you want bare []T:
-//
-//	plugins := q.Try(q.AssembleAll[Plugin](...))
-//	plugins := q.Unwrap(q.AssembleAll[Plugin](...))
-func AssembleAll[T any](recipes ...any) ([]T, error) {
+//	).Release()
+func AssembleAll[T any](recipes ...any) AssemblyResult[[]T] {
 	panicUnrewritten("q.AssembleAll")
-	return nil, nil
+	return AssemblyResult[[]T]{}
 }
 
 // AssembleStruct is the field-decomposition sibling of Assemble. T
-// must be a struct type; each field is treated as a separate dep
-// target. The preprocessor finds a recipe for each field's type,
-// builds them all (sharing transitive deps via the same auto-derived
-// graph as q.Assemble), and packs them into the resulting struct.
+// must be a struct; each field is treated as a separate dep target.
+// The preprocessor finds a recipe per field type, builds the shared
+// dep graph once, and packs the results into the struct.
+//
+// Returns AssemblyResult[T]; pick .Release() or .NoRelease() to
+// terminate. Same lifetime semantics as q.Assemble.
 //
 //	type App struct {
 //	    Server *Server
 //	    Worker *Worker
-//	    Stats  *Stats
 //	}
+//	app, err := q.AssembleStruct[App](newConfig, openDB, newServer, newWorker).Release()
 //
-//	app, err := q.AssembleStruct[App](
-//	    newConfig, newDB, newServer, newWorker, newStats,
-//	)
-//
-// Use this when several distinct products share a common dep set —
-// the *Config and *DB recipes only run once even though three
-// different fields consume them. Recipes whose output type doesn't
-// match any field still need to feed (transitively) into one that
-// does, otherwise they're flagged as unused.
-//
-// q.AssembleStruct does NOT honor a recipe whose output IS T — the
-// whole point of choosing this entry over q.Assemble[T] is "decompose
-// T's fields"; if you want the single-recipe-for-T path, use
-// q.Assemble[T] instead. A recipe producing T directly is unused.
-//
-// As with q.Assemble, compose with q.Try / q.Unwrap / q.TryE /
-// q.UnwrapE at the call site.
-func AssembleStruct[T any](recipes ...any) (T, error) {
+// q.AssembleStruct does NOT honor a recipe whose output IS T —
+// choosing this entry IS the signal that you want field
+// decomposition.
+func AssembleStruct[T any](recipes ...any) AssemblyResult[T] {
 	panicUnrewritten("q.AssembleStruct")
-	var zero T
-	return zero, nil
+	return AssemblyResult[T]{}
 }
 
 // assemblyDebugKey is the unexported context-value key that

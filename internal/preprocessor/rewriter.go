@@ -136,6 +136,7 @@ func rewriteFile(fset *token.FileSet, file *ast.File, src []byte, shapes []callS
 	// q.Generator rewrites to `iter.Seq[T](...)` literally.
 	needsSlog := false
 	needsIter := false
+	needsSync := false
 	for _, sh := range shapes {
 		for _, c := range sh.Calls {
 			switch c.Family {
@@ -143,6 +144,9 @@ func rewriteFile(fset *token.FileSet, file *ast.File, src []byte, shapes []callS
 				needsSlog = true
 			case familyGenerator:
 				needsIter = true
+			case familyAssemble, familyAssembleAll, familyAssembleStruct:
+				// IIFE always wraps fireAll with sync.OnceFunc.
+				needsSync = true
 			}
 		}
 	}
@@ -167,6 +171,10 @@ func rewriteFile(fset *token.FileSet, file *ast.File, src []byte, shapes []callS
 	if needsIter && !hasImport(file, "iter") {
 		out = ensureImport(file, fset, out, "iter")
 		addedImports = append(addedImports, "iter")
+	}
+	if needsSync && !hasImport(file, "sync") {
+		out = ensureImport(file, fset, out, "sync")
+		addedImports = append(addedImports, "sync")
 	}
 
 	if alias != "" {
@@ -335,8 +343,7 @@ func renderShape(fset *token.FileSet, src []byte, sh callShape, counter *int, al
 		case familyMatch:
 			subTexts[i] = buildMatchReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts)
 		case familyAssemble, familyAssembleAll, familyAssembleStruct:
-			text, _ := buildAssembleReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts, alias)
-			subTexts[i] = text
+			subTexts[i] = buildAssembleSubText(fset, src, sh.Calls[i], sh.Calls, subTexts, alias, counters[i])
 		case familyTern:
 			subTexts[i] = buildTernReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts)
 		case familyAtCompileTime, familyAtCompileTimeCode:
@@ -356,7 +363,7 @@ func renderShape(fset *token.FileSet, src []byte, sh callShape, counter *int, al
 	)
 	allInPlace := true
 	for _, idx := range order {
-		if !isInPlaceFamily(sh.Calls[idx].Family) {
+		if !isInPlaceSub(sh.Calls[idx]) {
 			allInPlace = false
 		}
 		block, fu, eu, cu, err := renderSubCall(fset, src, sh, idx, sh.Calls, counters, subTexts, alias)
@@ -794,6 +801,19 @@ func buildExprReplacement(fset *token.FileSet, src []byte, sub qSubCall) string 
 	return strconv.Quote(string(src[innerStart:innerEnd]))
 }
 
+// isInPlaceSub is the sub-aware wrapper around isInPlaceFamily for
+// families whose in-place behaviour depends on call-site shape.
+// q.Assemble*'s `.Release()` chain injects a bind+defer block in
+// the enclosing function so it's NOT in-place; `.NoRelease()` just
+// substitutes the IIFE expression directly so it IS.
+func isInPlaceSub(sub qSubCall) bool {
+	switch sub.Family {
+	case familyAssemble, familyAssembleAll, familyAssembleStruct:
+		return sub.AssembleChain != assembleChainRelease
+	}
+	return isInPlaceFamily(sub.Family)
+}
+
 // isInPlaceFamily reports whether a family rewrites the call
 // expression in place (no bind/check block, no return) so the
 // substituted statement body is the entire output. Used to short-
@@ -1063,12 +1083,20 @@ func renderSubCall(fset *token.FileSet, src []byte, sh callShape, subIdx int, su
 		// IIFE switch — no imports needed.
 		return "", false, false, false, nil
 	case familyAssemble, familyAssembleAll, familyAssembleStruct:
-		// IIFE auto-DI — emitted as in-place subText. No bind/check
-		// block here; substituteSpans handles the substitution. fmt
-		// is needed when the body emits a runtime nil-check (uses
-		// fmt.Errorf to wrap q.ErrNil) OR when a ctx provider exists
-		// (the debug-trace prelude uses fmt.Fprintf).
+		// fmt is needed when the body emits a runtime nil-check (uses
+		// fmt.Errorf to wrap q.ErrNil) OR when a ctx provider exists.
 		fmtUsed := assembleHasNilableStep(sub) || sub.AssembleCtxDepKey != ""
+		// .NoRelease() is in-place: the IIFE substitution at the
+		// chain call expression IS the result, returning 3 values.
+		// .Release() injects pre-statements (bind + defer) and
+		// substitutes the chain call with a (T, error)-shaped
+		// expression that re-uses the bound temps. Both shapes set
+		// subTexts[i] earlier; .Release() additionally returns a
+		// pre-statement block from this dispatch.
+		if sub.AssembleChain == assembleChainRelease {
+			block := buildAssembleReleaseBlock(fset, src, sub, sh.Calls, subTexts, alias, counter)
+			return block, fmtUsed, false, false, nil
+		}
 		return "", fmtUsed, false, false, nil
 	case familyTern:
 		// q.Tern emits an IIFE in-place; no extra bind/check block.

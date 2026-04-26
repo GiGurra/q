@@ -1,0 +1,8 @@
+err is errBoot: true
+server nil: true
+shutdown not nil: true
+partial cleanup order:
+ - cache
+ - db
+total fired: 2
+post-shutdown total: 2

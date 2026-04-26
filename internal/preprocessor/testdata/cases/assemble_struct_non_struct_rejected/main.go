@@ -12,5 +12,5 @@ func newServer() *Server { return nil }
 
 func main() {
 	// *Server is a pointer, not a struct underlying.
-	_, _ = q.AssembleStruct[*Server](newServer)
+	_, _ = q.AssembleStruct[*Server](newServer).Release()
 }

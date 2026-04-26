@@ -1,0 +1,6 @@
+cache built: true
+shutdown not nil: true
+shutdown order:
+ - cache
+ - db
+total fired: 2

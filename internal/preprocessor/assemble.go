@@ -81,6 +81,8 @@ type assembleRecipeInfo struct {
 	expr              ast.Expr
 	isValue           bool
 	errored           bool
+	isResource        bool
+	autoCleanup       cleanupKind
 	inputs            []types.Type
 	inputKeys         []string
 	resolvedInputKeys []string
@@ -162,7 +164,7 @@ func resolveAssemble(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPat
 			results := sig.Results()
 			switch results.Len() {
 			case 0:
-				addProblem("recipe #%d (%s) returns no values — recipes must return T or (T, error)",
+				addProblem("recipe #%d (%s) returns no values — recipes must return T, (T, error), or (T, func(), error)",
 					i+1, snippet(fset, rExpr))
 				recipes = append(recipes, ri)
 				continue
@@ -170,14 +172,35 @@ func resolveAssemble(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPat
 				// Pure recipe — fine.
 			case 2:
 				if !types.Identical(results.At(1).Type(), errType) {
-					addProblem("recipe #%d (%s) second return is %s; recipes must return T or (T, error) where the second value is the built-in `error`",
+					addProblem("recipe #%d (%s) second return is %s; recipes must return T, (T, error), or (T, func(), error)",
 						i+1, snippet(fset, rExpr), typeText(results.At(1).Type()))
 					recipes = append(recipes, ri)
 					continue
 				}
 				ri.errored = true
+			case 3:
+				// Resource-recipe shape: (T, func(), error). Accepted
+				// in any Assemble-family call — pure (T, error) and
+				// (T, func(), error) recipes mix freely. The chain
+				// terminator (.Release / .NoRelease) decides what
+				// happens with the cleanups.
+				cleanupSig, isCleanupFn := results.At(1).Type().(*types.Signature)
+				if !isCleanupFn || cleanupSig.Params().Len() != 0 || cleanupSig.Results().Len() != 0 {
+					addProblem("recipe #%d (%s) second return is %s; for resource recipes the second return must be `func()`",
+						i+1, snippet(fset, rExpr), typeText(results.At(1).Type()))
+					recipes = append(recipes, ri)
+					continue
+				}
+				if !types.Identical(results.At(2).Type(), errType) {
+					addProblem("recipe #%d (%s) third return is %s; for resource recipes the third return must be the built-in `error`",
+						i+1, snippet(fset, rExpr), typeText(results.At(2).Type()))
+					recipes = append(recipes, ri)
+					continue
+				}
+				ri.errored = true
+				ri.isResource = true
 			default:
-				addProblem("recipe #%d (%s) returns %d values; recipes must return T or (T, error)",
+				addProblem("recipe #%d (%s) returns %d values; recipes must return T, (T, error), or (T, func(), error)",
 					i+1, snippet(fset, rExpr), results.Len())
 				recipes = append(recipes, ri)
 				continue
@@ -629,6 +652,8 @@ func resolveAssemble(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPat
 			RecipeIdx:       r.idx,
 			IsValue:         r.isValue,
 			Errored:         r.errored,
+			IsResource:      r.isResource,
+			AutoCleanup:     r.autoCleanup,
 			InputKeys:       append([]string(nil), r.resolvedInputKeys...),
 			OutputKey:       r.outputKey,
 			OutputIsNilable: isNilableType(r.output),
@@ -905,7 +930,56 @@ func buildAssembleReplacement(fset *token.FileSet, src []byte, sub qSubCall, sub
 		returnText = "[]" + elemText
 	}
 	body, fmtUsed := buildAssembleBody(fset, src, sub, subs, subTexts, returnText, alias)
-	return fmt.Sprintf("(func() (%s, error) {%s\n}())", returnText, body), fmtUsed
+	// IIFE always returns (T, func(), error). For .NoRelease() this
+	// is the user-facing shape directly. For .Release() the rewriter
+	// wraps it with bind+defer in renderAssembleRelease (block emit).
+	return fmt.Sprintf("(func() (%s, func(), error) {%s\n}())", returnText, body), fmtUsed
+}
+
+// buildAssembleSubText returns the text to substitute at the chain
+// call expression's source span. Branch on chain terminator:
+//   - .NoRelease() — the IIFE itself (returns (T, func(), error)).
+//   - .Release()   — a (T, error)-shaped placeholder expression that
+//                    references the temps bound by the pre-statement
+//                    block. The pre-statement block is emitted
+//                    separately via buildAssembleReleaseBlock.
+func buildAssembleSubText(fset *token.FileSet, src []byte, sub qSubCall, subs []qSubCall, subTexts []string, alias string, counter int) string {
+	text, _ := buildAssembleReplacement(fset, src, sub, subs, subTexts, alias)
+	if sub.AssembleChain != assembleChainRelease {
+		return text
+	}
+	// For .Release(), the pre-statement block already bound:
+	//   _qDep<N>, _qShutdown<N>, _qAErr<N> := <IIFE>
+	// At the original call site we need a (T, error)-shaped value.
+	// Emit a tiny lambda that returns the cached temps — works in
+	// any expression position including assignment, return, function
+	// arg, etc.
+	returnText := assembleTargetText(sub)
+	if sub.Family == familyAssembleAll {
+		returnText = "[]" + returnText
+	}
+	depVar := fmt.Sprintf("_qADep%d", counter)
+	errVar := fmt.Sprintf("_qAErr%d", counter)
+	return fmt.Sprintf("(func() (%s, error) { return %s, %s })()", returnText, depVar, errVar)
+}
+
+// buildAssembleReleaseBlock emits the pre-statement block injected
+// into the enclosing function for q.Assemble[T](...).Release(). The
+// block binds the IIFE result to caller-scope temps and defers the
+// shutdown closure so it fires when the enclosing function returns.
+//
+//   _qADep<N>, _qAShut<N>, _qAErr<N> := <IIFE returning (T, func(), error)>
+//   defer _qAShut<N>()
+//
+// On the IIFE's success path, _qAShut<N> is sync.OnceFunc-wrapped so
+// firing it via this defer is safe even if the user also calls it
+// manually (e.g. wires it to context.AfterFunc).
+func buildAssembleReleaseBlock(fset *token.FileSet, src []byte, sub qSubCall, subs []qSubCall, subTexts []string, alias string, counter int) string {
+	text, _ := buildAssembleReplacement(fset, src, sub, subs, subTexts, alias)
+	depVar := fmt.Sprintf("_qADep%d", counter)
+	shutVar := fmt.Sprintf("_qAShut%d", counter)
+	errVar := fmt.Sprintf("_qAErr%d", counter)
+	return fmt.Sprintf("%s, %s, %s := %s\n\tdefer %s()", depVar, shutVar, errVar, text, shutVar)
 }
 
 // assembleTargetText returns the spelling of the target type T, with
@@ -944,13 +1018,21 @@ func buildAssembleBody(fset *token.FileSet, src []byte, sub qSubCall, subs []qSu
 	familyName := assembleFamilyLabel(sub.Family)
 	fmtUsed := false
 
+	// All Assemble-family IIFEs return (T, func(), error). Cleanups
+	// from resource recipes (or auto-cleanup-from-T) are pushed onto
+	// _qCleanups in topo order; the IIFE wraps the reverse-iteration
+	// in sync.OnceFunc on the success path and returns it as the
+	// shutdown closure. On error/nil-check failure the IIFE fires
+	// the partial cleanups in-place and returns a no-op closure.
+	fmt.Fprintf(&b, "\n\tvar _qCleanups []func()")
+	zeroExpr := fmt.Sprintf("*new(%s)", targetText)
+	fireAllInline := "for _qI := len(_qCleanups)-1; _qI >= 0; _qI-- { _qCleanups[_qI]() }"
+	errReturn := func(errExpr string) string {
+		return fmt.Sprintf("%s; return %s, func(){}, %s", fireAllInline, zeroExpr, errExpr)
+	}
+
 	// Find the ctx step (idx == -1, only present for AssembleCtx) so
 	// the debug-trace prelude can reference its _qDep<N> name.
-	// ctxDepName is the _qDep<N> bound to the recipe that provides
-	// context.Context, when one exists. Set after that step's bind so
-	// the optional debug-trace prelude can reference it. Empty when
-	// no recipe provides ctx — debug is silently disabled in that
-	// case.
 	ctxDepName := ""
 
 	for n, step := range sub.AssembleSteps {
@@ -972,29 +1054,31 @@ func buildAssembleBody(fset *token.FileSet, src []byte, sub qSubCall, subs []qSu
 		depVar[step.OutputKey] = dep
 		depByRecipe[step.RecipeIdx] = dep
 
-		// Optional pre-call trace prelude — fires when this assembly
-		// has a ctx provider AND it bound _qDbg in an earlier step.
-		// The trace prints only the recipe label; the OutputKey type
-		// text is path-qualified canonical form (`*main.Config`)
-		// which reads poorly in user output.
+		// Optional pre-call trace prelude.
 		if ctxDepName != "" {
 			fmt.Fprintf(&b, "\n\tif _qDbg != nil { fmt.Fprintf(_qDbg, %q, %q, %q) }",
 				"[%s] step %s\n", familyName, step.Label)
 			fmtUsed = true
 		}
 
-		if step.Errored {
+		switch {
+		case step.IsResource:
+			// (T, func(), error) recipe shape — bind all three;
+			// push the cleanup before any nil-check so partial
+			// failure auto-cleans the now-allocated resource too.
+			cleanupVar := fmt.Sprintf("_qCleanup%d", n)
+			errVar := fmt.Sprintf("_qAErr%d", n)
+			fmt.Fprintf(&b, "\n\t%s, %s, %s := %s", dep, cleanupVar, errVar, callText)
+			fmt.Fprintf(&b, "\n\tif %s != nil { %s }", errVar, errReturn(errVar))
+			fmt.Fprintf(&b, "\n\tif %s != nil { _qCleanups = append(_qCleanups, %s) }", cleanupVar, cleanupVar)
+		case step.Errored:
 			errVar := fmt.Sprintf("_qAErr%d", n)
 			fmt.Fprintf(&b, "\n\t%s, %s := %s", dep, errVar, callText)
-			fmt.Fprintf(&b, "\n\tif %s != nil { return *new(%s), %s }", errVar, targetText, errVar)
-		} else {
+			fmt.Fprintf(&b, "\n\tif %s != nil { %s }", errVar, errReturn(errVar))
+		default:
 			fmt.Fprintf(&b, "\n\t%s := %s", dep, callText)
 		}
 
-		// If THIS step provides context.Context, bind _qDbg from the
-		// freshly-bound dep so the trace conditional in subsequent
-		// steps can reference it. _qDbg is nil when WithAssemblyDebug
-		// hasn't been called, so the trace conditional is cheap.
 		if sub.AssembleCtxDepKey != "" && step.OutputKey == sub.AssembleCtxDepKey {
 			ctxDepName = dep
 			fmt.Fprintf(&b, "\n\t_qDbg := %s.AssemblyDebugWriter(%s)", alias, dep)
@@ -1009,11 +1093,13 @@ func buildAssembleBody(fset *token.FileSet, src []byte, sub qSubCall, subs []qSu
 				label = fmt.Sprintf("#%d", step.RecipeIdx+1)
 			}
 			msg := fmt.Sprintf(`%s: recipe %s returned nil`, familyName, label)
-			fmt.Fprintf(&b, "\n\tif %s == nil { return *new(%s), fmt.Errorf(%q + %q, %s.ErrNil) }",
-				dep, targetText, msg, ": %w", alias)
+			nilErr := fmt.Sprintf("fmt.Errorf(%q + %q, %s.ErrNil)", msg, ": %w", alias)
+			fmt.Fprintf(&b, "\n\tif %s == nil { %s }", dep, errReturn(nilErr))
 			fmtUsed = true
 		}
 	}
+
+	successShutdown := fmt.Sprintf("sync.OnceFunc(func() { %s })", fireAllInline)
 
 	if sub.Family == familyAssembleAll {
 		parts := make([]string, 0, len(sub.AssembleAllProviderRidxs))
@@ -1022,7 +1108,7 @@ func buildAssembleBody(fset *token.FileSet, src []byte, sub qSubCall, subs []qSu
 				parts = append(parts, dep)
 			}
 		}
-		fmt.Fprintf(&b, "\n\treturn %s{%s}, nil", targetText, strings.Join(parts, ", "))
+		fmt.Fprintf(&b, "\n\treturn %s{%s}, %s, nil", targetText, strings.Join(parts, ", "), successShutdown)
 		return b.String(), fmtUsed
 	}
 
@@ -1033,7 +1119,7 @@ func buildAssembleBody(fset *token.FileSet, src []byte, sub qSubCall, subs []qSu
 				parts = append(parts, fmt.Sprintf("%s: %s", sub.AssembleStructFieldNames[i], dep))
 			}
 		}
-		fmt.Fprintf(&b, "\n\treturn %s{%s}, nil", targetText, strings.Join(parts, ", "))
+		fmt.Fprintf(&b, "\n\treturn %s{%s}, %s, nil", targetText, strings.Join(parts, ", "), successShutdown)
 		return b.String(), fmtUsed
 	}
 
@@ -1041,7 +1127,7 @@ func buildAssembleBody(fset *token.FileSet, src []byte, sub qSubCall, subs []qSu
 	if !ok {
 		targetDep = fmt.Sprintf("*new(%s)", targetText)
 	}
-	fmt.Fprintf(&b, "\n\treturn %s, nil", targetDep)
+	fmt.Fprintf(&b, "\n\treturn %s, %s, nil", targetDep, successShutdown)
 	return b.String(), fmtUsed
 }
 

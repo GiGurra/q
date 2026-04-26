@@ -18,5 +18,5 @@ func newServer() *Server { return nil }
 
 func main() {
 	// No recipe provides *Worker.
-	_, _ = q.AssembleStruct[App](newServer)
+	_, _ = q.AssembleStruct[App](newServer).Release()
 }

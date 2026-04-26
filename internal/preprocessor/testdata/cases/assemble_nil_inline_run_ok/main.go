@@ -17,7 +17,7 @@ func newDB(c *Config) *DB { return &DB{cfg: c} }
 
 func boot() (*DB, error) {
 	var nilCfg *Config // typed-nil
-	return q.Assemble[*DB](nilCfg, newDB)
+	return q.Assemble[*DB](nilCfg, newDB).Release()
 }
 
 func main() {

@@ -34,7 +34,7 @@ func newAuth(c *Config) Plugin { return AuthPlugin{cfg: c} }
 func newLog(c *Config) Plugin  { return LogPlugin{cfg: c} }
 
 func main() {
-	plugins := q.Unwrap(q.AssembleAll[Plugin](newConfig, newAuth, newLog))
+	plugins := q.Unwrap(q.AssembleAll[Plugin](newConfig, newAuth, newLog).Release())
 
 	descs := make([]string, 0, len(plugins))
 	for _, p := range plugins {

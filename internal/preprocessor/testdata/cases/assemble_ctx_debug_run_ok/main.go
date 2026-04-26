@@ -30,12 +30,12 @@ func main() {
 	// but no recipe consumes it; the unused-recipe exemption for
 	// context.Context lets the build succeed.
 	ctxQuiet := context.Background()
-	_ = q.Unwrap(q.Assemble[*Server](ctxQuiet, newConfig, newDB, newServer))
+	_ = q.Unwrap(q.Assemble[*Server](ctxQuiet, newConfig, newDB, newServer).Release())
 	fmt.Println("quiet ok")
 
 	// With WithAssemblyDebugWriter — trace prints to the buffer.
 	var buf bytes.Buffer
 	ctxLoud := q.WithAssemblyDebugWriter(context.Background(), &buf)
-	_ = q.Unwrap(q.Assemble[*Server](ctxLoud, newConfig, newDB, newServer))
+	_ = q.Unwrap(q.Assemble[*Server](ctxLoud, newConfig, newDB, newServer).Release())
 	fmt.Print(buf.String())
 }

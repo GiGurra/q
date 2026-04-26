@@ -27,7 +27,7 @@ func newLog() Plugin     { return LogPlugin{} }
 func newMetrics() Plugin { return MetricsPlugin{} }
 
 func main() {
-	plugins := q.Unwrap(q.AssembleAll[Plugin](newAuth, newLog, newMetrics))
+	plugins := q.Unwrap(q.AssembleAll[Plugin](newAuth, newLog, newMetrics).Release())
 
 	names := make([]string, 0, len(plugins))
 	for _, p := range plugins {

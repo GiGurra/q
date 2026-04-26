@@ -17,7 +17,7 @@ func newDB(c *Config) *DB { return &DB{cfg: c} }
 
 // formDefine: `var, err := q.Assemble(...)`
 func boot1() (*DB, error) {
-	d, err := q.Assemble[*DB](newConfig, newDB)
+	d, err := q.Assemble[*DB](newConfig, newDB).Release()
 	return d, err
 }
 
@@ -25,13 +25,13 @@ func boot1() (*DB, error) {
 func boot2() (*DB, error) {
 	var d *DB
 	var err error
-	d, err = q.Assemble[*DB](newConfig, newDB)
+	d, err = q.Assemble[*DB](newConfig, newDB).Release()
 	return d, err
 }
 
 // formReturn: directly returned (the (T, error) tuple lines up).
 func boot3() (*DB, error) {
-	return q.Assemble[*DB](newConfig, newDB)
+	return q.Assemble[*DB](newConfig, newDB).Release()
 }
 
 // formHoist: nested inside a larger expression — the IIFE substitutes
@@ -39,7 +39,7 @@ func boot3() (*DB, error) {
 func wrap(d *DB) string { return d.cfg.DB }
 
 func boot4() (string, error) {
-	d := q.Try(q.Assemble[*DB](newConfig, newDB))
+	d := q.Try(q.Assemble[*DB](newConfig, newDB).Release())
 	return wrap(d), nil
 }
 

@@ -58,8 +58,26 @@ The persistent backlog for `q`. A cold-state reader can pick up here without re-
   Big lift: needs flow analysis (or a heavy hand: rewrite every reference into shim-method calls), needs to interop with raw resource access (sometimes you do want the underlying `*Conn`), and adds a real per-call atomic. Probably not worth it for the 90% case (functions that own their own resources) — defer until profiles or user reports show resource ownership crosses function boundaries often enough that the existing diagnostics become annoying.
 
 - **#84 — `q.Assemble` follow-on phases.** Phase 1 (single-entry auto-derived DI), Phase 2a (`q.AssembleAll[T]` for multi-provider aggregation), and Phase 2b (`q.AssembleStruct[T]` for field-decomposition multi-output) have shipped. See [`docs/api/assemble.md`](../api/assemble.md). Remaining work, full plan in [`docs/planning/assemble.md`](assemble.md):
-    - **Phase 3 — resource lifetime.** `(T, func(), error)`-returning resource recipes; defer-LIFO teardown integrates with q.Open's escape detection.
+    - **Phase 3 — resource lifetime.** AssemblyResult[T] chain with `.Release()` (defer-injected cleanup) and `.NoRelease()` (manual shutdown closure). Explicit `(T, func(), error)` recipes shipped. Still TODO: **auto-detect Close()-able recipes from T's type** — recipes whose T has `Close()` / `Close() error` / is a channel get a synthesised cleanup. **Important: only function recipes get auto-cleanup; inline values are user-owned and pass through unchanged.** The `step.IsValue` flag already distinguishes them, so the gate is `!step.IsValue && hasCloseShape(step.Output)`.
     - **Phase 4 — parallel construction.** `q.WithAssemblyPar(ctx, n)` rides on the ctx like `q.WithAssemblyDebug`; rewriter emits topo waves with `sync.WaitGroup` per wave.
+
+- **#90 — Recipe-with-cleanup adapter for external types.** When a recipe constructor comes from an external library (no Close() method, no channel) and the user can't change its signature, the natural pattern is to write a 3-line inline wrapper:
+
+  ```go
+  openForeign := func(c *Config) (*foreignlib.Resource, func(), error) {
+      r, err := foreignlib.Open(c)
+      if err != nil { return nil, nil, err }
+      return r, func() { foreignlib.Cleanup(r) }, nil
+  }
+  ```
+
+  A q-provided helper could shorten this. Surface options:
+
+  - **Generic adapter.** `q.Cleanup[T any](ctor func() (T, error), cleanup func(T)) func() (T, func(), error)` — only works for zero-arg ctors. Useful for the common case but doesn't generalise to ctors with input deps.
+  - **Per-arity adapters.** `q.Cleanup1[A, T](ctor func(A) (T, error), cleanup func(T)) func(A) (T, func(), error)`, `q.Cleanup2`, etc. Generalises but bloats the surface.
+  - **Ctx-attached registry.** `q.WithCleanup[T](ctx, cleanup func(T))` — at q.Assemble time, the rewriter checks ctx for a registered cleanup for T's type and synthesises one. Cleaner but adds ctx complexity and global-ish state.
+
+  Park until users actually hit the inline-wrapper pattern often enough that one of these earns its keep.
 
 - **#87 — Ctx-attached assembly cache.** `q.WithAssemblyCache(ctx)` (name TBD) attaches a `*sync.Map` keyed by typeKey; `q.Assemble` / `q.AssembleAll` consult it before building each dep. Two consecutive calls in the same ctx scope reuse `*Config`, `*DB`, etc. — useful in long-running services where the same dep set is rebuilt for each request handler.
 
@@ -71,6 +89,16 @@ The persistent backlog for `q`. A cold-state reader can pick up here without re-
   - **Recipe-identity divergence.** If two `q.Assemble` call sites use different recipe functions but request the same `*Config` type, the second call gets the first's `*Config`. Spec it as "ctx is the cache scope; you own its membership" rather than trying to be clever.
 
   **Mechanism sketch.** Rewriter detects `q.AssemblyCache(ctx) != nil` at IIFE entry (one ctx.Value lookup, like the debug-trace prelude). When non-nil, each step emits `if v, ok := _qCache.Load(typeKey); ok { _qDep<N> = v.(T) } else { _qDep<N> = recipe(...); _qCache.Store(typeKey, _qDep<N>) }`. When nil, sequential serial emit unchanged.
+
+  **Partial-failure semantics — write-at-end pattern.** The cache is only written AT THE END of a successful assembly, never mid-flight. Two consequences fall out:
+
+  1. **No failure-path cache invalidation.** If assembly fails mid-chain, the cache is unchanged — there's nothing to roll back. Local cleanups still fire (in reverse-topo order, unconditional, built into the chain rewriter). Pre-existing cache entries from earlier successful assemblies remain valid.
+
+  2. **No mid-flight race window.** A failed assembly can't pollute the cache with half-built deps that another concurrent assembly could grab.
+
+  Mechanism: rewriter emits per-step `if cached, ok := _qCache.Load(key); ok { use cached } else { build fresh }`. The "build fresh" path does NOT Store. After the IIFE's final success path, ONE pass `_qCache.Store(...)` for each freshly-built dep. Failure paths skip the Store pass entirely.
+
+  **Concurrency caveat (for the docs, not a hard problem).** Two assemblies running concurrently in the same cache scope may both build the same dep type before either reaches the success-path Store; whichever Stores first wins, the other's instance is orphaned (not cleaned up — it was never registered in any local cleanup chain that survived to fire). For the strict singleflight semantics, layer a sync.Mutex per typeKey or use golang.org/x/sync/singleflight; defer that until users actually hit the orphaning.
 
 ### Coroutines
 

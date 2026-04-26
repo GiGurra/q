@@ -31,6 +31,6 @@ func newServer(c *Config, ch *Cache) *Server { return &Server{cfg: c, cache: ch}
 func unrelated() string { return "stray" } // declared but unused; not part of this graph
 
 func main() {
-	_, _ = q.Assemble[*Server](newConfig, newOtherConfig, newServer)
+	_, _ = q.Assemble[*Server](newConfig, newOtherConfig, newServer).Release()
 	_ = unrelated
 }

@@ -229,7 +229,7 @@ type DB struct{}
 type Server struct{}
 func newCfg() *Cfg                         { return nil }
 func newServer(d *DB, c *Cfg) *Server      { return nil }
-func main() { _ = q.Assemble[*Server](newCfg, newServer) }
+func main() { _, _ = q.Assemble[*Server](newCfg, newServer).Release() }
 `,
 			wantSubs: []string{
 				"missing recipe for *DB",
@@ -245,7 +245,7 @@ import "github.com/GiGurra/q/pkg/q"
 type Cfg struct{}
 func newA() *Cfg { return nil }
 func newB() *Cfg { return nil }
-func main() { _ = q.Assemble[*Cfg](newA, newB) }
+func main() { _, _ = q.Assemble[*Cfg](newA, newB).Release() }
 `,
 			wantSubs: []string{
 				"duplicate provider for *Cfg",
@@ -264,7 +264,7 @@ type Root struct{}
 func newA(b *B) *A     { return nil }
 func newB(a *A) *B     { return nil }
 func newRoot(a *A) *Root { return nil }
-func main() { _ = q.Assemble[*Root](newA, newB, newRoot) }
+func main() { _, _ = q.Assemble[*Root](newA, newB, newRoot).Release() }
 `,
 			wantSubs: []string{
 				"dependency cycle:",
@@ -279,7 +279,7 @@ import "github.com/GiGurra/q/pkg/q"
 type Cfg struct{}
 type Server struct{}
 func newCfg() *Cfg { return nil }
-func main() { _ = q.Assemble[*Server](newCfg) }
+func main() { _, _ = q.Assemble[*Server](newCfg).Release() }
 `,
 			wantSubs: []string{
 				"target type *Server is not produced by any recipe",
@@ -295,7 +295,7 @@ type DB struct{}
 func newCfg() *Cfg            { return nil }
 func newDB(c *Cfg) *DB        { return nil }
 func unrelated() string       { return "" }
-func main() { _ = q.Assemble[*DB](newCfg, newDB, unrelated) }
+func main() { _, _ = q.Assemble[*DB](newCfg, newDB, unrelated).Release() }
 `,
 			wantSubs: []string{
 				"unused recipe(s):",
@@ -318,7 +318,7 @@ type App struct{}
 func newEN() *EN          { return nil }
 func newES() *ES          { return nil }
 func newApp(g Greeter) *App { return nil }
-func main() { _ = q.Assemble[*App](newEN, newES, newApp) }
+func main() { _, _ = q.Assemble[*App](newEN, newES, newApp).Release() }
 `,
 			wantSubs: []string{
 				"interface input Greeter",
@@ -335,23 +335,36 @@ import "github.com/GiGurra/q/pkg/q"
 type DB struct{}
 func sideEffect()    {}
 func newDB() *DB     { return nil }
-func main() { _ = q.Assemble[*DB](sideEffect, newDB) }
+func main() { _, _ = q.Assemble[*DB](sideEffect, newDB).Release() }
 `,
 			wantSubs: []string{
 				"recipe #1 (sideEffect) returns no values",
-				"recipes must return T or (T, error)",
+				"recipes must return T, (T, error), or (T, func(), error)",
 			},
 		},
 		{
-			name: "recipe with too many returns",
+			name: "recipe 3 returns wrong second-type",
 			src: `package main
 import "github.com/GiGurra/q/pkg/q"
 type DB struct{}
 func newDB() (*DB, string, error) { return nil, "", nil }
-func main() { _ = q.Assemble[*DB](newDB) }
+func main() { _, _ = q.Assemble[*DB](newDB).Release() }
 `,
 			wantSubs: []string{
-				"returns 3 values",
+				"second return is string",
+				"for resource recipes the second return must be `func()`",
+			},
+		},
+		{
+			name: "recipe with 4 returns",
+			src: `package main
+import "github.com/GiGurra/q/pkg/q"
+type DB struct{}
+func newDB() (*DB, string, int, error) { return nil, "", 0, nil }
+func main() { _, _ = q.Assemble[*DB](newDB).Release() }
+`,
+			wantSubs: []string{
+				"returns 4 values",
 			},
 		},
 		{
@@ -362,11 +375,11 @@ type DB struct{}
 type MyErr struct{}
 func (e *MyErr) Error() string { return "" }
 func newDB() (*DB, *MyErr) { return nil, nil }
-func main() { _, _ = q.Assemble[*DB](newDB) }
+func main() { _, _ = q.Assemble[*DB](newDB).Release() }
 `,
 			wantSubs: []string{
 				"second return is *MyErr",
-				"second value is the built-in `error`",
+				"recipes must return T, (T, error), or (T, func(), error)",
 			},
 		},
 		{
@@ -375,7 +388,7 @@ func main() { _, _ = q.Assemble[*DB](newDB) }
 import "github.com/GiGurra/q/pkg/q"
 type DB struct{}
 func newDB(extras ...string) *DB { return nil }
-func main() { _ = q.Assemble[*DB](newDB) }
+func main() { _, _ = q.Assemble[*DB](newDB).Release() }
 `,
 			wantSubs: []string{
 				"is variadic",
@@ -392,7 +405,7 @@ type Server struct{}
 func newCfg()                          *Cfg    { return nil }
 func newOther()                        *Cfg    { return nil }
 func newServer(c *Cfg, ch *Cache)      *Server { return nil }
-func main() { _ = q.Assemble[*Server](newCfg, newOther, newServer) }
+func main() { _, _ = q.Assemble[*Server](newCfg, newOther, newServer).Release() }
 `,
 			wantSubs: []string{
 				"duplicate provider for *Cfg",
@@ -437,7 +450,7 @@ func newCfg() *Cfg                              { return &Cfg{} }
 func newDB(ctx context.Context, c *Cfg) *DB    { return &DB{ctx: ctx, cfg: c} }
 
 func main() {
-	_, _ = q.Assemble[*DB](context.Background(), newCfg, newDB)
+	_, _ = q.Assemble[*DB](context.Background(), newCfg, newDB).Release()
 }
 `
 	diags, shapes, err := analyzeAssembleSrc(t, src)
@@ -481,7 +494,7 @@ func newCfg() *Cfg     { return &Cfg{} }
 func newDB(c *Cfg) *DB { return &DB{cfg: c} }
 
 func main() {
-	_, _ = q.Assemble[*DB](context.Background(), newCfg, newDB)
+	_, _ = q.Assemble[*DB](context.Background(), newCfg, newDB).Release()
 }
 `
 	diags, shapes, err := analyzeAssembleSrc(t, src)
@@ -519,7 +532,7 @@ func newLog()     Plugin { return logP{} }
 func newMetrics() Plugin { return metricsP{} }
 
 func main() {
-	_, _ = q.AssembleAll[Plugin](newAuth, newLog, newMetrics)
+	_, _ = q.AssembleAll[Plugin](newAuth, newLog, newMetrics).Release()
 }
 `
 	diags, shapes, err := analyzeAssembleSrc(t, src)
@@ -553,7 +566,7 @@ import "github.com/GiGurra/q/pkg/q"
 type Cfg struct{}
 func newA() *Cfg { return nil }
 func newB() *Cfg { return nil }
-func main() { _, _ = q.AssembleAll[*Cfg](newA, newB) }
+func main() { _, _ = q.AssembleAll[*Cfg](newA, newB).Release() }
 `
 	diags, shapes, err := analyzeAssembleSrc(t, src)
 	if err != nil {
@@ -579,7 +592,7 @@ import "github.com/GiGurra/q/pkg/q"
 type Plugin interface{ Name() string }
 type Cfg struct{}
 func newCfg() *Cfg { return nil }
-func main() { _, _ = q.AssembleAll[Plugin](newCfg) }
+func main() { _, _ = q.AssembleAll[Plugin](newCfg).Release() }
 `
 	diags, _, err := analyzeAssembleSrc(t, src)
 	if err != nil {
@@ -614,7 +627,7 @@ func newAuth(c *Cfg) Plugin       { return authP{cfg: c} }
 func newLog(c *Cfg) Plugin        { return logP{cfg: c} }
 
 func main() {
-	_, _ = q.AssembleAll[Plugin](newCfg, newAuth, newLog)
+	_, _ = q.AssembleAll[Plugin](newCfg, newAuth, newLog).Release()
 }
 `
 	diags, shapes, err := analyzeAssembleSrc(t, src)
@@ -654,7 +667,7 @@ func newServer(d *DB, c *Config) *Server { return &Server{db: d, cfg: c} }
 func newWorker(d *DB) *Worker            { return &Worker{db: d} }
 
 func main() {
-	_, _ = q.AssembleStruct[App](newConfig, newDB, newServer, newWorker)
+	_, _ = q.AssembleStruct[App](newConfig, newDB, newServer, newWorker).Release()
 }
 `
 	diags, shapes, err := analyzeAssembleSrc(t, src)
@@ -690,7 +703,7 @@ type App struct {
 }
 func newServer() *Server { return nil }
 func main() {
-	_, _ = q.AssembleStruct[App](newServer)
+	_, _ = q.AssembleStruct[App](newServer).Release()
 }
 `
 	diags, _, err := analyzeAssembleSrc(t, src)
@@ -711,7 +724,7 @@ import "github.com/GiGurra/q/pkg/q"
 type Server struct{}
 func newServer() *Server { return nil }
 func main() {
-	_, _ = q.AssembleStruct[*Server](newServer)
+	_, _ = q.AssembleStruct[*Server](newServer).Release()
 }
 `
 	diags, _, err := analyzeAssembleSrc(t, src)
@@ -732,7 +745,7 @@ func TestUnitAssembleStructEmptyTarget(t *testing.T) {
 import "github.com/GiGurra/q/pkg/q"
 type Empty struct{}
 func main() {
-	_, _ = q.AssembleStruct[Empty]("ignored")
+	_, _ = q.AssembleStruct[Empty]("ignored").Release()
 }
 `
 	diags, _, err := analyzeAssembleSrc(t, src)
@@ -763,7 +776,7 @@ func newCfg() *Cfg { return &Cfg{} }
 func newEN() *EN   { return &EN{} }
 
 func main() {
-	_, _ = q.AssembleStruct[Bundle](newCfg, newEN)
+	_, _ = q.AssembleStruct[Bundle](newCfg, newEN).Release()
 }
 `
 	diags, shapes, err := analyzeAssembleSrc(t, src)
@@ -791,7 +804,7 @@ func newCfg() *Cfg     { return &Cfg{DB: "x"} }
 func newDB(c *Cfg) *DB { return &DB{cfg: c} }
 
 func main() {
-	_ = q.Assemble[*DB](newCfg, newDB)
+	_, _ = q.Assemble[*DB](newCfg, newDB).Release()
 }
 `
 	diags, shapes, err := analyzeAssembleSrc(t, src)
