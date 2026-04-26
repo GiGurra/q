@@ -3,7 +3,7 @@
 You list the recipes; the preprocessor reads each recipe's signature, builds a dependency graph keyed by output type, topo-sorts it, and emits the inlined construction at compile time. No `wire.go` to keep in sync; no runtime container; no `var _ = container.Build()` to forget. The whole graph collapses into one expression at the call site.
 
 ```go
-server, err := q.Assemble[*Server](newConfig, newDB, newServer).Release()
+server, err := q.Assemble[*Server](newConfig, newDB, newServer).DeferCleanup()
 ```
 
 ## Background — why this exists
@@ -23,19 +23,19 @@ The model is borrowed from ZIO's [`ZLayer`](https://zio.dev/reference/di/) — l
 ```go
 func Assemble[T any](recipes ...any) AssemblyResult[T]
 
-func (AssemblyResult[T]) Release() (T, error)
-func (AssemblyResult[T]) NoRelease() (T, func(), error)
+func (AssemblyResult[T]) DeferCleanup() (T, error)
+func (AssemblyResult[T]) NoDeferCleanup() (T, func(), error)
 ```
 
 `q.Assemble` returns a chain handle. The terminator picks the resource-lifetime policy.
 
-### `.Release()` — auto-defer (the fast path)
+### `.DeferCleanup()` — auto-defer (the fast path)
 
 Returns `(T, error)`. The preprocessor injects a `defer` into the *enclosing function* that fires every collected cleanup in reverse-topo order when the function returns. No bookkeeping at the call site.
 
 ```go
 func boot() (*Server, error) {
-    server, err := q.Assemble[*Server](newConfig, openDB, newServer).Release()
+    server, err := q.Assemble[*Server](newConfig, openDB, newServer).DeferCleanup()
     if err != nil { return nil, err }
     return server, nil
 }
@@ -45,17 +45,17 @@ func boot() (*Server, error) {
 Compose with q.Try / q.Unwrap to drop the err:
 
 ```go
-server := q.Try(q.Assemble[*Server](recipes...).Release())
-server := q.Unwrap(q.Assemble[*Server](recipes...).Release())
+server := q.Try(q.Assemble[*Server](recipes...).DeferCleanup())
+server := q.Unwrap(q.Assemble[*Server](recipes...).DeferCleanup())
 ```
 
-### `.NoRelease()` — caller-managed shutdown
+### `.NoDeferCleanup()` — caller-managed shutdown
 
 Returns `(T, func(), error)`. The closure fires the cleanup chain in reverse-topo order on demand. Idempotent (wraps `sync.OnceFunc`); duplicate calls are safe — useful when you want both `defer shutdown()` and `context.AfterFunc(ctx, shutdown)` triggers.
 
 ```go
 func main() {
-    server, shutdown, err := q.Assemble[*Server](recipes...).NoRelease()
+    server, shutdown, err := q.Assemble[*Server](recipes...).NoDeferCleanup()
     if err != nil { log.Fatal(err) }
     defer shutdown()
     context.AfterFunc(ctx, shutdown) // optional: ctx cancel also triggers
@@ -63,11 +63,11 @@ func main() {
 }
 ```
 
-Use `.NoRelease()` when the assembled value's lifetime spans more than the enclosing function — main loops, signal handlers, background workers.
+Use `.NoDeferCleanup()` when the assembled value's lifetime spans more than the enclosing function — main loops, signal handlers, background workers.
 
 ### Mandatory chain terminator
 
-Bare `q.Assemble[T](...)` — without `.Release()` or `.NoRelease()` — does not compile (`AssemblyResult[T]` isn't `(T, error)`). The preprocessor surfaces a friendly diagnostic too. Pick one terminator at every call site.
+Bare `q.Assemble[T](...)` — without `.DeferCleanup()` or `.NoDeferCleanup()` — does not compile (`AssemblyResult[T]` isn't `(T, error)`). The preprocessor surfaces a friendly diagnostic too. Pick one terminator at every call site.
 
 `recipes` is `...any` because Go's type system can't express "any function with any number of inputs and one output". The preprocessor's typecheck pass takes over validation. Errors in the recipe set surface as build-time diagnostics with file:line:col plus a dependency-tree visualisation.
 
@@ -115,7 +115,7 @@ func newDoneCh() chan struct{} {
     return make(chan struct{})
 }
 
-server, err := q.Assemble[*Server](newDB, newDoneCh, newServer).Release()
+server, err := q.Assemble[*Server](newDB, newDoneCh, newServer).DeferCleanup()
 // db.Close() and close(doneCh) both fire on enclosing-function exit,
 // in reverse-topo order. No q.Open boilerplate, no manual wrapping.
 ```
@@ -181,8 +181,8 @@ func newInMemStore() (*Store, func()) {
 
 Whether the cleanup is auto-detected or explicit, the chain terminator decides what happens with it:
 
-- **`.Release()`** — defer-injected; fires on enclosing function return in reverse-topo order.
-- **`.NoRelease()`** — handed to the caller as an idempotent closure for explicit control.
+- **`.DeferCleanup()`** — defer-injected; fires on enclosing function return in reverse-topo order.
+- **`.NoDeferCleanup()`** — handed to the caller as an idempotent closure for explicit control.
 
 In both cases, **partial-failure cleanup is automatic.** If recipe N fails, the cleanups for recipes 0..N-1 fire in reverse-topo before the error bubbles. The chain emerges intact: nothing leaks even on failure paths.
 
@@ -517,7 +517,7 @@ server, err := q.Assemble[*Server](
     newConfig,
     q.PermitNil(newOptionalCache),
     newServer,
-).Release()
+).DeferCleanup()
 ```
 
 `q.PermitNil` is a typed identity (`func PermitNil[T any](recipe T) T { return recipe }`). At runtime it returns the recipe unchanged; the preprocessor detects the wrapper at scan time, unwraps it, and marks the resulting Assemble step so the rewriter skips that step's nil-check.
@@ -670,7 +670,7 @@ The auto-aggregation behavior may be added later as an opt-in.
 
 ## What's coming
 
-Active surface covers single-call DI, `q.AssembleAll` for multi-provider aggregation, `q.AssembleStruct` for struct-target multi-output, full resource-lifetime management (auto-detected and explicit cleanups, partial-failure rollback, `.Release()` / `.NoRelease()` chain), debug tracing, and `q.PermitNil` for opt-in nilable recipes. No phases are currently in active development.
+Active surface covers single-call DI, `q.AssembleAll` for multi-provider aggregation, `q.AssembleStruct` for struct-target multi-output, full resource-lifetime management (auto-detected and explicit cleanups, partial-failure rollback, `.DeferCleanup()` / `.NoDeferCleanup()` chain), debug tracing, and `q.PermitNil` for opt-in nilable recipes. No phases are currently in active development.
 
 Parked, may revisit:
 

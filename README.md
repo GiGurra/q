@@ -59,17 +59,17 @@ For full control, `.Catch(fn)` takes a `func(error) (T, error)` — return `(v, 
 ### Acquire and release a resource in one statement
 
 ```go
-conn := q.Open(dial(addr)).Release((*Conn).Close)
-file := q.Open(os.Open(path)).Release()       // auto: defer file.Close()
-ch   := q.Open(makeChan()).Release()          // auto: defer close(ch)
+conn := q.Open(dial(addr)).DeferCleanup((*Conn).Close)
+file := q.Open(os.Open(path)).DeferCleanup()       // auto: defer file.Close()
+ch   := q.Open(makeChan()).DeferCleanup()          // auto: defer close(ch)
 return process(conn, file, ch)
 // On return, the defers fire LIFO.
 ```
 
-`.Release(cleanup)` takes the cleanup explicitly. `.Release()` (no args) lets the preprocessor infer it from the resource type — channel close, `Close() error` (close-time error discarded), or `Close()` (no return). For "we acquired this and we're *not* closing it":
+`.DeferCleanup(cleanup)` takes the cleanup explicitly. `.DeferCleanup()` (no args) lets the preprocessor infer it from the resource type — channel close, `Close() error` (close-time error discarded), or `Close()` (no return). For "we acquired this and we're *not* closing it":
 
 ```go
-val := q.Open(loadValue(key)).NoRelease()
+val := q.Open(loadValue(key)).NoDeferCleanup()
 ```
 
 If `os.Open` fails, `conn` was already opened and `conn.Close` runs. Same semantics as hand-written `defer file.Close()` chains, half the lines.
@@ -299,11 +299,11 @@ func newServer(d *DB, c *Config) *Server { return &Server{db: d, cfg: c} }
 // in spirit, plain Go functions in shape. No codegen step. No runtime
 // reflection. The chain terminator picks the resource-lifetime policy:
 //
-//   .Release()   — returns (T, error). Cleanups fire automatically via
+//   .DeferCleanup()   — returns (T, error). Cleanups fire automatically via
 //                  a `defer` injected into the enclosing function (in
 //                  reverse-topo order). The fast path.
 //
-//   .NoRelease() — returns (T, func(), error). Caller takes manual
+//   .NoDeferCleanup() — returns (T, func(), error). Caller takes manual
 //                  ownership of the (idempotent) shutdown closure —
 //                  use when lifetime spans more than the function
 //                  scope (main / signal handlers / background workers).
@@ -313,11 +313,11 @@ func newServer(d *DB, c *Config) *Server { return &Server{db: d, cfg: c} }
 // Close() / Close() error / writable channel) feed cleanups onto
 // the chain; the rest pass through. Wrap a recipe in q.PermitNil
 // to opt it out of the runtime nil-check when nil IS a valid output.
-server := q.Try(q.Assemble[*Server](newConfig, openDB, newServer).Release())
+server := q.Try(q.Assemble[*Server](newConfig, openDB, newServer).DeferCleanup())
 
 // In main, manage shutdown explicitly:
 func main() {
-    server, shutdown, err := q.Assemble[*Server](newConfig, openDB, newServer).NoRelease()
+    server, shutdown, err := q.Assemble[*Server](newConfig, openDB, newServer).NoDeferCleanup()
     if err != nil { log.Fatal(err) }
     defer shutdown() // reverse-topo, blocking; idempotent
     server.Run()
@@ -327,12 +327,12 @@ func main() {
 // receive it via interface satisfaction. q.WithAssemblyDebug enables
 // per-step trace output for diagnosing wiring.
 ctx := q.WithAssemblyDebug(context.Background())
-server := q.Unwrap(q.Assemble[*Server](ctx, newConfig, newDB, newServer).Release())
+server := q.Unwrap(q.Assemble[*Server](ctx, newConfig, newDB, newServer).DeferCleanup())
 
 // q.AssembleAll[T] for plugin / handler / middleware aggregation —
 // every recipe whose output is assignable to T contributes one slice
 // element, in declaration order.
-plugins := q.Unwrap(q.AssembleAll[Plugin](newAuth, newLog, newMetrics).Release())
+plugins := q.Unwrap(q.AssembleAll[Plugin](newAuth, newLog, newMetrics).DeferCleanup())
 
 // q.AssembleStruct[T] decomposes T's fields into separate dep targets.
 // Useful when several distinct products share a common dep set —
@@ -342,7 +342,7 @@ type App struct {
     Worker *Worker
     Stats  *Stats
 }
-app := q.Unwrap(q.AssembleStruct[App](newConfig, newDB, newServer, newWorker, newStats).Release())
+app := q.Unwrap(q.AssembleStruct[App](newConfig, newDB, newServer, newWorker, newStats).DeferCleanup())
 ```
 
 When a recipe is missing or duplicated or the graph cycles, the build fails with a tree visualisation of what the resolver sees. See [`docs/api/assemble.md`](docs/api/assemble.md).

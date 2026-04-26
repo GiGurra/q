@@ -43,8 +43,8 @@ const (
 	familyNotNilE
 	familyCheck   // q.Check(err) — void, always formDiscard
 	familyCheckE  // q.CheckE(err).<method> — void chain, always formDiscard
-	familyOpen    // q.Open(v, err).Release(cleanup) — value chain, always Release-terminated
-	familyOpenE   // q.OpenE(v, err).<shape?>.Release(cleanup) — value chain with optional shape
+	familyOpen    // q.Open(v, err).DeferCleanup(cleanup) — value chain, always Release-terminated
+	familyOpenE   // q.OpenE(v, err).<shape?>.DeferCleanup(cleanup) — value chain with optional shape
 	familyOk      // q.Ok(v, ok) — comma-ok bubble using ErrNotOk sentinel
 	familyOkE     // q.OkE(v, ok).<method> — comma-ok chain
 	familyTrace   // q.Trace(v, err) — bubble prefixed with call-site file:line
@@ -186,30 +186,30 @@ type qSubCall struct {
 	// return in place of this call's source span.
 	OuterCall ast.Expr
 
-	// ReleaseArg is the cleanup function passed to .Release in the
+	// CleanupArg is the cleanup function passed to .DeferCleanup in the
 	// Open family (familyOpen / familyOpenE). nil for every other
-	// family AND for the .NoRelease() variant. When non-nil, the
+	// family AND for the .NoDeferCleanup() variant. When non-nil, the
 	// rewriter emits a `defer (<cleanup>)(<resultVar>)` line on the
 	// success path so the cleanup fires when the enclosing function
 	// returns.
-	ReleaseArg ast.Expr
+	CleanupArg ast.Expr
 
-	// NoRelease is true when the Open chain terminates with the
-	// zero-arg .NoRelease() instead of .Release(cleanup). Bubble
+	// NoDeferCleanup is true when the Open chain terminates with the
+	// zero-arg .NoDeferCleanup() instead of .DeferCleanup(cleanup). Bubble
 	// path is identical; the rewriter skips the defer-cleanup line.
-	NoRelease bool
+	NoDeferCleanup bool
 
-	// AutoRelease is true when the Open chain terminates with the
-	// zero-arg .Release() form. The preprocessor infers the cleanup
+	// InferCleanup is true when the Open chain terminates with the
+	// zero-arg .DeferCleanup() form. The preprocessor infers the cleanup
 	// from the resource's type at compile time (channel close, or
 	// a Close() method). The typecheck pass populates AutoCleanup
 	// with the inferred kind; the rewriter consults AutoCleanup
 	// when emitting the defer line. Mutually exclusive with
-	// NoRelease and with a non-nil ReleaseArg.
-	AutoRelease bool
+	// NoDeferCleanup and with a non-nil CleanupArg.
+	InferCleanup bool
 
 	// AutoCleanup is the cleanup form the typecheck pass inferred
-	// for an AutoRelease=true call. Zero (cleanupUnknown) until
+	// for an InferCleanup=true call. Zero (cleanupUnknown) until
 	// the typecheck pass has run; if still zero by rewriter time
 	// the typecheck pass either skipped (no importcfg) or emitted
 	// a diagnostic that aborted the build.
@@ -397,9 +397,9 @@ type qSubCall struct {
 
 	// AssembleChain identifies the chain terminator on a q.Assemble /
 	// q.AssembleAll / q.AssembleStruct call:
-	//   - assembleChainRelease — `.Release()` — defer-injected cleanup
-	//     in the enclosing function, returns (T, error).
-	//   - assembleChainNoRelease — `.NoRelease()` — caller-managed
+	//   - assembleChainDeferCleanup   — `.DeferCleanup()` — defer-injected
+	//     cleanup in the enclosing function, returns (T, error).
+	//   - assembleChainNoDeferCleanup — `.NoDeferCleanup()` — caller-managed
 	//     shutdown closure, returns (T, func(), error).
 	// Populated by the scanner when the chain is detected. Zero
 	// (assembleChainNone) for non-chained calls — bare q.Assemble[T](...)
@@ -425,13 +425,13 @@ type qSubCall struct {
 // assembleChain enumerates the chain terminator on an Assemble*
 // family call. None means the user wrote a bare `q.Assemble[T](...)`
 // with no chain — invalid; the rewriter surfaces a diagnostic
-// pointing the user at .Release() or .NoRelease().
+// pointing the user at .DeferCleanup() or .NoDeferCleanup().
 type assembleChain int
 
 const (
 	assembleChainNone assembleChain = iota
-	assembleChainRelease
-	assembleChainNoRelease
+	assembleChainDeferCleanup
+	assembleChainNoDeferCleanup
 )
 
 // matchCase is one arm of a q.Match expression — either a
@@ -545,9 +545,9 @@ type assembleStep struct {
 	AutoCleanup cleanupKind
 }
 
-// cleanupKind is the inferred cleanup form for q.Open(...).Release()
+// cleanupKind is the inferred cleanup form for q.Open(...).DeferCleanup()
 // (zero-arg, auto-inferred). The typecheck pass populates it on
-// each AutoRelease qSubCall; the rewriter dispatches on it when
+// each InferCleanup qSubCall; the rewriter dispatches on it when
 // emitting the defer line.
 type cleanupKind int
 
@@ -1298,7 +1298,7 @@ func hasQRefInSub(sub qSubCall, alias string) bool {
 			return true
 		}
 	}
-	if hasQRef(sub.ReleaseArg, alias) {
+	if hasQRef(sub.CleanupArg, alias) {
 		return true
 	}
 	if hasQRef(sub.AsType, alias) {
@@ -1657,8 +1657,8 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 		return qSubCall{}, false, nil
 	}
 	// q.Assemble / q.AssembleAll / q.AssembleStruct are matched only
-	// in chain form (`q.Assemble[T](...).Release()` or `.NoRelease()`).
-	// The chain is detected at the outer `.Release` / `.NoRelease`
+	// in chain form (`q.Assemble[T](...).DeferCleanup()` or `.NoDeferCleanup()`).
+	// The chain is detected at the outer `.DeferCleanup` / `.NoDeferCleanup`
 	// call site below. Bare entries (without a chain terminator) fall
 	// through to the unsupported-shape diagnostic; Go's typechecker
 	// will also reject the call because q.Assemble returns
@@ -1890,14 +1890,15 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 	}
 
 	// Chain on q.TryE / q.NotNilE / q.CheckE, or a q.Open / q.OpenE
-	// chain terminated by .Release.
+	// chain terminated by .AutoCleanup.
 	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-		// .Release / .NoRelease terminal — q.Open / q.OpenE chain OR
-		// q.Assemble / q.AssembleAll / q.AssembleStruct chain. Disambiguate
-		// by inspecting the receiver: if it's q.Assemble[T](...) (an
-		// indexed-selector call), dispatch to classifyAssembleChain;
-		// otherwise fall through to q.Open's classifier.
-		if sel.Sel.Name == "Release" || sel.Sel.Name == "NoRelease" {
+		// .AutoCleanup / .NoAutoCleanup terminal — q.Open / q.OpenE
+		// chain OR q.Assemble / q.AssembleAll / q.AssembleStruct
+		// chain. Disambiguate by inspecting the receiver: if it's
+		// q.Assemble[T](...) (an indexed-selector call), dispatch to
+		// classifyAssembleChain; otherwise fall through to q.Open's
+		// classifier.
+		if sel.Sel.Name == "DeferCleanup" || sel.Sel.Name == "NoDeferCleanup" {
 			if entry, ok := sel.X.(*ast.CallExpr); ok {
 				if isAssembleEntry(entry, alias) {
 					return classifyAssembleChain(call, sel, entry, alias)
@@ -2136,22 +2137,22 @@ func peelRecovers(entry *ast.CallExpr) (*ast.CallExpr, []recoverStep, error) {
 }
 
 // classifyOpenChain recognises the q.Open / q.OpenE terminal
-// Release / NoRelease shape, optionally with one intermediate shape
+// DeferCleanup / NoDeferCleanup shape, optionally with one intermediate shape
 // method between the entry and the terminal:
 //
-//	q.Open(call()).Release(cleanup)
-//	q.Open(call()).NoRelease()                       // explicit no-cleanup
-//	q.OpenE(call()).Release(cleanup)
-//	q.OpenE(call()).NoRelease()
-//	q.OpenE(call()).<Shape>(args).Release(cleanup)   // Shape ∈ Err/ErrF/Wrap/Wrapf/Catch
-//	q.OpenE(call()).<Shape>(args).NoRelease()
+//	q.Open(call()).DeferCleanup(cleanup)
+//	q.Open(call()).NoDeferCleanup()                       // explicit no-cleanup
+//	q.OpenE(call()).DeferCleanup(cleanup)
+//	q.OpenE(call()).NoDeferCleanup()
+//	q.OpenE(call()).<Shape>(args).DeferCleanup(cleanup)   // Shape ∈ Err/ErrF/Wrap/Wrapf/Catch
+//	q.OpenE(call()).<Shape>(args).NoDeferCleanup()
 //
-// call is the outer Release/NoRelease CallExpr; sel is its .Fun
-// SelectorExpr (sel.Sel.Name ∈ {"Release", "NoRelease"}). expr is
+// call is the outer DeferCleanup/NoDeferCleanup CallExpr; sel is its .Fun
+// SelectorExpr (sel.Sel.Name ∈ {"DeferCleanup", "NoDeferCleanup"}). expr is
 // the source expression (== call) used for OuterCall span.
 // isAssembleEntry reports whether the given CallExpr is the entry
 // call of a q.Assemble / q.AssembleAll / q.AssembleStruct chain
-// (i.e. the receiver of `.Release()` / `.NoRelease()` in an Assemble
+// (i.e. the receiver of `.DeferCleanup()` / `.NoDeferCleanup()` in an Assemble
 // chain). The differentiator from q.Open is that Assemble-family
 // entries are *indexed* selector calls (`q.Assemble[T](...)`) — they
 // always carry an explicit type argument.
@@ -2168,8 +2169,8 @@ func isAssembleEntry(call *ast.CallExpr, alias string) bool {
 	return false
 }
 
-// classifyAssembleChain captures one `q.Assemble[T](...).Release()`
-// or `.NoRelease()` chain as a single call shape. The receiver
+// classifyAssembleChain captures one `q.Assemble[T](...).DeferCleanup()`
+// or `.NoDeferCleanup()` chain as a single call shape. The receiver
 // `entry` is the q.Assemble* call carrying the type argument and
 // recipe list; the outer `call` carries the chain method invocation
 // (no args; both terminators are zero-arg today).
@@ -2177,9 +2178,9 @@ func classifyAssembleChain(call *ast.CallExpr, sel *ast.SelectorExpr, entry *ast
 	if len(call.Args) != 0 {
 		return qSubCall{}, false, fmt.Errorf("q.Assemble[T](...).%s takes no arguments; got %d", sel.Sel.Name, len(call.Args))
 	}
-	chain := assembleChainRelease
-	if sel.Sel.Name == "NoRelease" {
-		chain = assembleChainNoRelease
+	chain := assembleChainDeferCleanup
+	if sel.Sel.Name == "NoDeferCleanup" {
+		chain = assembleChainNoDeferCleanup
 	}
 
 	var fam family
@@ -2278,25 +2279,25 @@ func entryNameForFamily(f family) string {
 
 func classifyOpenChain(call *ast.CallExpr, sel *ast.SelectorExpr, alias string) (qSubCall, bool, error) {
 	expr := ast.Expr(call)
-	noRelease := sel.Sel.Name == "NoRelease"
+	noDeferCleanup := sel.Sel.Name == "NoDeferCleanup"
 
 	var (
 		releaseArg  ast.Expr
-		autoRelease bool
+		inferCleanup bool
 	)
 	switch {
-	case noRelease:
+	case noDeferCleanup:
 		if len(call.Args) != 0 {
-			return qSubCall{}, false, fmt.Errorf("q.Open/OpenE(...).NoRelease takes no arguments; got %d", len(call.Args))
+			return qSubCall{}, false, fmt.Errorf("q.Open/OpenE(...).NoDeferCleanup takes no arguments; got %d", len(call.Args))
 		}
 	case len(call.Args) == 0:
-		// .Release() with no args — preprocessor infers the cleanup
+		// .DeferCleanup() with no args — preprocessor infers the cleanup
 		// from the resource type at compile time.
-		autoRelease = true
+		inferCleanup = true
 	case len(call.Args) == 1:
 		releaseArg = call.Args[0]
 	default:
-		return qSubCall{}, false, fmt.Errorf("q.Open/OpenE(...).Release accepts at most one cleanup function; got %d", len(call.Args))
+		return qSubCall{}, false, fmt.Errorf("q.Open/OpenE(...).DeferCleanup accepts at most one cleanup function; got %d", len(call.Args))
 	}
 
 	inner, ok := sel.X.(*ast.CallExpr)
@@ -2316,13 +2317,13 @@ func classifyOpenChain(call *ast.CallExpr, sel *ast.SelectorExpr, alias string) 
 			Family:      family,
 			InnerExpr:   entry.Args[0],
 			OuterCall:   expr,
-			ReleaseArg:  releaseArg,
-			NoRelease:   noRelease,
-			AutoRelease: autoRelease,
+			CleanupArg:  releaseArg,
+			NoDeferCleanup: noDeferCleanup,
+			InferCleanup: inferCleanup,
 		}, true, nil
 	}
 
-	// Case 2: inner is a shape-method call on q.OpenE: q.OpenE(x).<Shape>(args).<Release|NoRelease>().
+	// Case 2: inner is a shape-method call on q.OpenE: q.OpenE(x).<Shape>(args).<DeferCleanup|NoDeferCleanup>().
 	shapeSel, ok := inner.Fun.(*ast.SelectorExpr)
 	if !ok {
 		return qSubCall{}, false, nil
@@ -2353,9 +2354,9 @@ func classifyOpenChain(call *ast.CallExpr, sel *ast.SelectorExpr, alias string) 
 		MethodArgs:  inner.Args,
 		InnerExpr:   entry.Args[0],
 		OuterCall:   expr,
-		ReleaseArg:  releaseArg,
-		NoRelease:   noRelease,
-		AutoRelease: autoRelease,
+		CleanupArg:  releaseArg,
+		NoDeferCleanup: noDeferCleanup,
+		InferCleanup: inferCleanup,
 	}, true, nil
 }
 

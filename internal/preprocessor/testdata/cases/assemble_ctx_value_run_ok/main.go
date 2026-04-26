@@ -24,6 +24,6 @@ func newServer(d *DB) *Server                  { return &Server{db: d} }
 
 func main() {
 	ctx := context.WithValue(context.Background(), "k", "v")
-	s := q.Unwrap(q.Assemble[*Server](ctx, newConfig, newDB, newServer).Release())
+	s := q.Unwrap(q.Assemble[*Server](ctx, newConfig, newDB, newServer).DeferCleanup())
 	fmt.Println("ctx threaded:", s.db.ctx.Value("k"))
 }

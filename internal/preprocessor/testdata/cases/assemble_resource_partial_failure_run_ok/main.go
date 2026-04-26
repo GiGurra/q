@@ -1,4 +1,4 @@
-// Fixture: q.Assemble[T](recipes...).NoRelease() — partial-failure
+// Fixture: q.Assemble[T](recipes...).NoDeferCleanup() — partial-failure
 // auto-cleanup. When a recipe mid-chain fails, the IIFE itself fires
 // the cleanups for everything successfully built so far (in reverse-
 // topo order) before returning the error. The user's shutdown
@@ -38,7 +38,7 @@ func openServer(d *DB, c *Cache) (*Server, func(), error) {
 }
 
 func main() {
-	server, shutdown, err := q.Assemble[*Server](newConfig, openDB, openCache, openServer).NoRelease()
+	server, shutdown, err := q.Assemble[*Server](newConfig, openDB, openCache, openServer).NoDeferCleanup()
 
 	fmt.Println("err is errBoot:", errors.Is(err, errBoot))
 	fmt.Println("server nil:", server == nil)

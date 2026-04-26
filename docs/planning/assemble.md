@@ -1,13 +1,13 @@
 # q.Assemble — Phase 4 plan (resume point)
 
-This document is the resume-point for the parked Phase 4 work on `q.Assemble`. The current public surface (single-call DI, `q.AssembleAll`, `q.AssembleStruct`, full resource-lifetime management with `.Release()` / `.NoRelease()` chain, debug tracing, `q.PermitNil`) is documented in [`docs/api/assemble.md`](../api/assemble.md). The list below is what is *not* shipped.
+This document is the resume-point for the parked Phase 4 work on `q.Assemble`. The current public surface (single-call DI, `q.AssembleAll`, `q.AssembleStruct`, full resource-lifetime management with `.DeferCleanup()` / `.NoDeferCleanup()` chain, debug tracing, `q.PermitNil`) is documented in [`docs/api/assemble.md`](../api/assemble.md). The list below is what is *not* shipped.
 
 A cold-state reader can pick up Phase 4 from this doc plus the references below.
 
 ## Where things live
 
 - **API doc:** [`docs/api/assemble.md`](../api/assemble.md) — current public surface, full happy/sad-path coverage, every diagnostic shape with examples.
-- **Stubs:** [`pkg/q/assemble.go`](../../pkg/q/assemble.go) — `Assemble[T]`, `AssembleAll[T]`, `AssembleStruct[T]`, `AssemblyResult[T]` chain (`Release`, `NoRelease`), `PermitNil`, `WithAssemblyDebug`, `WithAssemblyDebugWriter`, `AssemblyDebugWriter`, `LogCloseErr`. `q.Unwrap` and `q.UnwrapE` live in [`pkg/q/q.go`](../../pkg/q/q.go) (plain runtime; not rewritten).
+- **Stubs:** [`pkg/q/assemble.go`](../../pkg/q/assemble.go) — `Assemble[T]`, `AssembleAll[T]`, `AssembleStruct[T]`, `AssemblyResult[T]` chain (`DeferCleanup`, `NoDeferCleanup`), `PermitNil`, `WithAssemblyDebug`, `WithAssemblyDebugWriter`, `AssemblyDebugWriter`, `LogCloseErr`. `q.Unwrap` and `q.UnwrapE` live in [`pkg/q/q.go`](../../pkg/q/q.go) (plain runtime; not rewritten).
 - **Implementation:** [`internal/preprocessor/assemble.go`](../../internal/preprocessor/assemble.go) — `resolveAssemble` (typecheck), `buildAssembleReplacement` + `buildAssembleBody` (rewriter). Phase 4 hooks here.
 - **Scanner:** [`internal/preprocessor/scanner.go`](../../internal/preprocessor/scanner.go) — `familyAssemble*`, `qSubCall.AssembleRecipes`, `qSubCall.AssemblePermitNil`, `qSubCall.AssembleCtxDepKey`.
 - **Tests:**
@@ -20,7 +20,7 @@ ctx-attached opt-in for parallel topo-wave construction. Like `q.WithAssemblyDeb
 
 ```go
 ctx := q.WithAssemblyPar(context.Background(), 4) // up to 4 concurrent recipes per wave
-server := q.Unwrap(q.Assemble[*Server](ctx, newConfig, newDB, newCache, newAuth, newServer).Release())
+server := q.Unwrap(q.Assemble[*Server](ctx, newConfig, newDB, newCache, newAuth, newServer).DeferCleanup())
 ```
 
 Use case: slow constructors (DB ping, remote config fetch, secret retrieval, schema validation) where total assembly time matters. Sequential default keeps deterministic startup order — which matters for logs / metrics / audit trails — and parallel is opt-in.

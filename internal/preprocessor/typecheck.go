@@ -52,13 +52,13 @@ import (
 // checkErrorSlots type-checks the package and validates that every
 // recognised q.* call site has the built-in `error` interface at
 // its error slot. The same type-check pass also infers cleanups for
-// any q.Open(...).Release() calls the user wrote with no args
-// (AutoRelease=true): each is mutated in place with an
+// any q.Open(...).DeferCleanup() calls the user wrote with no args
+// (InferCleanup=true): each is mutated in place with an
 // AutoCleanup kind, or surfaces a diagnostic if T's shape is
 // unrecognised.
 //
 // Returns a list of diagnostics (one per offending call). A nil or
-// empty result means every slot checks out and every AutoRelease
+// empty result means every slot checks out and every InferCleanup
 // has a resolved cleanup — the caller proceeds to the rewrite
 // pass. A non-empty result aborts the build via planUserPackage's
 // diag path.
@@ -66,7 +66,7 @@ import (
 // If the type check itself cannot run (no importcfg, importer
 // construction fails, pkgPath empty), returns nil — we are
 // strictly a lint; the real compile will fail on anything q's
-// own rewrite pass can't handle. AutoRelease calls in this case
+// own rewrite pass can't handle. InferCleanup calls in this case
 // reach the rewriter with cleanupUnknown and produce an explicit
 // runtime panic via panicUnrewritten on the q.Open stub if the
 // rewriter can't emit a defer.
@@ -108,8 +108,8 @@ func checkErrorSlotsWithInfo(fset *token.FileSet, pkgPath, importcfgPath string,
 			if d, ok := validateSlot(fset, *sc, info, errType); ok {
 				diags = append(diags, d)
 			}
-			if sc.AutoRelease {
-				if d, ok := inferAutoCleanup(fset, sc, info, errType); ok {
+			if sc.InferCleanup {
+				if d, ok := inferDeferCleanup(fset, sc, info, errType); ok {
 					diags = append(diags, d)
 				}
 			}
@@ -165,7 +165,7 @@ func checkErrorSlotsWithInfo(fset *token.FileSet, pkgPath, importcfgPath string,
 
 	// Resource-escape detection. Independent of the type-resolution
 	// passes above — purely syntactic, but it consults the scanner's
-	// classified shapes to recognise q.Open(...).Release(...) bindings.
+	// classified shapes to recognise q.Open(...).DeferCleanup(...) bindings.
 	diags = append(diags, checkResourceEscapes(fset, files, shapes)...)
 
 	return info, diags
@@ -1020,7 +1020,7 @@ func enumFamilyLabel(f family) string {
 	return "q.Enum*"
 }
 
-// inferAutoCleanup populates sc.AutoCleanup with the cleanup form
+// inferDeferCleanup populates sc.AutoCleanup with the cleanup form
 // inferred from sc's resource type (the first return of InnerExpr).
 // Returns a diagnostic when the type doesn't expose a recognised
 // cleanup shape (channel / Close()/error / Close()).
@@ -1037,8 +1037,8 @@ func enumFamilyLabel(f family) string {
 //
 // Anything else is rejected with a diagnostic naming T and
 // suggesting the two ways to fix the build (explicit cleanup or
-// .NoRelease()).
-func inferAutoCleanup(fset *token.FileSet, sc *qSubCall, info *types.Info, errType types.Type) (Diagnostic, bool) {
+// .NoDeferCleanup()).
+func inferDeferCleanup(fset *token.FileSet, sc *qSubCall, info *types.Info, errType types.Type) (Diagnostic, bool) {
 	t := info.TypeOf(sc.InnerExpr)
 	if t == nil {
 		// types pass didn't resolve — leave AutoCleanup zero. The
@@ -1060,10 +1060,10 @@ func inferAutoCleanup(fset *token.FileSet, sc *qSubCall, info *types.Info, errTy
 	// 3) No match — diagnostic.
 	pos := fset.Position(sc.OuterCall.Pos())
 	msg := fmt.Sprintf(
-		"q.Open/OpenE(...).Release() (auto) cannot infer a cleanup for type %s. "+
-			"Auto-Release supports channel types (rewrites to `close(v)`), and types with a "+
+		"q.Open/OpenE(...).DeferCleanup() (auto) cannot infer a cleanup for type %s. "+
+			"Auto-DeferCleanup supports channel types (rewrites to `close(v)`), and types with a "+
 			"`Close() error` or `Close()` method. Either pass an explicit cleanup function "+
-			"(`Release(myCleanup)`), or opt out with `.NoRelease()` if no cleanup is wanted.",
+			"(`Release(myCleanup)`), or opt out with `.NoDeferCleanup()` if no cleanup is wanted.",
 		resourceType.String(),
 	)
 	return Diagnostic{
@@ -1085,7 +1085,7 @@ func inferAutoCleanup(fset *token.FileSet, sc *qSubCall, info *types.Info, errTy
 //   - T has Close()       → cleanupCloseVoid (v.Close()).
 //   - T has Close() error → cleanupCloseErr  (_ = v.Close()).
 //
-// Reusable by both q.Open's auto-Release and q.Assemble's auto-
+// Reusable by both q.Open's auto-DeferCleanup and q.Assemble's auto-
 // detect on resource recipes whose T carries a Close shape but
 // whose recipe signature didn't declare an explicit cleanup.
 func inferCleanupKind(t, errType types.Type) cleanupKind {

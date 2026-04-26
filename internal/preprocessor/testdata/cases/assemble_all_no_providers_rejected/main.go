@@ -15,5 +15,5 @@ func newConfig() *Config { return &Config{} }
 
 func main() {
 	// *Config is not assignable to Plugin.
-	_, _ = q.AssembleAll[Plugin](newConfig).Release()
+	_, _ = q.AssembleAll[Plugin](newConfig).DeferCleanup()
 }

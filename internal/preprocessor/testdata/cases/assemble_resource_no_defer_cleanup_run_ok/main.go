@@ -1,9 +1,9 @@
-// Fixture: q.Assemble[T](recipes...).NoRelease() — caller-managed
+// Fixture: q.Assemble[T](recipes...).NoDeferCleanup() — caller-managed
 // shutdown closure. The IIFE returns (T, func(), error); the closure
 // is sync.OnceFunc-wrapped so duplicate invocations are safe.
 //
 // Validates:
-//   1. NoRelease returns 3 values usable directly.
+//   1. NoDeferCleanup returns 3 values usable directly.
 //   2. shutdown is idempotent (multiple calls = one teardown).
 //   3. Cleanup order is reverse-topo, blocking.
 //   4. shutdown is non-nil on error path too (no-op closure).
@@ -32,7 +32,7 @@ func openCache(d *DB) (*Cache, func(), error) {
 }
 
 func main() {
-	cache, shutdown, err := q.Assemble[*Cache](newConfig, openDB, openCache).NoRelease()
+	cache, shutdown, err := q.Assemble[*Cache](newConfig, openDB, openCache).NoDeferCleanup()
 	if err != nil {
 		fmt.Println("err:", err)
 		return

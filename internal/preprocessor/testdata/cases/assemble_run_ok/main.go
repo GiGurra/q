@@ -30,19 +30,19 @@ func newServer(d *DB, c *Cache, cfg *Config) *Server {
 // Tuple receive — recipes can appear in any order; the preprocessor
 // topo-sorts.
 func boot1() (*Server, error) {
-	return q.Assemble[*Server](newServer, newCache, newDB, newConfig).Release()
+	return q.Assemble[*Server](newServer, newCache, newDB, newConfig).DeferCleanup()
 }
 
 // q.Try unwraps to bare T inside a function returning error.
 func boot2() (*Server, error) {
-	s := q.Try(q.Assemble[*Server](newServer, newCache, newDB, newConfig).Release())
+	s := q.Try(q.Assemble[*Server](newServer, newCache, newDB, newConfig).DeferCleanup())
 	return s, nil
 }
 
 // Inline value as a recipe — its type IS the provided type.
 func boot3() (*Server, error) {
 	customCfg := &Config{DB: "override"}
-	return q.Assemble[*Server](customCfg, newDB, newCache, newServer).Release()
+	return q.Assemble[*Server](customCfg, newDB, newCache, newServer).DeferCleanup()
 }
 
 func main() {

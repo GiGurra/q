@@ -48,7 +48,7 @@ func newRecv() recv {
 func newApp(b bidi, r recv) *App { return &App{b: b, r: r} }
 
 func main() {
-	app, shutdown, err := q.Assemble[*App](newBidi, newRecv, newApp).NoRelease()
+	app, shutdown, err := q.Assemble[*App](newBidi, newRecv, newApp).NoDeferCleanup()
 	if err != nil {
 		fmt.Println("err:", err)
 		return

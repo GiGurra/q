@@ -763,7 +763,7 @@ type Conn struct{}
 func (*Conn) Close() {}
 
 func acquire() (int, error) {
-	conn := q.Open(dial()).Release((*Conn).Close)
+	conn := q.Open(dial()).DeferCleanup((*Conn).Close)
 	_ = conn
 	return 0, nil
 }
@@ -797,7 +797,7 @@ type Conn struct{}
 func (*Conn) Close() {}
 
 func acquire() (int, error) {
-	conn := q.OpenE(dial()).Wrap("dialing").Release((*Conn).Close)
+	conn := q.OpenE(dial()).Wrap("dialing").DeferCleanup((*Conn).Close)
 	_ = conn
 	return 0, nil
 }
@@ -827,7 +827,7 @@ type Conn struct{}
 func (*Conn) Close() {}
 
 func get() (*Conn, error) {
-	return q.Open(dial()).Release((*Conn).Close), nil
+	return q.Open(dial()).DeferCleanup((*Conn).Close), nil
 }
 
 func dial() (*Conn, error) { return nil, nil }

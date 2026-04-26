@@ -196,7 +196,7 @@ func (r UnwrapResult[T]) Catch(fn func(error) (T, error)) T {
 // method that takes a func(error) (T, error):
 //
 //	n := q.TryE(strconv.Atoi(s)).Catch(q.Const(0))
-//	conn := q.OpenE(dial(addr)).Catch(q.Const(fallbackConn)).Release((*Conn).Close)
+//	conn := q.OpenE(dial(addr)).Catch(q.Const(fallbackConn)).DeferCleanup((*Conn).Close)
 //
 // q.Const fits the err-taking Catch shape used by ErrResult /
 // OpenResultE / TraceResult / AwaitE chains. The no-arg-Catch shapes
@@ -501,14 +501,14 @@ func (r CheckResult) Catch(fn func(error) error) {
 }
 
 // Open begins a resource acquisition chain: pass in a (T, error)-
-// returning call, then chain `.Release(cleanup)` to bubble on error
+// returning call, then chain `.DeferCleanup(cleanup)` to bubble on error
 // and register `defer cleanup(resource)` on success in the enclosing
 // function. Reach for q.OpenE for chain-style custom error handling
 // around the bubble.
 //
 // Example:
 //
-//	conn := q.Open(dial(addr)).Release((*Conn).Close)
+//	conn := q.Open(dial(addr)).DeferCleanup((*Conn).Close)
 //	// equivalent, post-rewrite, to:
 //	//   conn, err := dial(addr)
 //	//   if err != nil { return zero, err }
@@ -519,62 +519,64 @@ func Open[T any](v T, err error) OpenResult[T] {
 }
 
 // OpenE is Open with chainable error-shape methods. Shape methods
-// (Err/ErrF/Wrap/Wrapf/Catch) return OpenResultE[T] so `.Release` can
-// still follow as the terminal. Release is the only member that
+// (Err/ErrF/Wrap/Wrapf/Catch) return OpenResultE[T] so `.DeferCleanup` can
+// still follow as the terminal. DeferCleanup is the only member that
 // returns T; everything else in the chain is a pass-through modifier
 // on the bubbled error.
 //
 // Example:
 //
-//	conn := q.OpenE(dial(addr)).Wrap("dialing").Release((*Conn).Close)
+//	conn := q.OpenE(dial(addr)).Wrap("dialing").DeferCleanup((*Conn).Close)
 func OpenE[T any](v T, err error) OpenResultE[T] {
 	panicUnrewritten("q.OpenE")
 	return OpenResultE[T]{}
 }
 
-// OpenResult is the plain Open handle — it exposes only .Release so
-// IDE completion stays focused on the common case.
+// OpenResult is the plain Open handle — it exposes only .DeferCleanup
+// (and .NoDeferCleanup) so IDE completion stays focused on the common
+// case.
 type OpenResult[T any] struct {
 	v   T
 	err error //nolint:unused // documented as part of the chain contract
 }
 
-// Release bubbles err on failure; registers `defer cleanup(v)` in
+// DeferCleanup bubbles err on failure; registers `defer cleanup(v)` in
 // the enclosing function and returns v on success.
 //
 // Two forms:
 //
-//   - Release(cleanup) — explicit cleanup function, used for any T.
-//   - Release()        — no args; the preprocessor infers the
+//   - DeferCleanup(cleanup) — explicit cleanup function, used for any T.
+//   - DeferCleanup()        — no args; the preprocessor infers the
 //     cleanup from T's type at compile time. Supported shapes:
-//     channel types (rewrites to `defer close(v)`), types with
-//     a `Close() error` method (rewrites to
-//     `defer func() { _ = v.Close() }()`), and types with a
-//     `Close()` method (rewrites to `defer v.Close()`). Any
-//     other T is a build error — pass an explicit cleanup or use
-//     .NoRelease() to opt out.
+//     bidirectional and send-only channels (rewrites to
+//     `defer close(v)` — recv-only channels are rejected since the
+//     consumer doesn't own close), types with a `Close() error`
+//     method (rewrites to `defer func() { _ = v.Close() }()`), and
+//     types with a `Close()` method (rewrites to `defer v.Close()`).
+//     Any other T is a build error — pass an explicit cleanup or
+//     use .NoDeferCleanup() to opt out.
 //
 // The variadic signature is the smallest Go-valid shape that
 // admits both forms; calls with two-or-more args are rejected by
 // the preprocessor.
-func (r OpenResult[T]) Release(cleanup ...func(T)) T {
-	panicUnrewritten("q.Open(...).Release")
+func (r OpenResult[T]) DeferCleanup(cleanup ...func(T)) T {
+	panicUnrewritten("q.Open(...).DeferCleanup")
 	return r.v
 }
 
-// NoRelease bubbles err on failure and returns v on success without
-// registering any deferred cleanup. Use it to make the
+// NoDeferCleanup bubbles err on failure and returns v on success
+// without registering any deferred cleanup. Use it to make the
 // "no cleanup needed" intent explicit at the call site, instead of
-// passing a do-nothing function to .Release. The bubble path is
-// identical to .Release's; only the success path differs.
-func (r OpenResult[T]) NoRelease() T {
-	panicUnrewritten("q.Open(...).NoRelease")
+// passing a do-nothing function to .DeferCleanup. The bubble path is
+// identical to .DeferCleanup's; only the success path differs.
+func (r OpenResult[T]) NoDeferCleanup() T {
+	panicUnrewritten("q.Open(...).NoDeferCleanup")
 	return r.v
 }
 
 // OpenResultE is the chain-capable Open handle. Shape methods return
-// OpenResultE[T] so Release can terminate the chain; Release itself
-// returns T.
+// OpenResultE[T] so DeferCleanup can terminate the chain; DeferCleanup
+// itself returns T.
 type OpenResultE[T any] struct {
 	v   T
 	err error //nolint:unused // documented as part of the chain contract
@@ -605,28 +607,28 @@ func (r OpenResultE[T]) Wrapf(format string, args ...any) OpenResultE[T] {
 }
 
 // Catch recovers or transforms: fn(err) returns (T, nil) to recover
-// with a value (replaces the bubble, the recovered T feeds Release)
+// with a value (replaces the bubble, the recovered T feeds DeferCleanup)
 // or (zero, newErr) to bubble newErr instead of the original.
 func (r OpenResultE[T]) Catch(fn func(error) (T, error)) OpenResultE[T] {
 	panicUnrewritten("q.OpenE(...).Catch")
 	return r
 }
 
-// Release bubbles the shaped error on failure; registers
+// DeferCleanup bubbles the shaped error on failure; registers
 // `defer cleanup(v)` in the enclosing function and returns v on
-// success. Same auto-cleanup inference as q.Open.Release when
+// success. Same auto-cleanup inference as q.Open.DeferCleanup when
 // called with zero args — see that doc for the supported T shapes.
-func (r OpenResultE[T]) Release(cleanup ...func(T)) T {
-	panicUnrewritten("q.OpenE(...).Release")
+func (r OpenResultE[T]) DeferCleanup(cleanup ...func(T)) T {
+	panicUnrewritten("q.OpenE(...).DeferCleanup")
 	return r.v
 }
 
-// NoRelease bubbles the shaped error on failure and returns v on
-// success without registering any deferred cleanup. Same semantics
-// as q.OpenResult.NoRelease but composes with the shape methods
-// (Wrap/Wrapf/Err/ErrF/Catch) on q.OpenE.
-func (r OpenResultE[T]) NoRelease() T {
-	panicUnrewritten("q.OpenE(...).NoRelease")
+// NoDeferCleanup bubbles the shaped error on failure and returns v
+// on success without registering any deferred cleanup. Same
+// semantics as q.OpenResult.NoDeferCleanup but composes with the
+// shape methods (Wrap/Wrapf/Err/ErrF/Catch) on q.OpenE.
+func (r OpenResultE[T]) NoDeferCleanup() T {
+	panicUnrewritten("q.OpenE(...).NoDeferCleanup")
 	return r.v
 }
 

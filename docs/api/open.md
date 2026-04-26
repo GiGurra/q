@@ -8,23 +8,23 @@ Resource acquisition with defer-on-success cleanup — the `(T, error)` bubble p
 func Open[T any](v T, err error) OpenResult[T]
 func OpenE[T any](v T, err error) OpenResultE[T]
 
-func (OpenResult[T])  Release(cleanup ...func(T)) T   // 0 or 1 args
-func (OpenResult[T])  NoRelease() T
-func (OpenResultE[T]) Release(cleanup ...func(T)) T   // 0 or 1 args
-func (OpenResultE[T]) NoRelease() T
+func (OpenResult[T])  DeferCleanup(cleanup ...func(T)) T   // 0 or 1 args
+func (OpenResult[T])  NoDeferCleanup() T
+func (OpenResultE[T]) DeferCleanup(cleanup ...func(T)) T   // 0 or 1 args
+func (OpenResultE[T]) NoDeferCleanup() T
 ```
 
-`.Release(...)` and `.NoRelease()` are both terminals — what actually returns `T`. `q.Open(v, err)` on its own returns an `OpenResult[T]` that exposes nothing else; you always chain one of the two terminals onto it. (Why a method, not an extra arg: Go's multi-return spread only fires when the multi-return call is the sole argument, so `q.Open(call(), cleanup)` won't compile. The terminal-method shape side-steps that.)
+`.DeferCleanup(...)` and `.NoDeferCleanup()` are both terminals — what actually returns `T`. `q.Open(v, err)` on its own returns an `OpenResult[T]` that exposes nothing else; you always chain one of the two terminals onto it. (Why a method, not an extra arg: Go's multi-return spread only fires when the multi-return call is the sole argument, so `q.Open(call(), cleanup)` won't compile. The terminal-method shape side-steps that.)
 
-`.Release` accepts zero or one cleanup function:
+`.DeferCleanup` accepts zero or one cleanup function:
 
-- `Release(cleanup)` — explicit cleanup, used for any T.
-- `Release()` — no args; the preprocessor infers the cleanup from T at compile time.
+- `DeferCleanup(cleanup)` — explicit cleanup, used for any T.
+- `DeferCleanup()` — no args; the preprocessor infers the cleanup from T at compile time.
 
 ## What `q.Open` does
 
 ```go
-conn := q.Open(dial(addr)).Release((*Conn).Close)
+conn := q.Open(dial(addr)).DeferCleanup((*Conn).Close)
 ```
 
 rewrites to:
@@ -40,14 +40,14 @@ defer ((*Conn).Close)(conn)
 On error: bubble, no cleanup registered (nothing was acquired).
 On success: register the deferred cleanup so it fires when the enclosing function returns (whether via normal return or via a later bubble).
 
-## `.Release()` (zero args) — preprocessor infers the cleanup
+## `.DeferCleanup()` (zero args) — preprocessor infers the cleanup
 
 For the common case (a `Closer`-shaped resource or a channel), let the preprocessor figure it out:
 
 ```go
-ch   := q.Open(makeChan()).Release()        // → defer close(ch)
-file := q.Open(os.Open(path)).Release()     // → defer func() { _ = file.Close() }()
-db   := q.Open(sql.Open(...)).Release()     // → defer func() { _ = db.Close() }()
+ch   := q.Open(makeChan()).DeferCleanup()        // → defer close(ch)
+file := q.Open(os.Open(path)).DeferCleanup()     // → defer func() { _ = file.Close() }()
+db   := q.Open(sql.Open(...)).DeferCleanup()     // → defer func() { _ = db.Close() }()
 ```
 
 The typecheck pass inspects the resource type T at compile time and dispatches:
@@ -57,39 +57,39 @@ The typecheck pass inspects the resource type T at compile time and dispatches:
 | channel type (`chan X`, `chan<- X`, `<-chan X`) | `defer close(v)`                       |
 | `Close() error` method      | `defer func() { _ = v.Close() }()` (close-time error discarded — pass an explicit cleanup if you need to handle it) |
 | `Close()` method (no return)| `defer v.Close()`                                          |
-| anything else               | build error — pass an explicit cleanup or `.NoRelease()`   |
+| anything else               | build error — pass an explicit cleanup or `.NoDeferCleanup()`   |
 
 Auto-cleanup composes with the OpenE shape methods:
 
 ```go
-file := q.OpenE(os.Open(path)).Wrap("loading config").Release()
+file := q.OpenE(os.Open(path)).Wrap("loading config").DeferCleanup()
 ```
 
-If the type doesn't expose a recognised cleanup shape (no `Close`, not a channel), the preprocessor surfaces a `file:line:col: q: …` diagnostic naming the type and pointing at the two acceptable fixes (explicit cleanup function or `.NoRelease()`).
+If the type doesn't expose a recognised cleanup shape (no `Close`, not a channel), the preprocessor surfaces a `file:line:col: q: …` diagnostic naming the type and pointing at the two acceptable fixes (explicit cleanup function or `.NoDeferCleanup()`).
 
-## `.NoRelease()` — opt-in "no cleanup" terminal
+## `.NoDeferCleanup()` — opt-in "no cleanup" terminal
 
-Some resources don't need a cleanup at the call site — for example, you might be passing the value off to a long-lived owner that handles teardown elsewhere, or the type genuinely has nothing to release. Spell that intent explicitly with `.NoRelease()`:
+Some resources don't need a cleanup at the call site — for example, you might be passing the value off to a long-lived owner that handles teardown elsewhere, or the type genuinely has nothing to release. Spell that intent explicitly with `.NoDeferCleanup()`:
 
 ```go
-val := q.Open(loadValue(key)).NoRelease()
+val := q.Open(loadValue(key)).NoDeferCleanup()
 // rewrites to:
 //     val, _qErr1 := loadValue(key)
 //     if _qErr1 != nil { return /* zeros */, _qErr1 }
 //     // no defer
 ```
 
-`.NoRelease()` shares the bubble path with `.Release(...)` — only the success-defer line is omitted. Composes with the OpenE shape methods just like Release does:
+`.NoDeferCleanup()` shares the bubble path with `.DeferCleanup(...)` — only the success-defer line is omitted. Composes with the OpenE shape methods just like Release does:
 
 ```go
-val := q.OpenE(loadValue(key)).Wrap("loading").NoRelease()
+val := q.OpenE(loadValue(key)).Wrap("loading").NoDeferCleanup()
 ```
 
-Why a separate terminal instead of `Release(q.NoRelease)` (a no-op cleanup)? Spelling it as a method makes the intent obvious in code review — "we acquired this and we're not closing it, here's the call that says so" — instead of needing to look up what `q.NoRelease` does in the docs.
+Why a separate terminal instead of `DeferCleanup(q.NoDeferCleanup)` (a no-op cleanup)? Spelling it as a method makes the intent obvious in code review — "we acquired this and we're not closing it, here's the call that says so" — instead of needing to look up what `q.NoDeferCleanup` does in the docs.
 
 ## Chain methods on `q.OpenE`
 
-All of these return `OpenResultE[T]` so `.Release` can still terminate the chain.
+All of these return `OpenResultE[T]` so `.DeferCleanup` can still terminate the chain.
 
 | Method                                | Bubbled error                                         |
 |---------------------------------------|-------------------------------------------------------|
@@ -97,12 +97,12 @@ All of these return `OpenResultE[T]` so `.Release` can still terminate the chain
 | `.ErrF(fn func(error) error)`         | `fn(capturedErr)`                                     |
 | `.Wrap(msg string)`                   | `fmt.Errorf("<msg>: %w", capturedErr)`                |
 | `.Wrapf(format string, args ...any)`  | `fmt.Errorf("<format>: %w", args..., capturedErr)`    |
-| `.Catch(fn func(error) (T, error))`   | On recover `(v, nil)` the recovered `v` is what `.Release`'s cleanup later fires on |
+| `.Catch(fn func(error) (T, error))`   | On recover `(v, nil)` the recovered `v` is what `.DeferCleanup`'s cleanup later fires on |
 
 Example chain:
 
 ```go
-conn := q.OpenE(dial(addr)).Wrap("dialing").Release((*Conn).Close)
+conn := q.OpenE(dial(addr)).Wrap("dialing").DeferCleanup((*Conn).Close)
 ```
 
 and with recovery:
@@ -110,10 +110,10 @@ and with recovery:
 ```go
 conn := q.OpenE(dial(addr)).Catch(func(e error) (*Conn, error) {
     if errors.Is(e, syscall.ECONNREFUSED) {
-        return fallbackConn(), nil    // recovered resource feeds Release's cleanup
+        return fallbackConn(), nil    // recovered resource feeds DeferCleanup's cleanup
     }
     return nil, e
-}).Release((*Conn).Close)
+}).DeferCleanup((*Conn).Close)
 ```
 
 ## LIFO cleanup across multiple Opens
@@ -122,8 +122,8 @@ Two `Open`s in sequence register two defers. Go defer semantics are LIFO, so the
 
 ```go
 func work(addr, path string) error {
-    conn := q.Open(dial(addr)).Release((*Conn).Close)
-    f    := q.Open(os.Open(path)).Release((*os.File).Close)
+    conn := q.Open(dial(addr)).DeferCleanup((*Conn).Close)
+    f    := q.Open(os.Open(path)).DeferCleanup((*os.File).Close)
 
     // f.Close() runs first (innermost defer), then conn.Close().
     return process(conn, f)
@@ -137,20 +137,20 @@ If `os.Open` fails above, `conn` has already been acquired — its cleanup runs,
 Works in every position `q.Try` does:
 
 ```go
-conn := q.Open(dial()).Release(cleanup)                         // define
-conn  = q.Open(dial()).Release(cleanup)                         // assign
-        q.Open(dial()).Release(cleanup)                         // discard (side-effect only — cleanup registers)
-return  q.Open(dial()).Release(cleanup), nil                    // return-position
-id   := identify(q.Open(dial()).Release(cleanup))               // hoist
+conn := q.Open(dial()).DeferCleanup(cleanup)                         // define
+conn  = q.Open(dial()).DeferCleanup(cleanup)                         // assign
+        q.Open(dial()).DeferCleanup(cleanup)                         // discard (side-effect only — cleanup registers)
+return  q.Open(dial()).DeferCleanup(cleanup), nil                    // return-position
+id   := identify(q.Open(dial()).DeferCleanup(cleanup))               // hoist
 ```
 
 ## Resource-escape detection
 
-A `q.Open(...).Release(...)` value is alive *only* until the enclosing function returns — that's when the deferred cleanup fires. Letting the value escape that scope is a use-after-close in waiting. The preprocessor catches the obvious shapes and fails the build with a diagnostic.
+A `q.Open(...).DeferCleanup(...)` value is alive *only* until the enclosing function returns — that's when the deferred cleanup fires. Letting the value escape that scope is a use-after-close in waiting. The preprocessor catches the obvious shapes and fails the build with a diagnostic.
 
 Three death events make a binding "dead" from a given source point onward:
 
-1. **`q.Open(...).Release(...)` itself** — auto-defers cleanup. Dead from the assign line.
+1. **`q.Open(...).DeferCleanup(...)` itself** — auto-defers cleanup. Dead from the assign line.
 2. **`defer x.Close()`** — explicit user-written defer. Dead from the defer line.
 3. **`x.Close()`** — synchronous close. Dead from this point onward.
 
@@ -165,7 +165,7 @@ Once dead, the binding cannot escape via:
 
 One-hop alias tracking covers the common `c2 := c; return c2` shape. Deeper indirection (passing through function calls, returning from inner closures) is out of scope — flag-everything-that-might-escape produces too many false positives without a real flow analysis.
 
-`q.Open(...).NoRelease()` is the explicit "caller takes ownership" form and never makes the binding dead — return it freely.
+`q.Open(...).NoDeferCleanup()` is the explicit "caller takes ownership" form and never makes the binding dead — return it freely.
 
 ### `//q:no-escape-check` opt-out
 
@@ -174,7 +174,7 @@ Some test fixtures (notably tests of q.Open's mechanism itself) intentionally fa
 ```go
 //q:no-escape-check
 func channelAutoInner() (chan int, error) {
-    ch := q.Open(makeChan()).Release()
+    ch := q.Open(makeChan()).DeferCleanup()
     ch <- 7
     return ch, nil
 }
@@ -184,4 +184,4 @@ Real user code shouldn't need this — the patterns it suppresses are bug-shaped
 
 ## See also
 
-- [Design](../design.md#21-bare-bubble) — why `.Release` is terminal
+- [Design](../design.md#21-bare-bubble) — why `.DeferCleanup` is terminal

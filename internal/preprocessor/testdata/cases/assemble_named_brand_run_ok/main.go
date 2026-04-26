@@ -33,7 +33,7 @@ func newServer(p PrimaryDB, r ReplicaDB) *Server {
 }
 
 func main() {
-	s := q.Unwrap(q.Assemble[*Server](newPrimary, newReplica, newServer).Release())
+	s := q.Unwrap(q.Assemble[*Server](newPrimary, newReplica, newServer).DeferCleanup())
 	fmt.Println("primary:", s.primary)
 	fmt.Println("replica:", s.replica)
 }

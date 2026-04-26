@@ -4,10 +4,10 @@ package preprocessor
 // pattern where a function returns (or otherwise lets escape) a value
 // it has marked for closure. Three "death events" are recognised:
 //
-//  1. q.Open(...).Release(...) — auto-deferred close registered by
+//  1. q.Open(...).DeferCleanup(...) — auto-deferred close registered by
 //     the rewriter. The bound value is dead from the assign line
 //     onward, since the deferred cleanup fires when the function
-//     returns. q.Open(...).NoRelease() is the explicit "caller takes
+//     returns. q.Open(...).NoDeferCleanup() is the explicit "caller takes
 //     ownership" form and is never added to the dead set.
 //
 //  2. `defer <bind>.Close()` — explicit user-written defer. The
@@ -111,10 +111,10 @@ func hasNoEscapeCheckDirective(doc *ast.CommentGroup) bool {
 	return false
 }
 
-// collectAutoCloseOpens maps each q.Open(...).Release(...) call site
+// collectAutoCloseOpens maps each q.Open(...).DeferCleanup(...) call site
 // (statement position) to the LHS identifier name. Only formDefine
-// shapes whose Release leg registers a deferred close (explicit
-// ReleaseArg or AutoRelease) are included; .NoRelease() forms are
+// shapes whose DeferCleanup leg registers a deferred close (explicit
+// CleanupArg or InferCleanup) are included; .NoDeferCleanup() forms are
 // skipped — they don't make the binding dead.
 func collectAutoCloseOpens(shapes []callShape) map[token.Pos]string {
 	out := map[token.Pos]string{}
@@ -130,10 +130,10 @@ func collectAutoCloseOpens(shapes []callShape) map[token.Pos]string {
 			if sc.Family != familyOpen && sc.Family != familyOpenE {
 				continue
 			}
-			if sc.NoRelease {
+			if sc.NoDeferCleanup {
 				continue
 			}
-			if sc.ReleaseArg == nil && !sc.AutoRelease {
+			if sc.CleanupArg == nil && !sc.InferCleanup {
 				continue
 			}
 			out[sh.Stmt.Pos()] = ident.Name
@@ -175,7 +175,7 @@ func walkFuncBody(fset *token.FileSet, path string, body *ast.BlockStmt, autoClo
 // the inner statement-shape handlers. The dead set is mutated as
 // death events fire.
 //
-// Recursion model: for q.Open(...).Release(...) the binding is dead
+// Recursion model: for q.Open(...).DeferCleanup(...) the binding is dead
 // the moment it's introduced — escape diagnostics fire on any
 // reference anywhere in the remaining function body, including inside
 // conditionals. The same applies to function-body-level
@@ -205,9 +205,9 @@ func walkStmts(fset *token.FileSet, path string, stmts []ast.Stmt, dead map[stri
 func recognizeDeath(stmt ast.Stmt, dead map[string]string, deathSite map[string]ast.Node, autoCloseOpens map[token.Pos]string) {
 	switch s := stmt.(type) {
 	case *ast.AssignStmt:
-		// q.Open(...).Release(...) — keyed on stmt position.
+		// q.Open(...).DeferCleanup(...) — keyed on stmt position.
 		if name, ok := autoCloseOpens[stmt.Pos()]; ok {
-			dead[name] = "q.Open(...).Release(...) auto-defers cleanup"
+			dead[name] = "q.Open(...).DeferCleanup(...) auto-defers cleanup"
 			deathSite[name] = stmt
 			return
 		}

@@ -58,7 +58,7 @@ func main() {
 		q.PermitNil(newResNoErr),
 		q.PermitNil(inlineNil),
 		describe,
-	).NoRelease()
+	).NoDeferCleanup()
 
 	if err != nil {
 		fmt.Println("err:", err)

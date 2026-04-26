@@ -1,1 +1,1 @@
-c is passed to a goroutine after its close was registered (q.Open(...).Release(...) auto-defers cleanup); the caller would receive a closed/released resource
+c is passed to a goroutine after its close was registered (q.Open(...).DeferCleanup(...) auto-defers cleanup); the caller would receive a closed/released resource

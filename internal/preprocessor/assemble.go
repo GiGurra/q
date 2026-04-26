@@ -199,7 +199,7 @@ func resolveAssemble(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPat
 				// Resource-recipe shape: (T, func(), error). Accepted
 				// in any Assemble-family call — pure (T, error) and
 				// (T, func(), error) recipes mix freely. The chain
-				// terminator (.Release / .NoRelease) decides what
+				// terminator (.DeferCleanup / .NoDeferCleanup) decides what
 				// happens with the cleanups.
 				if !isZeroArgZeroReturnFunc(results.At(1).Type()) {
 					addProblem("recipe #%d (%s) second return is %s; for resource recipes the second return must be `func()`",
@@ -257,7 +257,7 @@ func resolveAssemble(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPat
 		//
 		// Only function recipes get auto-cleanup; inline values are
 		// user-owned and pass through unchanged. The chain
-		// terminator (.Release / .NoRelease) decides what happens
+		// terminator (.DeferCleanup / .NoDeferCleanup) decides what happens
 		// with the synthesised cleanup, same as explicit ones.
 		if ri.valid && !ri.isValue && !ri.isResource {
 			if kind := inferCleanupKind(ri.output, errType); kind != cleanupUnknown {
@@ -1003,25 +1003,25 @@ func buildAssembleReplacement(fset *token.FileSet, src []byte, sub qSubCall, sub
 		returnText = "[]" + elemText
 	}
 	body, fmtUsed := buildAssembleBody(fset, src, sub, subs, subTexts, returnText, alias)
-	// IIFE always returns (T, func(), error). For .NoRelease() this
-	// is the user-facing shape directly. For .Release() the rewriter
-	// wraps it with bind+defer in renderAssembleRelease (block emit).
+	// IIFE always returns (T, func(), error). For .NoDeferCleanup() this
+	// is the user-facing shape directly. For .DeferCleanup() the rewriter
+	// wraps it with bind+defer in renderAssembleDeferCleanup (block emit).
 	return fmt.Sprintf("(func() (%s, func(), error) {%s\n}())", returnText, body), fmtUsed
 }
 
 // buildAssembleSubText returns the text to substitute at the chain
 // call expression's source span. Branch on chain terminator:
-//   - .NoRelease() — the IIFE itself (returns (T, func(), error)).
-//   - .Release()   — a (T, error)-shaped placeholder expression that
+//   - .NoDeferCleanup() — the IIFE itself (returns (T, func(), error)).
+//   - .DeferCleanup()   — a (T, error)-shaped placeholder expression that
 //                    references the temps bound by the pre-statement
 //                    block. The pre-statement block is emitted
-//                    separately via buildAssembleReleaseBlock.
+//                    separately via buildAssembleDeferCleanupBlock.
 func buildAssembleSubText(fset *token.FileSet, src []byte, sub qSubCall, subs []qSubCall, subTexts []string, alias string, counter int) string {
 	text, _ := buildAssembleReplacement(fset, src, sub, subs, subTexts, alias)
-	if sub.AssembleChain != assembleChainRelease {
+	if sub.AssembleChain != assembleChainDeferCleanup {
 		return text
 	}
-	// For .Release(), the pre-statement block already bound:
+	// For .DeferCleanup(), the pre-statement block already bound:
 	//   _qDep<N>, _qShutdown<N>, _qAErr<N> := <IIFE>
 	// At the original call site we need a (T, error)-shaped value.
 	// Emit a tiny lambda that returns the cached temps — works in
@@ -1036,8 +1036,8 @@ func buildAssembleSubText(fset *token.FileSet, src []byte, sub qSubCall, subs []
 	return fmt.Sprintf("(func() (%s, error) { return %s, %s })()", returnText, depVar, errVar)
 }
 
-// buildAssembleReleaseBlock emits the pre-statement block injected
-// into the enclosing function for q.Assemble[T](...).Release(). The
+// buildAssembleDeferCleanupBlock emits the pre-statement block injected
+// into the enclosing function for q.Assemble[T](...).DeferCleanup(). The
 // block binds the IIFE result to caller-scope temps and defers the
 // shutdown closure so it fires when the enclosing function returns.
 //
@@ -1047,7 +1047,7 @@ func buildAssembleSubText(fset *token.FileSet, src []byte, sub qSubCall, subs []
 // On the IIFE's success path, _qAShut<N> is sync.OnceFunc-wrapped so
 // firing it via this defer is safe even if the user also calls it
 // manually (e.g. wires it to context.AfterFunc).
-func buildAssembleReleaseBlock(fset *token.FileSet, src []byte, sub qSubCall, subs []qSubCall, subTexts []string, alias string, counter int) string {
+func buildAssembleDeferCleanupBlock(fset *token.FileSet, src []byte, sub qSubCall, subs []qSubCall, subTexts []string, alias string, counter int) string {
 	text, _ := buildAssembleReplacement(fset, src, sub, subs, subTexts, alias)
 	depVar := fmt.Sprintf("_qADep%d", counter)
 	shutVar := fmt.Sprintf("_qAShut%d", counter)

@@ -54,7 +54,7 @@ func newApp(v *VoidCloser, e *ErrCloser, c chanWrap) *App {
 }
 
 func main() {
-	app, shutdown, err := q.Assemble[*App](newVoid, newErr, newChan, newApp).NoRelease()
+	app, shutdown, err := q.Assemble[*App](newVoid, newErr, newChan, newApp).NoDeferCleanup()
 	if err != nil {
 		fmt.Println("err:", err)
 		return

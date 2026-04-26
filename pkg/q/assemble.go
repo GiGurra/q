@@ -7,12 +7,12 @@ package q
 // calls building the requested target T. Returns AssemblyResult[T];
 // pick the chain terminator to set the resource-lifetime policy:
 //
-//	server, err := q.Assemble[*Server](newConfig, newDB, newServer).Release()
-//	server      := q.Try(q.Assemble[*Server](...).Release())    // inside (T, error)-returning fn
-//	server      := q.Unwrap(q.Assemble[*Server](...).Release()) // panic on err (main, init, tests)
-//	server      := q.TryE(q.Assemble[*Server](...).Release()).Wrap("server init") // chain shape
+//	server, err := q.Assemble[*Server](newConfig, newDB, newServer).DeferCleanup()
+//	server      := q.Try(q.Assemble[*Server](...).DeferCleanup())    // inside (T, error)-returning fn
+//	server      := q.Unwrap(q.Assemble[*Server](...).DeferCleanup()) // panic on err (main, init, tests)
+//	server      := q.TryE(q.Assemble[*Server](...).DeferCleanup()).Wrap("server init") // chain shape
 //
-//	server, shutdown, err := q.Assemble[*Server](...).NoRelease() // caller owns shutdown
+//	server, shutdown, err := q.Assemble[*Server](...).NoDeferCleanup() // caller owns shutdown
 //
 // context.Context isn't special — it's just another dependency. If
 // a recipe takes context.Context as an input, supply ctx as an
@@ -81,18 +81,18 @@ func LogCloseErr(err error, recipe string) {
 // AssembleAll / AssembleStruct. Pick a chain terminator to choose
 // the resource-lifetime policy:
 //
-//   - .Release()   — returns (T, error). Cleanups fire automatically
-//                    via a `defer` injected into the enclosing
-//                    function, in REVERSE topo order. The fast path
-//                    for "build it, use it, the function takes care
-//                    of teardown when it returns".
+//   - .DeferCleanup()   — returns (T, error). Cleanups fire automatically
+//                        via a `defer` injected into the enclosing
+//                        function, in REVERSE topo order. The fast path
+//                        for "build it, use it, the function takes care
+//                        of teardown when it returns".
 //
-//   - .NoRelease() — returns (T, func(), error). Caller takes manual
-//                    ownership of the shutdown closure (idempotent
-//                    via sync.OnceFunc). Use when the assembled
-//                    value's lifetime spans more than the enclosing
-//                    function — e.g. main() that hands `shutdown` to
-//                    a signal handler.
+//   - .NoDeferCleanup() — returns (T, func(), error). Caller takes manual
+//                        ownership of the shutdown closure (idempotent
+//                        via sync.OnceFunc). Use when the assembled
+//                        value's lifetime spans more than the enclosing
+//                        function — e.g. main() that hands `shutdown` to
+//                        a signal handler.
 //
 // Cleanups can come from two sources: explicit recipes returning
 // (T, func(), error), or auto-detected from T's type (Close() /
@@ -103,13 +103,13 @@ type AssemblyResult[T any] struct {
 	v T //nolint:unused // populated by the preprocessor-generated IIFE
 }
 
-// Release fires the assembled resource's cleanups via a `defer`
+// DeferCleanup fires the assembled resource's cleanups via a `defer`
 // injected into the enclosing function (reverse topo order).
 // Returns (T, error). The runtime body is unreachable in a
 // successful build.
 //
 //	func boot() (*Server, error) {
-//	    server, err := q.Assemble[*Server](newConfig, openDB, newServer).Release()
+//	    server, err := q.Assemble[*Server](newConfig, openDB, newServer).DeferCleanup()
 //	    if err != nil { return nil, err }
 //	    return server, nil
 //	}
@@ -117,29 +117,29 @@ type AssemblyResult[T any] struct {
 //
 // Compose with q.Try / q.Unwrap to drop the err:
 //
-//	server := q.Try(q.Assemble[*Server](recipes...).Release())
-func (r AssemblyResult[T]) Release() (T, error) {
-	panicUnrewritten("q.Assemble[...].Release")
+//	server := q.Try(q.Assemble[*Server](recipes...).DeferCleanup())
+func (r AssemblyResult[T]) DeferCleanup() (T, error) {
+	panicUnrewritten("q.Assemble[...].DeferCleanup")
 	var zero T
 	return zero, nil
 }
 
-// NoRelease returns (T, shutdown, error) without any defer-
+// NoDeferCleanup returns (T, shutdown, error) without any defer-
 // injection. The caller controls when shutdown fires. The closure
 // is idempotent (wraps sync.OnceFunc); duplicate calls are safe.
 //
-//	server, shutdown, err := q.Assemble[*Server](recipes...).NoRelease()
+//	server, shutdown, err := q.Assemble[*Server](recipes...).NoDeferCleanup()
 //	if err != nil { log.Fatal(err) }
 //	defer shutdown()
 //	context.AfterFunc(ctx, shutdown) // ctx cancel also triggers
-func (r AssemblyResult[T]) NoRelease() (T, func(), error) {
-	panicUnrewritten("q.Assemble[...].NoRelease")
+func (r AssemblyResult[T]) NoDeferCleanup() (T, func(), error) {
+	panicUnrewritten("q.Assemble[...].NoDeferCleanup")
 	var zero T
 	return zero, func() {}, nil
 }
 
 // Assemble builds T from the supplied recipes. Returns an
-// AssemblyResult[T]; pick `.Release()` or `.NoRelease()` to
+// AssemblyResult[T]; pick `.DeferCleanup()` or `.NoDeferCleanup()` to
 // terminate the chain and choose the resource-lifetime policy.
 //
 // The preprocessor resolves the dep graph at compile time, topo-
@@ -150,14 +150,14 @@ func (r AssemblyResult[T]) NoRelease() (T, func(), error) {
 // during shutdown.
 //
 //	// Auto-defer pattern (most common):
-//	server, err := q.Assemble[*Server](newConfig, openDB, newServer).Release()
+//	server, err := q.Assemble[*Server](newConfig, openDB, newServer).DeferCleanup()
 //
 //	// Manual control (graceful shutdown spans main's lifetime):
-//	server, shutdown, err := q.Assemble[*Server](recipes...).NoRelease()
+//	server, shutdown, err := q.Assemble[*Server](recipes...).NoDeferCleanup()
 //	defer shutdown()
 //
 //	// Compose with q.Try:
-//	server := q.Try(q.Assemble[*Server](recipes...).Release())
+//	server := q.Try(q.Assemble[*Server](recipes...).DeferCleanup())
 func Assemble[T any](recipes ...any) AssemblyResult[T] {
 	panicUnrewritten("q.Assemble")
 	return AssemblyResult[T]{}
@@ -170,12 +170,12 @@ func Assemble[T any](recipes ...any) AssemblyResult[T] {
 // provider shape: every assignable recipe contributes one slice
 // element in declaration order.
 //
-// Returns AssemblyResult[[]T]; pick .Release() or .NoRelease() to
+// Returns AssemblyResult[[]T]; pick .DeferCleanup() or .NoDeferCleanup() to
 // terminate. Same lifetime semantics as q.Assemble.
 //
 //	plugins, err := q.AssembleAll[Plugin](
 //	    newAuthPlugin, newLoggingPlugin, newMetricsPlugin,
-//	).Release()
+//	).DeferCleanup()
 func AssembleAll[T any](recipes ...any) AssemblyResult[[]T] {
 	panicUnrewritten("q.AssembleAll")
 	return AssemblyResult[[]T]{}
@@ -188,7 +188,7 @@ func AssembleAll[T any](recipes ...any) AssemblyResult[[]T] {
 // downstream consumers are written to handle a nil input.
 //
 //	// newOptionalCache may legitimately return nil ("no cache configured")
-//	cache, err := q.Assemble[*Cache](newConfig, q.PermitNil(newOptionalCache)).Release()
+//	cache, err := q.Assemble[*Cache](newConfig, q.PermitNil(newOptionalCache)).DeferCleanup()
 //
 // PermitNil is a typed identity at runtime — outside the
 // preprocessor it just returns recipe unchanged. The preprocessor
@@ -209,14 +209,14 @@ func PermitNil[T any](recipe T) T { return recipe }
 // The preprocessor finds a recipe per field type, builds the shared
 // dep graph once, and packs the results into the struct.
 //
-// Returns AssemblyResult[T]; pick .Release() or .NoRelease() to
+// Returns AssemblyResult[T]; pick .DeferCleanup() or .NoDeferCleanup() to
 // terminate. Same lifetime semantics as q.Assemble.
 //
 //	type App struct {
 //	    Server *Server
 //	    Worker *Worker
 //	}
-//	app, err := q.AssembleStruct[App](newConfig, openDB, newServer, newWorker).Release()
+//	app, err := q.AssembleStruct[App](newConfig, openDB, newServer, newWorker).DeferCleanup()
 //
 // q.AssembleStruct does NOT honor a recipe whose output IS T —
 // choosing this entry IS the signal that you want field

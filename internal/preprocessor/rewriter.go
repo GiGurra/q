@@ -803,13 +803,13 @@ func buildExprReplacement(fset *token.FileSet, src []byte, sub qSubCall) string 
 
 // isInPlaceSub is the sub-aware wrapper around isInPlaceFamily for
 // families whose in-place behaviour depends on call-site shape.
-// q.Assemble*'s `.Release()` chain injects a bind+defer block in
-// the enclosing function so it's NOT in-place; `.NoRelease()` just
+// q.Assemble*'s `.DeferCleanup()` chain injects a bind+defer block in
+// the enclosing function so it's NOT in-place; `.NoDeferCleanup()` just
 // substitutes the IIFE expression directly so it IS.
 func isInPlaceSub(sub qSubCall) bool {
 	switch sub.Family {
 	case familyAssemble, familyAssembleAll, familyAssembleStruct:
-		return sub.AssembleChain != assembleChainRelease
+		return sub.AssembleChain != assembleChainDeferCleanup
 	}
 	return isInPlaceFamily(sub.Family)
 }
@@ -1086,15 +1086,15 @@ func renderSubCall(fset *token.FileSet, src []byte, sh callShape, subIdx int, su
 		// fmt is needed when the body emits a runtime nil-check (uses
 		// fmt.Errorf to wrap q.ErrNil) OR when a ctx provider exists.
 		fmtUsed := assembleHasNilableStep(sub) || sub.AssembleCtxDepKey != ""
-		// .NoRelease() is in-place: the IIFE substitution at the
+		// .NoDeferCleanup() is in-place: the IIFE substitution at the
 		// chain call expression IS the result, returning 3 values.
-		// .Release() injects pre-statements (bind + defer) and
+		// .DeferCleanup() injects pre-statements (bind + defer) and
 		// substitutes the chain call with a (T, error)-shaped
 		// expression that re-uses the bound temps. Both shapes set
-		// subTexts[i] earlier; .Release() additionally returns a
+		// subTexts[i] earlier; .DeferCleanup() additionally returns a
 		// pre-statement block from this dispatch.
-		if sub.AssembleChain == assembleChainRelease {
-			block := buildAssembleReleaseBlock(fset, src, sub, sh.Calls, subTexts, alias, counter)
+		if sub.AssembleChain == assembleChainDeferCleanup {
+			block := buildAssembleDeferCleanupBlock(fset, src, sub, sh.Calls, subTexts, alias, counter)
 			return block, fmtUsed, false, false, nil
 		}
 		return "", fmtUsed, false, false, nil
@@ -1274,7 +1274,7 @@ func renderCheckE(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, c
 }
 
 // renderOpen produces the replacement for q.Open / q.OpenE chains
-// terminated by .Release. Shares the TryE shape-method vocabulary
+// terminated by .DeferCleanup. Shares the TryE shape-method vocabulary
 // for the bubble branch, and appends a `defer (cleanup)(resource)`
 // line on the success path so the cleanup fires when the enclosing
 // function returns.
@@ -1347,31 +1347,31 @@ func renderOpen(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, cou
 		return "", false, fmt.Errorf("renderOpen: unknown method %q", sub.Method)
 	}
 
-	if sub.NoRelease {
-		// .NoRelease() — bubble check only, no defer cleanup.
+	if sub.NoDeferCleanup {
+		// .NoDeferCleanup() — bubble check only, no defer cleanup.
 		return block, fmtUsed, nil
 	}
 	var deferLine string
-	if sub.AutoRelease {
-		text, err := autoReleaseDeferLine(sub, valueVar)
+	if sub.InferCleanup {
+		text, err := inferredDeferLine(sub, valueVar)
 		if err != nil {
 			return "", false, err
 		}
 		deferLine = text
 	} else {
-		cleanupText := exprTextSubst(fset, src, sub.ReleaseArg, subs, subTexts)
+		cleanupText := exprTextSubst(fset, src, sub.CleanupArg, subs, subTexts)
 		deferLine = fmt.Sprintf("defer (%s)(%s)", cleanupText, valueVar)
 	}
 	return block + "\n" + indent + deferLine, fmtUsed, nil
 }
 
-// autoReleaseDeferLine returns the defer line for a zero-arg
-// .Release() call, dispatching on the cleanup form the typecheck
+// inferredDeferLine returns the defer line for a zero-arg
+// .DeferCleanup() call, dispatching on the cleanup form the typecheck
 // pass inferred. cleanupUnknown is the "typecheck didn't run"
 // (no importcfg) fallback: emit no defer line. In real builds the
 // typecheck pass either runs and resolves a kind, or surfaces a
 // diagnostic that aborts before the rewriter is invoked.
-func autoReleaseDeferLine(sub qSubCall, valueVar string) (string, error) {
+func inferredDeferLine(sub qSubCall, valueVar string) (string, error) {
 	switch sub.AutoCleanup {
 	case cleanupChanClose:
 		return fmt.Sprintf("defer close(%s)", valueVar), nil

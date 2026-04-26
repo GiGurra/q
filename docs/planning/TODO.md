@@ -47,13 +47,13 @@ The persistent backlog for `q`. A cold-state reader can pick up here without re-
 
 ### Resource lifetime + dependency injection
 
-- **#83 ARC for non-RAM resources (long-term).** "Last-usage-site closes" is what Rust gets through linear types and what Swift / Objective-C get through reference counting. q's seed is already half-built: `q.Open` is the resource constructor, `.Release` is the destructor, the rewriter knows where every resource binding flows, and the resource-escape detection pass identifies when a binding outlives its function.
+- **#83 ARC for non-RAM resources (long-term).** "Last-usage-site closes" is what Rust gets through linear types and what Swift / Objective-C get through reference counting. q's seed is already half-built: `q.Open` is the resource constructor, `.DeferCleanup` is the destructor, the rewriter knows where every resource binding flows, and the resource-escape detection pass identifies when a binding outlives its function.
 
   The ambitious version: track every reference site of an Opened resource (including escapes) and, when escape is OK (e.g. handed to a goroutine that joins), insert refcount inc/dec at each ownership-transfer point so the resource closes at the *actual* last usage rather than the function boundary. Concretely:
 
   - Wrap each Open value in a generated `qRC[T]{value T; rc *atomic.Int32; cleanup func(T)}` shim.
   - At each transfer site (return, channel send, field store, goroutine spawn), emit `rc.Add(1)`. At each scope exit, emit `if rc.Add(-1) == 0 { cleanup(value) }`.
-  - The shim is invisible to user code — q.Open's existing surface (`Release`, `NoRelease`) stays — but the deferred cleanup becomes "decrement, free if last" instead of unconditional close.
+  - The shim is invisible to user code — q.Open's existing surface (`DeferCleanup`, `NoDeferCleanup`) stays — but the deferred cleanup becomes "decrement, free if last" instead of unconditional close.
 
   Big lift: needs flow analysis (or a heavy hand: rewrite every reference into shim-method calls), needs to interop with raw resource access (sometimes you do want the underlying `*Conn`), and adds a real per-call atomic. Probably not worth it for the 90% case (functions that own their own resources) — defer until profiles or user reports show resource ownership crosses function boundaries often enough that the existing diagnostics become annoying.
 
@@ -138,7 +138,7 @@ The persistent backlog for `q`. A cold-state reader can pick up here without re-
 
 ### Future / parking lot
 
-- **#84 — `q.Assemble` parallel construction (Phase 4).** Surface: `q.WithAssemblyPar(ctx, n)` rides on the ctx like `q.WithAssemblyDebug`; rewriter emits topo waves with `sync.WaitGroup` per wave. Phases 1–3 shipped (single-entry auto-derived DI, `AssembleAll`, `AssembleStruct`, AssemblyResult chain with `.Release()` / `.NoRelease()`). Parked because the sequential path is fast enough for current workloads — revisit if profiles show construction time as a measurable cost. Plan still lives in [`docs/planning/assemble.md`](assemble.md) for when it's picked back up.
+- **#84 — `q.Assemble` parallel construction (Phase 4).** Surface: `q.WithAssemblyPar(ctx, n)` rides on the ctx like `q.WithAssemblyDebug`; rewriter emits topo waves with `sync.WaitGroup` per wave. Phases 1–3 shipped (single-entry auto-derived DI, `AssembleAll`, `AssembleStruct`, AssemblyResult chain with `.DeferCleanup()` / `.NoDeferCleanup()`). Parked because the sequential path is fast enough for current workloads — revisit if profiles show construction time as a measurable cost. Plan still lives in [`docs/planning/assemble.md`](assemble.md) for when it's picked back up.
 
 - **#11 — `q.<X>` for is-nil-as-failure / comma-ok / etc.** Catch-all for any additional bubble triggers that surface later (e.g. `q.IfNil(x)` for error-less nil checks that don't want to spell `q.NotNilE(…).Err(ErrSomething)`). Existing bubble triggers cover the obvious cases; this is the umbrella for whatever turns up next.
 

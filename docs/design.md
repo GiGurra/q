@@ -18,7 +18,7 @@ This is the authoritative design document for `q`, the question-mark-operator pr
 v := q.Try(call)                                    // (T, error) — on err, bubble err
 p := q.NotNil(ptr)                                  // (*T)       — on nil, bubble q.ErrNil
      q.Check(errOnlyCall)                           // error      — on err, bubble err (stmt only; void return)
-c := q.Open(openCall).Release(cleanup)              // (T, error) + cleanup(T) — bubble on err; defer cleanup(c) on success
+c := q.Open(openCall).DeferCleanup(cleanup)              // (T, error) + cleanup(T) — bubble on err; defer cleanup(c) on success
 ```
 
 These are the 90% case. The bubble is unconditional: the source error (or sentinel) is forwarded unchanged to the enclosing function's return. `q.Open` is the one exception where "success" does more than pass the value through — it registers a deferred cleanup in the enclosing function, so the next thing this function's return does (normal or bubble) runs `cleanup(c)`.
@@ -46,16 +46,16 @@ p := q.NotNilE(ptr).Catch(fn)              // fn() (*T, error) — computed valu
     q.CheckE(err).Wrapf(format, args...)
     q.CheckE(err).Catch(fn)                // fn(err) error — nil suppresses, non-nil bubbles
 
-c := q.OpenE(openCall).Err(constErr).Release(cleanup)                                  // replace the err, then defer cleanup
-c := q.OpenE(openCall).Wrap(msg).Release(cleanup)                                      // wrap the err, then defer cleanup
-c := q.OpenE(openCall).Catch(func(e error) (T, error) { ... }).Release(cleanup)        // recover OR bubble, then defer cleanup on whichever T wins
+c := q.OpenE(openCall).Err(constErr).DeferCleanup(cleanup)                                  // replace the err, then defer cleanup
+c := q.OpenE(openCall).Wrap(msg).DeferCleanup(cleanup)                                      // wrap the err, then defer cleanup
+c := q.OpenE(openCall).Catch(func(e error) (T, error) { ... }).DeferCleanup(cleanup)        // recover OR bubble, then defer cleanup on whichever T wins
 ```
 
 `Catch` is the union of "transform the error" and "recover with a fallback value". Returning `(value, nil)` short-circuits the bubble and uses the value; returning `(zero, err)` bubbles `err`. The simpler methods (`Err`, `ErrF`, `Wrap`, `Wrapf`) are sugar for common shapes that `Catch` could express but that read better as named operations. For `q.OpenE`, the recovered value is what the deferred cleanup fires on — not the failed resource.
 
 ### 2.3 Constraints that shaped this surface
 
-**Why a chain instead of `q.NoErrf(call(), format, args…)`-style overloads?** Go's spread-multi-return-into-arguments rule fires only when the multi-return call is the *sole* argument. So `q.NoErrf(strconv.Atoi(s), "fmt", x)` is a compile error: once you add format args, you can no longer spread `(T, error)` into the leading two parameters. The chain side-steps this by making the multi-return call the only argument to `q.TryE`, then chaining a method whose receiver has already absorbed the spread. The same constraint is why `q.Open`'s cleanup arrives via a terminal `.Release(cleanup)` method rather than as a second argument to `q.Open(call(), cleanup)`.
+**Why a chain instead of `q.NoErrf(call(), format, args…)`-style overloads?** Go's spread-multi-return-into-arguments rule fires only when the multi-return call is the *sole* argument. So `q.NoErrf(strconv.Atoi(s), "fmt", x)` is a compile error: once you add format args, you can no longer spread `(T, error)` into the leading two parameters. The chain side-steps this by making the multi-return call the only argument to `q.TryE`, then chaining a method whose receiver has already absorbed the spread. The same constraint is why `q.Open`'s cleanup arrives via a terminal `.DeferCleanup(cleanup)` method rather than as a second argument to `q.Open(call(), cleanup)`.
 
 **Why one bubble entry per source signature?** Go's type system can't overload — a single `q.Try` can't accept both `(T, error)` and plain `error`. Splitting by source signature is what the language allows, and it makes the call site self-documenting: `q.Check` reads as "the thing I'm calling returns error", `q.Open` reads as "I'm acquiring a resource that needs cleanup". The `E` suffix per family carries the chain variant.
 
@@ -70,7 +70,7 @@ The original four bubble entries cover the dominant Go signatures:
 
 Subsequent additions follow the same shape: each new helper picks a distinct source signature and exposes a bare + chain pair. `q.Ok` / `q.OkE` for `(T, bool)`, `q.Recv` / `q.RecvE` and `q.As` / `q.AsE` as comma-ok specialisations, `q.Await*` / `q.Recv*Ctx` / `q.CheckCtx*` for context cancellation and futures, and so on. The bubble shape is the constant; what varies is the *trigger* (error, nil, not-ok, ctx, channel close) that fires it.
 
-**Why terminal `.Release` for Open (not `.WithDefer` earlier in the chain)?** `.Release(cleanup)` has to *own* both the error-bubble path and the success-defer path. Making it a modifier in the middle of the chain would mean another method comes after it — but that method can't undo the defer registration, so Release's placement relative to other chain methods would matter. As the terminal, Release's position is unambiguous: error shaping happens first, defer registration on success is the last step.
+**Why terminal `.Release` for Open (not `.WithDefer` earlier in the chain)?** `.DeferCleanup(cleanup)` has to *own* both the error-bubble path and the success-defer path. Making it a modifier in the middle of the chain would mean another method comes after it — but that method can't undo the defer registration, so Release's placement relative to other chain methods would matter. As the terminal, Release's position is unambiguous: error shaping happens first, defer registration on success is the last step.
 
 **Why different entry verbs for the two source-monads (`Try` vs `NotNil`)?** Forced symmetry — `TryNil` — parses backwards in English. Same reason `Check` and `Open` aren't `TryError` and `TryManage`. The source signatures are genuinely different in shape, so different verbs read more honestly than enforced symmetry.
 
@@ -129,9 +129,9 @@ For each `q.*` call expression in a user-package source file, the preprocessor p
 | `q.Check(call())` (stmt)                                  | `__err := call(); if __err != nil { return zero…, __err }`                          |
 | `q.CheckE(call()).Wrap("msg")` (stmt)                     | `__err := call(); if __err != nil { return zero…, fmt.Errorf("%s: %w", "msg", __err) }` |
 | `q.CheckE(call()).Catch(fn)` (stmt)                       | `__err := call(); if __err != nil { __new := fn(__err); if __new != nil { return zero…, __new } }` |
-| `c := q.Open(call()).Release(cleanup)`                    | `c, __err := call(); if __err != nil { return zero…, __err }; defer (cleanup)(c)`   |
-| `c := q.OpenE(call()).Wrap("msg").Release(cleanup)`       | `c, __err := call(); if __err != nil { return zero…, fmt.Errorf("%s: %w", "msg", __err) }; defer (cleanup)(c)` |
-| `c := q.OpenE(call()).Catch(fn).Release(cleanup)`         | `c, __err := call(); if __err != nil { var __new error; c, __new = fn(__err); if __new != nil { return zero…, __new } }; defer (cleanup)(c)` |
+| `c := q.Open(call()).DeferCleanup(cleanup)`                    | `c, __err := call(); if __err != nil { return zero…, __err }; defer (cleanup)(c)`   |
+| `c := q.OpenE(call()).Wrap("msg").DeferCleanup(cleanup)`       | `c, __err := call(); if __err != nil { return zero…, fmt.Errorf("%s: %w", "msg", __err) }; defer (cleanup)(c)` |
+| `c := q.OpenE(call()).Catch(fn).DeferCleanup(cleanup)`         | `c, __err := call(); if __err != nil { var __new error; c, __new = fn(__err); if __new != nil { return zero…, __new } }; defer (cleanup)(c)` |
 
 Zero values come from the enclosing `FuncDecl.Type.Results` or `FuncLit.Type.Results` field (whichever is the nearest-enclosing function scope — closures bubble to their own result list, not the outer FuncDecl's). The rewriter walks the AST, finds the nearest-enclosing function for each call site, and emits an appropriate zero value per result type via `*new(T)`. That form is universal — works for built-ins, user types, pointers, interfaces, and type parameters in generic bodies — and the Go compiler folds it to a constant zero, so the generated machine code is identical to a hand-written zero literal.
 
@@ -160,7 +160,7 @@ Examples of explicit rejections:
 - `q.TryE(call).Method(...)` where `call` is not itself a multi-return `(T, error)` expression — the AST path needs both pieces to type-check the chain.
 - A chain method that is not one of the recognized names. (Library evolution requires updating the rewriter and a fixture in the same change.)
 - `q.TryE(call).Wrapf(format, args…)` where `format` is not a string literal — the rewriter splices `: %w` into the format, which requires it to be a literal.
-- `q.Open(call).Release(cleanup)` missing the `.Release` terminal — the scanner surfaces this as a diagnostic because the resulting `OpenResult[T]` would be a useless intermediate value.
+- `q.Open(call).DeferCleanup(cleanup)` missing the `.Release` terminal — the scanner surfaces this as a diagnostic because the resulting `OpenResult[T]` would be a useless intermediate value.
 
 ### 4.3 What the rewriter must preserve
 

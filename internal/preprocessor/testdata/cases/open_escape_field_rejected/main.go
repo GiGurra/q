@@ -1,4 +1,4 @@
-// Fixture: storing a q.Open Release-bound value into a struct field
+// Fixture: storing a q.Open DeferCleanup-bound value into a struct field
 // is a use-after-close — the field outlives the function, but the
 // deferred cleanup fires on function return.
 package main
@@ -16,7 +16,7 @@ type Pool struct {
 }
 
 func (p *Pool) acquire() error {
-	c := q.Open(dial()).Release((*Conn).Close)
+	c := q.Open(dial()).DeferCleanup((*Conn).Close)
 	p.c = c // BUG — p.c outlives this function; cleanup fires before p.c is read
 	return nil
 }

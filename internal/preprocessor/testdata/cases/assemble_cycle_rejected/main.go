@@ -15,5 +15,5 @@ func newB(a *A) *B     { return &B{a: a} }
 func newRoot(a *A) *Root { return &Root{a: a} }
 
 func main() {
-	_, _ = q.Assemble[*Root](newA, newB, newRoot).Release()
+	_, _ = q.Assemble[*Root](newA, newB, newRoot).DeferCleanup()
 }

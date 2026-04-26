@@ -1,8 +1,8 @@
 // Fixture: positive cases that the resource-escape detection must
 // NOT flag.
 //
-// 1. q.Open(...).NoRelease() means caller takes ownership — return is fine.
-// 2. q.Open(...).Release(...) used purely locally — no escape.
+// 1. q.Open(...).NoDeferCleanup() means caller takes ownership — return is fine.
+// 2. q.Open(...).DeferCleanup(...) used purely locally — no escape.
 // 3. Plain function call (`process(c)`) does NOT count as an escape.
 // 4. close(ch) followed by return ch — closed channels are still
 //    legitimate for receives ("finite stream" idiom).
@@ -22,15 +22,15 @@ func (c *Conn) Close() { c.closed = true }
 
 func dial(id int) (*Conn, error) { return &Conn{id: id}, nil }
 
-// (1) NoRelease — caller is expected to take ownership. Return is OK.
-func openWithNoRelease() (*Conn, error) {
-	c := q.OpenE(dial(1)).NoRelease()
+// (1) NoDeferCleanup — caller is expected to take ownership. Return is OK.
+func openWithNoDeferCleanup() (*Conn, error) {
+	c := q.OpenE(dial(1)).NoDeferCleanup()
 	return c, nil
 }
 
-// (2) Release-bound but used only locally; no escape.
+// (2) DeferCleanup-bound but used only locally; no escape.
 func openLocalUseOnly() error {
-	c := q.Open(dial(2)).Release((*Conn).Close)
+	c := q.Open(dial(2)).DeferCleanup((*Conn).Close)
 	c.id += 10 // local read/mutate is fine
 	return nil
 }
@@ -40,7 +40,7 @@ func openLocalUseOnly() error {
 func process(c *Conn) int { return c.id }
 
 func openAndProcess() (int, error) {
-	c := q.Open(dial(3)).Release((*Conn).Close)
+	c := q.Open(dial(3)).DeferCleanup((*Conn).Close)
 	return process(c), nil // OK: return value is process's int, not c
 }
 
@@ -60,14 +60,14 @@ func closedChanFactory() <-chan int {
 //
 //q:no-escape-check
 func chanFactoryWithDirective() (chan int, error) {
-	ch := q.Open(func() (chan int, error) { return make(chan int, 1), nil }()).Release()
+	ch := q.Open(func() (chan int, error) { return make(chan int, 1), nil }()).DeferCleanup()
 	ch <- 99
 	return ch, nil
 }
 
 func main() {
-	c, _ := openWithNoRelease()
-	fmt.Println("openWithNoRelease.id:", c.id)
+	c, _ := openWithNoDeferCleanup()
+	fmt.Println("openWithNoDeferCleanup.id:", c.id)
 
 	_ = openLocalUseOnly()
 	fmt.Println("openLocalUseOnly: ok")

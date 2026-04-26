@@ -29,7 +29,7 @@ func newWorker(d *DB) *Worker  { return &Worker{db: d} }
 func newStats(c *Config) *Stats { return &Stats{cfg: c} }
 
 func main() {
-	app := q.Unwrap(q.AssembleStruct[App](newConfig, newDB, newServer, newWorker, newStats).Release())
+	app := q.Unwrap(q.AssembleStruct[App](newConfig, newDB, newServer, newWorker, newStats).DeferCleanup())
 	fmt.Println("server.db.cfg.Region:", app.Server.db.cfg.Region)
 	fmt.Println("worker.db.cfg.Region:", app.Worker.db.cfg.Region)
 	fmt.Println("stats.cfg.Region:", app.Stats.cfg.Region)

@@ -39,7 +39,7 @@ func dial(id int, fail bool) (*Conn, error) {
 
 // formDefine: `v := q.Open(...)` — direct-bind with := on a fresh ident.
 func openDefine(fail bool) error {
-	conn := q.Open(dial(1, fail)).Release(closeConn)
+	conn := q.Open(dial(1, fail)).DeferCleanup(closeConn)
 	_ = conn
 	return nil
 }
@@ -47,60 +47,60 @@ func openDefine(fail bool) error {
 // formAssign: pre-declared LHS.
 func openAssign(fail bool) error {
 	var conn *Conn
-	conn = q.Open(dial(2, fail)).Release(closeConn)
+	conn = q.Open(dial(2, fail)).DeferCleanup(closeConn)
 	_ = conn
 	return nil
 }
 
 // formDiscard: no LHS. Still binds to a temp so defer has a target.
 func openDiscard(fail bool) error {
-	q.Open(dial(3, fail)).Release(closeConn)
+	q.Open(dial(3, fail)).DeferCleanup(closeConn)
 	return nil
 }
 
 // formReturn: q.* as one of the return results.
 func openReturn(fail bool) (*Conn, error) {
-	return q.Open(dial(4, fail)).Release(closeConn), nil
+	return q.Open(dial(4, fail)).DeferCleanup(closeConn), nil
 }
 
 // formHoist: q.* nested inside a larger expression.
 func openHoist(fail bool) (int, error) {
-	id := identity(q.Open(dial(5, fail)).Release(closeConn)).id
+	id := identity(q.Open(dial(5, fail)).DeferCleanup(closeConn)).id
 	return id, nil
 }
 
 // OpenE shape methods — one-per-method coverage of the chain shape.
 func openEErr(fail bool) error {
-	conn := q.OpenE(dial(6, fail)).Err(ErrReplaced).Release(closeConn)
+	conn := q.OpenE(dial(6, fail)).Err(ErrReplaced).DeferCleanup(closeConn)
 	_ = conn
 	return nil
 }
 
 func openEErrF(fail bool) error {
-	conn := q.OpenE(dial(7, fail)).ErrF(func(e error) error { return fmt.Errorf("transformed: %w", e) }).Release(closeConn)
+	conn := q.OpenE(dial(7, fail)).ErrF(func(e error) error { return fmt.Errorf("transformed: %w", e) }).DeferCleanup(closeConn)
 	_ = conn
 	return nil
 }
 
 func openEWrap(fail bool) error {
-	conn := q.OpenE(dial(8, fail)).Wrap("dialing").Release(closeConn)
+	conn := q.OpenE(dial(8, fail)).Wrap("dialing").DeferCleanup(closeConn)
 	_ = conn
 	return nil
 }
 
 func openEWrapf(fail bool, host string) error {
-	conn := q.OpenE(dial(9, fail)).Wrapf("dialing %q", host).Release(closeConn)
+	conn := q.OpenE(dial(9, fail)).Wrapf("dialing %q", host).DeferCleanup(closeConn)
 	_ = conn
 	return nil
 }
 
 // Catch-recover: when Catch returns (recovered, nil), the recovered
-// value feeds Release — the deferred cleanup runs on the recovered
+// value feeds DeferCleanup — the deferred cleanup runs on the recovered
 // conn, not the failed one.
 func openECatchRecover(fail bool) error {
 	conn := q.OpenE(dial(10, fail)).Catch(func(e error) (*Conn, error) {
 		return &Conn{id: 99}, nil
-	}).Release(closeConn)
+	}).DeferCleanup(closeConn)
 	_ = conn
 	return nil
 }
@@ -109,7 +109,7 @@ func openECatchRecover(fail bool) error {
 func openECatchBubble(fail bool) error {
 	conn := q.OpenE(dial(11, fail)).Catch(func(e error) (*Conn, error) {
 		return nil, fmt.Errorf("caught: %w", e)
-	}).Release(closeConn)
+	}).DeferCleanup(closeConn)
 	_ = conn
 	return nil
 }
@@ -119,8 +119,8 @@ func openECatchBubble(fail bool) error {
 // which one errors so the runtime demonstrates "only the acquired
 // ones fire cleanup".
 func twoOpens(failFirst, failSecond bool) error {
-	c1 := q.Open(dial(100, failFirst)).Release(closeConn)
-	c2 := q.Open(dial(200, failSecond)).Release(closeConn)
+	c1 := q.Open(dial(100, failFirst)).DeferCleanup(closeConn)
+	c2 := q.Open(dial(200, failSecond)).DeferCleanup(closeConn)
 	_, _ = c1, c2
 	return nil
 }

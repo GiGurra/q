@@ -102,13 +102,13 @@ func dial(id int, fail bool) (*Conn, error) {
 }
 
 func openOnlyErr(fail bool) error {
-	c := q.Open(dial(1, fail)).Release((*Conn).Close)
+	c := q.Open(dial(1, fail)).DeferCleanup((*Conn).Close)
 	_ = c
 	return nil
 }
 
 func openPair(fail bool) (*Conn, error) {
-	return q.Open(dial(2, fail)).Release((*Conn).Close), nil
+	return q.Open(dial(2, fail)).DeferCleanup((*Conn).Close), nil
 }
 
 // ---- q.Trace ----

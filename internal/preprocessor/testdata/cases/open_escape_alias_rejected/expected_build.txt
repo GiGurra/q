@@ -1,1 +1,1 @@
-c2 is returned after its close was registered (q.Open(...).Release(...) auto-defers cleanup (alias of c)); the caller would receive a closed/released resource
+c2 is returned after its close was registered (q.Open(...).DeferCleanup(...) auto-defers cleanup (alias of c)); the caller would receive a closed/released resource

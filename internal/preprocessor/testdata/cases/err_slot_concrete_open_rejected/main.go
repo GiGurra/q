@@ -13,7 +13,7 @@ func Acquire() (*Handle, *MyErr) {
 }
 
 func run() (*Handle, error) {
-	h := q.Open(Acquire()).Release(func(h *Handle) {})
+	h := q.Open(Acquire()).DeferCleanup(func(h *Handle) {})
 	return h, nil
 }
 

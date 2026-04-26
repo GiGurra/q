@@ -1,5 +1,5 @@
 // example/open — q.Open and q.OpenE for resource acquisition with
-// defer-on-success cleanup. .Release is always the terminal.
+// defer-on-success cleanup. .DeferCleanup is always the terminal.
 // Run with:
 //
 //	go run -toolexec=q ./example/open
@@ -31,7 +31,7 @@ func dial(id int, fail bool) (*Conn, error) {
 // bareOpen — acquire + defer cleanup. On err, bubble; no cleanup
 // registered (nothing to clean up).
 func bareOpen(id int, fail bool) error {
-	conn := q.Open(dial(id, fail)).Release((*Conn).Close)
+	conn := q.Open(dial(id, fail)).DeferCleanup((*Conn).Close)
 	_ = conn
 	return nil
 }
@@ -39,7 +39,7 @@ func bareOpen(id int, fail bool) error {
 // openWithWrap — shape the bubbled error, still register the defer
 // on success.
 func openWithWrap(id int, fail bool) error {
-	conn := q.OpenE(dial(id, fail)).Wrap("dialing").Release((*Conn).Close)
+	conn := q.OpenE(dial(id, fail)).Wrap("dialing").DeferCleanup((*Conn).Close)
 	_ = conn
 	return nil
 }
@@ -49,7 +49,7 @@ func openWithWrap(id int, fail bool) error {
 func openWithCatchRecover(id int, fail bool) error {
 	conn := q.OpenE(dial(id, fail)).Catch(func(e error) (*Conn, error) {
 		return &Conn{id: 99}, nil // substitute a fallback
-	}).Release((*Conn).Close)
+	}).DeferCleanup((*Conn).Close)
 	_ = conn
 	return nil
 }
@@ -57,15 +57,15 @@ func openWithCatchRecover(id int, fail bool) error {
 // twoOpensLIFO — two sequential Opens. On success, both cleanups
 // register; defer is LIFO so the second one runs first.
 func twoOpensLIFO(failA, failB bool) error {
-	a := q.Open(dial(100, failA)).Release((*Conn).Close)
-	b := q.Open(dial(200, failB)).Release((*Conn).Close)
+	a := q.Open(dial(100, failA)).DeferCleanup((*Conn).Close)
+	b := q.Open(dial(200, failB)).DeferCleanup((*Conn).Close)
 	_, _ = a, b
 	return nil
 }
 
 // openInReturn — q.Open in return-position.
 func openInReturn(id int, fail bool) (*Conn, error) {
-	return q.Open(dial(id, fail)).Release((*Conn).Close), nil
+	return q.Open(dial(id, fail)).DeferCleanup((*Conn).Close), nil
 }
 
 var ErrFailover = errors.New("failover triggered")

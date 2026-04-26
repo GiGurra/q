@@ -52,7 +52,7 @@ var openGenericsLog []string
 
 //q:no-escape-check
 func takeGeneric[T any](produce func() (T, error), cleanup func(T)) (T, error) {
-	v := q.Open(produce()).Release(cleanup)
+	v := q.Open(produce()).DeferCleanup(cleanup)
 	return v, nil
 }
 
@@ -61,7 +61,7 @@ func logClose(s string) {
 }
 
 // Holder is a generic type with a method that uses q.Open; verifies
-// the Release cleanup handles the type parameter correctly on the
+// the DeferCleanup cleanup handles the type parameter correctly on the
 // receiver-method path.
 type Holder[T any] struct {
 	v   T
@@ -70,7 +70,7 @@ type Holder[T any] struct {
 
 //q:no-escape-check
 func (h Holder[T]) acquireWith(cleanup func(T)) (T, error) {
-	v := q.Open(h.supply()).Release(cleanup)
+	v := q.Open(h.supply()).DeferCleanup(cleanup)
 	return v, nil
 }
 

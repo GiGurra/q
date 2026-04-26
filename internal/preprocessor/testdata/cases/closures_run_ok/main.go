@@ -106,7 +106,7 @@ func trackClose(b *Box) {
 // (no resource was acquired); callers can observe both paths.
 func openInClosure(id int, fail bool) error {
 	run := func() error {
-		box := q.Open(makeBox(id, fail)).Release(trackClose)
+		box := q.Open(makeBox(id, fail)).DeferCleanup(trackClose)
 		_ = box
 		return nil
 	}

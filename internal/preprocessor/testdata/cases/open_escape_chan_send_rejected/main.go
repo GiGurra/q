@@ -1,4 +1,4 @@
-// Fixture: sending a q.Open Release-bound value on a channel — the
+// Fixture: sending a q.Open DeferCleanup-bound value on a channel — the
 // receiver may use it after the deferred cleanup has fired.
 package main
 
@@ -11,7 +11,7 @@ func (c *Conn) Close() error { return nil }
 func dial() (*Conn, error) { return &Conn{id: 1}, nil }
 
 func send(out chan<- *Conn) error {
-	c := q.Open(dial()).Release((*Conn).Close)
+	c := q.Open(dial()).DeferCleanup((*Conn).Close)
 	out <- c // BUG — receiver gets a soon-to-be-closed Conn
 	return nil
 }

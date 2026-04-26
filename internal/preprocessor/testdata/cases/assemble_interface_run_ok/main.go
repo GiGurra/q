@@ -21,6 +21,6 @@ func newGreeter() *EnglishGreeter { return &EnglishGreeter{} } // produces *Engl
 func newApp(g Greeter) *App       { return &App{g: g} }        // wants Greeter (interface)
 
 func main() {
-	app := q.Unwrap(q.Assemble[*App](newGreeter, newApp).Release())
+	app := q.Unwrap(q.Assemble[*App](newGreeter, newApp).DeferCleanup())
 	fmt.Println(app.g.Greet())
 }

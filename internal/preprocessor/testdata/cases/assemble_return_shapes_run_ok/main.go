@@ -59,6 +59,6 @@ func newApp(v Val, p Ptr, i IfcV, ve ValE, pe PtrE, ie IfcVE) *App {
 }
 
 func main() {
-	a := q.Unwrap(q.Assemble[*App](newVal, newPtr, newIfc, newValE, newPtrE, newIfcE, newApp).Release())
+	a := q.Unwrap(q.Assemble[*App](newVal, newPtr, newIfc, newValE, newPtrE, newIfcE, newApp).DeferCleanup())
 	fmt.Println("v:", a.v, "p:", *a.p, "i:", a.i.Tag(), "ve:", a.ve, "pe:", *a.pe, "ie:", a.ie.Tag())
 }

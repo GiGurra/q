@@ -14,5 +14,5 @@ func sideEffect() { _ = "init" }
 func newServer() *Server { return &Server{} }
 
 func main() {
-	_, _ = q.Assemble[*Server](sideEffect, newServer).Release()
+	_, _ = q.Assemble[*Server](sideEffect, newServer).DeferCleanup()
 }

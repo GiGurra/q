@@ -18,5 +18,5 @@ func newDB(c *Config) *DB { return &DB{cfg: c} }
 
 func main() {
 	// No recipe produces *Server.
-	_, _ = q.Assemble[*Server](newConfig, newDB).Release()
+	_, _ = q.Assemble[*Server](newConfig, newDB).DeferCleanup()
 }

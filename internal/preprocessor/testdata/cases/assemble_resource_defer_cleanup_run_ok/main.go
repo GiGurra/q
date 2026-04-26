@@ -1,11 +1,11 @@
-// Fixture: q.Assemble[T](recipes...).Release() — auto-defer
-// resource lifetime. The Release chain terminator injects a defer
+// Fixture: q.Assemble[T](recipes...).DeferCleanup() — auto-defer
+// resource lifetime. The DeferCleanup chain terminator injects a defer
 // in the enclosing function that fires the cleanup chain in
 // reverse-topo order when the function returns.
 //
 // Validates:
 //   1. Multi-layer dep graph constructs in topo order.
-//   2. Release fires cleanups in REVERSE topo order on success path.
+//   2. DeferCleanup fires cleanups in REVERSE topo order on success path.
 //   3. Each cleanup runs synchronously (blocking next one).
 //   4. Mix of (T, func(), error) recipes and pure (T) / (T, error)
 //      recipes — pure ones don't push cleanups.
@@ -43,14 +43,14 @@ func openServer(d *DB, c *Cache) (*Server, func(), error) {
 }
 
 func boot() {
-	server, err := q.Assemble[*Server](newConfig, openDB, openCache, openServer).Release()
+	server, err := q.Assemble[*Server](newConfig, openDB, openCache, openServer).DeferCleanup()
 	if err != nil {
 		fmt.Println("err:", err)
 		return
 	}
 	fmt.Println("server.db.cfg.Region:", server.db.cfg.Region)
 	fmt.Println("during boot, shutdownLog len:", len(shutdownLog))
-} // ← deferred Release fires here, in reverse-topo
+} // ← deferred DeferCleanup fires here, in reverse-topo
 
 func main() {
 	boot()

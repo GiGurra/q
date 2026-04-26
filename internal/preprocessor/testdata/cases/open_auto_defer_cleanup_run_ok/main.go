@@ -1,9 +1,9 @@
-// Fixture: q.Open(...).Release() with no args — preprocessor infers
+// Fixture: q.Open(...).DeferCleanup() with no args — preprocessor infers
 // the cleanup from the resource type at compile time. Three forms:
 //   - channel type:        defer close(v)
 //   - Close() error:       defer func() { _ = v.Close() }()
 //   - Close() (no return): defer v.Close()
-// Plus a regression check that explicit Release(cleanup) still fires.
+// Plus a regression check that explicit DeferCleanup(cleanup) still fires.
 package main
 
 import (
@@ -20,13 +20,13 @@ func makeChan() (chan int, error) {
 }
 
 // channelAutoInner returns the channel after the deferred close
-// has fired. The trick: the auto-Release defer runs as
+// has fired. The trick: the auto-DeferCleanup defer runs as
 // channelAutoInner returns, so the caller can probe the channel's
 // closed state to confirm the close happened.
 //
 //q:no-escape-check
 func channelAutoInner() (chan int, error) {
-	ch := q.Open(makeChan()).Release()
+	ch := q.Open(makeChan()).DeferCleanup()
 	ch <- 7
 	return ch, nil
 }
@@ -55,7 +55,7 @@ func openErrCloser(id int, closed *[]int) (*errCloser, error) {
 }
 
 func errCloserAuto(closed *[]int) error {
-	_ = q.Open(openErrCloser(11, closed)).Release()
+	_ = q.Open(openErrCloser(11, closed)).DeferCleanup()
 	return nil
 }
 
@@ -75,11 +75,11 @@ func openVoidCloser(id int, closed *[]int) (*voidCloser, error) {
 }
 
 func voidCloserAuto(closed *[]int) error {
-	_ = q.Open(openVoidCloser(22, closed)).Release()
+	_ = q.Open(openVoidCloser(22, closed)).DeferCleanup()
 	return nil
 }
 
-// --- Regression: explicit Release(cleanup) still fires unchanged. ---
+// --- Regression: explicit DeferCleanup(cleanup) still fires unchanged. ---
 
 type plainResource struct{ id int }
 
@@ -87,21 +87,21 @@ func openPlain(id int) (*plainResource, error) {
 	return &plainResource{id: id}, nil
 }
 
-func explicitRelease(closed *[]int) error {
+func explicitDeferCleanup(closed *[]int) error {
 	cleanup := func(p *plainResource) { *closed = append(*closed, p.id) }
-	_ = q.Open(openPlain(33)).Release(cleanup)
+	_ = q.Open(openPlain(33)).DeferCleanup(cleanup)
 	return nil
 }
 
-// --- OpenE chain composition: Wrap + auto Release. ---
+// --- OpenE chain composition: Wrap + auto DeferCleanup. ---
 
 //q:no-escape-check
 func errCloserAutoWrap(closed *[]int) (*errCloser, error) {
-	v := q.OpenE(openErrCloser(44, closed)).Wrap("dial").Release()
+	v := q.OpenE(openErrCloser(44, closed)).Wrap("dial").DeferCleanup()
 	return v, nil
 }
 
-// --- Auto-Release on the bubble path: cleanup must NOT fire when
+// --- Auto-DeferCleanup on the bubble path: cleanup must NOT fire when
 // the open itself failed. ---
 
 var errOpen = errors.New("boom")
@@ -111,8 +111,8 @@ func failingOpen() (*errCloser, error) {
 }
 
 //q:no-escape-check
-func autoReleaseBubble() (*errCloser, error) {
-	v := q.Open(failingOpen()).Release()
+func autoDeferCleanupBubble() (*errCloser, error) {
+	v := q.Open(failingOpen()).DeferCleanup()
 	return v, nil
 }
 
@@ -134,19 +134,19 @@ func main() {
 	}
 	fmt.Printf("voidCloserAuto.closed=%v\n", closed)
 
-	// Explicit Release(cleanup) regression.
+	// Explicit DeferCleanup(cleanup) regression.
 	closed = nil
-	if err := explicitRelease(&closed); err != nil {
-		fmt.Println("explicitRelease:", err)
+	if err := explicitDeferCleanup(&closed); err != nil {
+		fmt.Println("explicitDeferCleanup:", err)
 	}
-	fmt.Printf("explicitRelease.closed=%v\n", closed)
+	fmt.Printf("explicitDeferCleanup.closed=%v\n", closed)
 
-	// OpenE.Wrap + auto-Release composition.
+	// OpenE.Wrap + auto-DeferCleanup composition.
 	closed = nil
 	v, _ := errCloserAutoWrap(&closed)
 	fmt.Printf("errCloserAutoWrap.id=%d closed=%v\n", v.id, closed)
 
 	// Bubble path — no cleanup should fire.
-	_, err := autoReleaseBubble()
-	fmt.Printf("autoReleaseBubble.err=%v\n", err)
+	_, err := autoDeferCleanupBubble()
+	fmt.Printf("autoDeferCleanupBubble.err=%v\n", err)
 }

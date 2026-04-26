@@ -39,7 +39,7 @@ type App struct {
 func newApp(g Greeter, l Logger) *App { return &App{g: g, l: l} }
 
 func main() {
-	app, shutdown, err := q.Assemble[*App](openGreeter, openLogger, newApp).NoRelease()
+	app, shutdown, err := q.Assemble[*App](openGreeter, openLogger, newApp).NoDeferCleanup()
 	if err != nil {
 		fmt.Println("err:", err)
 		return

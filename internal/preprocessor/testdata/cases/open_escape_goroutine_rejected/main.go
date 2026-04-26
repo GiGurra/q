@@ -1,4 +1,4 @@
-// Fixture: passing a q.Open Release-bound value to `go fn(c)` —
+// Fixture: passing a q.Open DeferCleanup-bound value to `go fn(c)` —
 // the spawned goroutine may use the value after this function's
 // deferred cleanup has fired.
 package main
@@ -14,7 +14,7 @@ func dial() (*Conn, error) { return &Conn{id: 1}, nil }
 func use(c *Conn) {}
 
 func spawn() error {
-	c := q.Open(dial()).Release((*Conn).Close)
+	c := q.Open(dial()).DeferCleanup((*Conn).Close)
 	go use(c) // BUG — goroutine outlives this function; cleanup fires while it still holds c
 	return nil
 }
