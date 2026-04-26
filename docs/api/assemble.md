@@ -565,7 +565,6 @@ The ctx is passed as an inline-value recipe — same as any other context.Contex
 - **Strict by default.** Unused recipes fail the build (except `context.Context` — exempt because it's expected to ride into the assembly for assembly-config). The discipline is intentional — recipe sets that drift over time stay correct only if every member is needed.
 - **No variadic recipes.** A recipe like `func newServer(plugins ...Plugin) *Server` can't be auto-resolved (the dep set isn't fixed). Wrap it in a fixed-arity adapter instead.
 - **Type identity is `go/types` identity.** Two named types with the same underlying type are still distinct providers — that's how the branded-variants pattern (`type PrimaryDB struct{ *DB }`) works. If you have unintentional collisions (e.g. two packages with `type Config struct{...}`), use named wrappers to disambiguate.
-- **Recipes can't be `q.*` calls** in the function-reference position, with one exception: `q.PermitNil(<recipe>)` is detected and unwrapped at scan time. Inline-value recipes can wrap a regular q.* call (`q.Try(loadCfg())`) since the value-position rewrite triggers the standard q.* hoist.
 
 ## Multi-provider aggregation: `q.AssembleAll`
 

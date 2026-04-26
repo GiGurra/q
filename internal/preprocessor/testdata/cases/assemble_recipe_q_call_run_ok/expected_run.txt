@@ -1,0 +1,5 @@
+server cfg: factory-loaded
+direct server cfg: factory-loaded
+chain server cfg: factory-loaded
+multi server cfg: factory-loaded
+tern server cfg: dev
