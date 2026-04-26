@@ -1,0 +1,2 @@
+ok dto:{ID:7 Name:Ada Email:u7@example.com Source:v1} err:<nil>
+err dto:{ID:0 Name: Email: Source:} err:invalid id

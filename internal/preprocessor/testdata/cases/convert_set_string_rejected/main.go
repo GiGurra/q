@@ -15,7 +15,7 @@ type Target struct {
 }
 
 func main() {
-	_ = q.Convert[Target](Source{ID: 1},
+	_ = q.ConvertTo[Target](Source{ID: 1},
 		q.Set("Tag", "v1"), // wrong shape — must be Target{}.Tag
 	)
 }

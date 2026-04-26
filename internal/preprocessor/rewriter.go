@@ -365,7 +365,7 @@ func renderShape(fset *token.FileSet, src []byte, sh callShape, counter *int, al
 			subTexts[i] = fmt.Sprintf("_qScope%d", counters[i])
 		case familyTern:
 			subTexts[i] = buildTernReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts)
-		case familyConvert:
+		case familyConvert, familyConvertE:
 			subTexts[i] = buildConvertReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts, counters[i])
 		case familyAt:
 			// Only the in-place terminals (.Or, .OrZero) get a substitution
@@ -883,7 +883,7 @@ func isInPlaceFamily(f family) bool {
 		familyMatch,
 		familyAssemble, familyAssembleAll, familyAssembleStruct,
 		familyTern,
-		familyConvert,
+		familyConvert, familyConvertE,
 		familyAt,
 		familyLazy, familyLazyE,
 		familyAtom, familyAtomOf,
@@ -1174,10 +1174,11 @@ func renderSubCall(fset *token.FileSet, src []byte, sh callShape, subIdx int, su
 	case familyTern:
 		// q.Tern emits an IIFE in-place; no extra bind/check block.
 		return "", false, false, false, nil
-	case familyConvert:
-		// q.Convert emits a struct-literal expression (or an IIFE
-		// when the source is non-trivial) in-place; no extra
-		// bind/check block.
+	case familyConvert, familyConvertE:
+		// q.ConvertTo / q.ConvertToE emit a struct-literal (or IIFE)
+		// expression in-place; no extra bind/check block at the
+		// statement level. ConvertToE's IIFE returns (T, error) and
+		// the surrounding statement decides what to do with the err.
 		return "", false, false, false, nil
 	case familyAt:
 		if isErroredAtTerminal(sub.AtTerminal) {

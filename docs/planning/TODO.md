@@ -120,7 +120,7 @@ The persistent backlog for `q`. A cold-state reader can pick up here without re-
 
 ### Type conversion / structural typing
 
-- **#94 follow-up — `q.Convert` extensions.** The struct-to-struct core (exact-name auto-derivation, recursive nested derivation, `q.Set` / `q.SetFn` overrides, target-driven field gaps) shipped — see [`docs/api/convert.md`](../api/convert.md). Open extensions:
+- **#94 follow-up — `q.ConvertTo` extensions.** The struct-to-struct core (exact-name auto-derivation, recursive nested derivation, `q.Set` / `q.SetFn` overrides, target-driven field gaps) shipped — see [`docs/api/convert.md`](../api/convert.md). Open extensions:
 
   - **Implicit lifting.** `int → int64`, `*T → T` (non-nil-asserted deref), `T → Option[T]` / `T → sql.NullX` wrapping. Keep the bar conservative: only lifts where there's no information loss and no panic risk under any input. Anything else stays an explicit `q.SetFn`.
   - **Slice / map / iter recursion.** `[]Foo → []Bar` when `Foo → Bar` is auto-derivable; same for `map[K]Foo → map[K]Bar`. Emit a `for` loop or `iter.Seq` call inside the IIFE. Decide whether iterators count.

@@ -1,4 +1,4 @@
-// Fixture: q.Convert[Target](src) auto-derives a struct conversion
+// Fixture: q.ConvertTo[Target](src) auto-derives a struct conversion
 // at compile time. Verifies:
 //   - 1:1 same-name field copy (every Target field has a same-named
 //     Source field; types match exactly).
@@ -39,15 +39,15 @@ func loadUser() User {
 func main() {
 	// Bare-identifier source — emits literal directly, no IIFE.
 	u := User{ID: 1, Name: "Bob", Internal: true, Notes: "x"}
-	dto := q.Convert[UserDTO](u)
+	dto := q.ConvertTo[UserDTO](u)
 	fmt.Printf("bare: %+v\n", dto)
 
 	// Non-trivial source — bound to a temp inside an IIFE so the
 	// call evaluates exactly once.
-	dto2 := q.Convert[UserDTO](loadUser())
+	dto2 := q.ConvertTo[UserDTO](loadUser())
 	fmt.Printf("call: %+v calls=%d\n", dto2, calls)
 
 	// Empty target — degenerates to Empty{}.
-	e := q.Convert[Empty](u)
+	e := q.ConvertTo[Empty](u)
 	fmt.Printf("empty: %+v\n", e)
 }

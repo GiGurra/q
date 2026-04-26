@@ -1,4 +1,4 @@
-// Fixture: q.Convert with manual overrides via q.Set / q.SetFn.
+// Fixture: q.ConvertTo with manual overrides via q.Set / q.SetFn.
 // The override field reference is a typed Go selector expression —
 // UserDTO{}.<Field> — so the rewriter extracts the field name from
 // the AST and Go's own type-checker validates the field exists and
@@ -30,7 +30,7 @@ type UserDTO struct {
 func main() {
 	u := User{ID: 7, First: "Ada", Last: "Lovelace", Email: "ADA@EXAMPLE.COM"}
 
-	dto := q.Convert[UserDTO](u,
+	dto := q.ConvertTo[UserDTO](u,
 		q.Set(UserDTO{}.Source, "v1"),
 		q.SetFn(UserDTO{}.Email, func(u User) string { return strings.ToLower(u.Email) }),
 		q.SetFn(UserDTO{}.FullName, func(u User) string { return u.First + " " + u.Last }),

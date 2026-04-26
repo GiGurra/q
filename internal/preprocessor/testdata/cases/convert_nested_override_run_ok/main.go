@@ -1,4 +1,4 @@
-// Fixture: q.Convert with multi-hop overrides — q.Set / q.SetFn
+// Fixture: q.ConvertTo with multi-hop overrides — q.Set / q.SetFn
 // can target a nested field directly via UserDTO{}.Address.City,
 // without forcing the user to reconstruct the whole sub-struct.
 // Other nested fields keep their auto-derived values from the
@@ -48,13 +48,13 @@ func main() {
 
 	// Override one nested field; the other (Address.Street) stays
 	// auto-derived from u.Address.Street.
-	dto := q.Convert[UserDTO](u,
+	dto := q.ConvertTo[UserDTO](u,
 		q.Set(UserDTO{}.Address.City, "Springfield"),
 	)
 	fmt.Printf("set: %+v\n", dto)
 
 	// SetFn variant: derive nested City from the whole source.
-	dto2 := q.Convert[UserDTO](u,
+	dto2 := q.ConvertTo[UserDTO](u,
 		q.SetFn(UserDTO{}.Address.City, func(u User) string { return strings.ToUpper(u.Address.City) }),
 	)
 	fmt.Printf("setfn: %+v\n", dto2)

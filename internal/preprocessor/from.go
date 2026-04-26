@@ -1,6 +1,6 @@
 package preprocessor
 
-// from.go — typecheck + rewriter for q.Convert[Target](src, opts...).
+// from.go — typecheck + rewriter for q.ConvertTo[Target](src, opts...).
 //
 // Detection lives in scanner.go (familyConvert branch). This file
 // owns:
@@ -44,13 +44,16 @@ const (
 	convertKindNested
 )
 
-// convertOverrideKind discriminates Set (verbatim value) vs SetFn
-// (function-of-source). Renderer wraps SetFn as `(<fn>)(<srcVar>)`.
+// convertOverrideKind discriminates Set / SetFn / SetFnE shapes.
+// Renderer wraps SetFn as `(<fn>)(<srcVar>)`. SetFnE pre-binds
+// `_qVN, _qErrN := (<fn>)(<srcVar>)` ahead of the literal so the
+// error can short-circuit out of the surrounding ConvertToE IIFE.
 type convertOverrideKind int
 
 const (
 	convertOverrideSet convertOverrideKind = iota
 	convertOverrideSetFn
+	convertOverrideSetFnE
 )
 
 // convertField is one mapping between a target field and its
@@ -72,6 +75,12 @@ type convertField struct {
 	// kindNested: target sub-struct type spelling + child mappings.
 	NestedTy string
 	Nested   []convertField
+
+	// kindOverride + SetFnE: the variable name the ConvertToE IIFE
+	// pre-binds the fallible call result to, so the literal can read
+	// the value while the error has already been bubbled. Empty for
+	// every other kind.
+	BindingVar string
 }
 
 // resolveConvert is the entry point invoked by the typecheck pass.
@@ -87,16 +96,16 @@ func resolveConvert(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPath
 	}
 
 	if sc.AsType == nil || sc.ConvertSrc == nil {
-		return mkErr("q.Convert: missing Target type-arg or src expression")
+		return mkErr("q.ConvertTo: missing Target type-arg or src expression")
 	}
 
 	targetTV, ok := info.Types[sc.AsType]
 	if !ok || targetTV.Type == nil {
-		return mkErr("q.Convert: cannot resolve Target type")
+		return mkErr("q.ConvertTo: cannot resolve Target type")
 	}
 	srcTV, ok := info.Types[sc.ConvertSrc]
 	if !ok || srcTV.Type == nil {
-		return mkErr("q.Convert: cannot resolve source expression type")
+		return mkErr("q.ConvertTo: cannot resolve source expression type")
 	}
 
 	qualifier := func(p *types.Package) string {
@@ -106,7 +115,8 @@ func resolveConvert(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPath
 		return p.Name()
 	}
 
-	tree, d, fail := parseConvertOverrides(fset, sc.ConvertOptArgs, info, targetTV.Type, srcTV.Type, qualifier)
+	fallibleAllowed := sc.Family == familyConvertE
+	tree, d, fail := parseConvertOverrides(fset, sc.ConvertOptArgs, info, targetTV.Type, srcTV.Type, qualifier, fallibleAllowed)
 	if fail {
 		return d, true
 	}
@@ -143,7 +153,7 @@ type overrideNode struct {
 // (q.Set(Target{}.A.B.C, v)) become nested children. Conflicts (a
 // path that's both an override and an ancestor of another override)
 // fail validation.
-func parseConvertOverrides(fset *token.FileSet, opts []ast.Expr, info *types.Info, targetType, srcType types.Type, qualifier types.Qualifier) (*overrideNode, Diagnostic, bool) {
+func parseConvertOverrides(fset *token.FileSet, opts []ast.Expr, info *types.Info, targetType, srcType types.Type, qualifier types.Qualifier, fallibleAllowed bool) (*overrideNode, Diagnostic, bool) {
 	mkErr := func(p token.Position, msg string) (*overrideNode, Diagnostic, bool) {
 		return nil, Diagnostic{
 			File: p.Filename,
@@ -162,11 +172,14 @@ func parseConvertOverrides(fset *token.FileSet, opts []ast.Expr, info *types.Inf
 		callPos := fset.Position(opt.Pos())
 		call, ok := opt.(*ast.CallExpr)
 		if !ok {
-			return mkErr(callPos, "q.Convert: option must be a q.Set / q.SetFn call expression")
+			return mkErr(callPos, "q.ConvertTo: option must be a q.Set / q.SetFn call expression")
 		}
 		method := convertOptionMethod(call.Fun)
 		if method == "" {
-			return mkErr(callPos, "q.Convert: option must be a q.Set or q.SetFn call")
+			return mkErr(callPos, "q.ConvertTo: option must be a q.Set, q.SetFn, or q.SetFnE call")
+		}
+		if method == "SetFnE" && !fallibleAllowed {
+			return mkErr(callPos, "q.SetFnE is only valid inside q.ConvertToE — q.ConvertTo has no error slot to bubble to. Use q.ConvertToE[Target](src, ...) instead.")
 		}
 		if len(call.Args) != 2 {
 			return mkErr(callPos, fmt.Sprintf("q.%s takes exactly 2 arguments (targetField, value/fn); got %d", method, len(call.Args)))
@@ -218,6 +231,30 @@ func parseConvertOverrides(fset *token.FileSet, opts []ast.Expr, info *types.Inf
 					formatPath(targetType, path, qualifier),
 					types.TypeString(leafField.Type(), qualifier),
 					types.TypeString(ret, qualifier)))
+			}
+		case "SetFnE":
+			ovKind = convertOverrideSetFnE
+			sig, ok := valueTV.Type.Underlying().(*types.Signature)
+			if !ok || sig.Params().Len() != 1 || sig.Results().Len() != 2 {
+				return mkErr(callPos, fmt.Sprintf("q.SetFnE: fn must be func(Source) (V, error); got %s",
+					types.TypeString(valueTV.Type, qualifier)))
+			}
+			if !types.AssignableTo(srcType, sig.Params().At(0).Type()) {
+				return mkErr(callPos, fmt.Sprintf("q.SetFnE: fn parameter %s does not accept source type %s",
+					types.TypeString(sig.Params().At(0).Type(), qualifier),
+					types.TypeString(srcType, qualifier)))
+			}
+			ret := sig.Results().At(0).Type()
+			if !types.AssignableTo(ret, leafField.Type()) {
+				return mkErr(callPos, fmt.Sprintf("q.SetFnE: target field %s (%s) is not assignable from fn first result (%s)",
+					formatPath(targetType, path, qualifier),
+					types.TypeString(leafField.Type(), qualifier),
+					types.TypeString(ret, qualifier)))
+			}
+			errIface := types.Universe.Lookup("error").Type()
+			if !types.Identical(sig.Results().At(1).Type(), errIface) {
+				return mkErr(callPos, fmt.Sprintf("q.SetFnE: fn second result must be error; got %s",
+					types.TypeString(sig.Results().At(1).Type(), qualifier)))
 			}
 		}
 
@@ -298,7 +335,7 @@ func installOverride(root *overrideNode, path []string, ov *convertOverride, pos
 	cur := root
 	for i, name := range path {
 		if cur.leaf != nil {
-			return mkErr(fmt.Sprintf("q.Convert: override for %s conflicts with an earlier ancestor override", pathLabel))
+			return mkErr(fmt.Sprintf("q.ConvertTo: override for %s conflicts with an earlier ancestor override", pathLabel))
 		}
 		if cur.children == nil {
 			cur.children = map[string]*overrideNode{}
@@ -310,17 +347,17 @@ func installOverride(root *overrideNode, path []string, ov *convertOverride, pos
 		}
 		if i == len(path)-1 {
 			if next.leaf != nil {
-				return mkErr(fmt.Sprintf("q.Convert: duplicate override for %s", pathLabel))
+				return mkErr(fmt.Sprintf("q.ConvertTo: duplicate override for %s", pathLabel))
 			}
 			if len(next.children) > 0 {
-				return mkErr(fmt.Sprintf("q.Convert: override for %s conflicts with deeper overrides under the same path", pathLabel))
+				return mkErr(fmt.Sprintf("q.ConvertTo: override for %s conflicts with deeper overrides under the same path", pathLabel))
 			}
 			next.leaf = ov
 			return Diagnostic{}, false
 		}
 		cur = next
 	}
-	return mkErr("q.Convert: empty override path")
+	return mkErr("q.ConvertTo: empty override path")
 }
 
 // extractTargetFieldPath enforces and extracts the field path from
@@ -406,7 +443,7 @@ func exprShape(expr ast.Expr) string {
 func convertOptionMethod(fn ast.Expr) string {
 	if sel, ok := fn.(*ast.SelectorExpr); ok {
 		switch sel.Sel.Name {
-		case "Set", "SetFn":
+		case "Set", "SetFn", "SetFnE":
 			return sel.Sel.Name
 		}
 	}
@@ -447,17 +484,17 @@ func resolveStructConversion(srcType, targetType types.Type, tree *overrideNode,
 
 	pairKey := types.TypeString(srcType, qualifier) + " => " + types.TypeString(targetType, qualifier)
 	if seenPair[pairKey] {
-		return mkErr(fmt.Sprintf("q.Convert: recursive nested derivation cycle on %s", pairKey))
+		return mkErr(fmt.Sprintf("q.ConvertTo: recursive nested derivation cycle on %s", pairKey))
 	}
 	seenPair = withSeen(seenPair, pairKey)
 
 	targetStruct, ok := targetType.Underlying().(*types.Struct)
 	if !ok {
-		return mkErr(fmt.Sprintf("q.Convert: Target must be a struct type; got %s", types.TypeString(targetType, qualifier)))
+		return mkErr(fmt.Sprintf("q.ConvertTo: Target must be a struct type; got %s", types.TypeString(targetType, qualifier)))
 	}
 	srcStruct, ok := srcType.Underlying().(*types.Struct)
 	if !ok {
-		return mkErr(fmt.Sprintf("q.Convert: source must be a struct type; got %s", types.TypeString(srcType, qualifier)))
+		return mkErr(fmt.Sprintf("q.ConvertTo: source must be a struct type; got %s", types.TypeString(srcType, qualifier)))
 	}
 
 	srcFields := map[string]*types.Var{}
@@ -500,13 +537,13 @@ func resolveStructConversion(srcType, targetType types.Type, tree *overrideNode,
 		//    is broken — diagnose.
 		if subtree != nil && subtree.children != nil && len(subtree.children) > 0 {
 			if !hasSF {
-				return mkErr(fmt.Sprintf("q.Convert: nested override targets %s.%s but source has no counterpart",
+				return mkErr(fmt.Sprintf("q.ConvertTo: nested override targets %s.%s but source has no counterpart",
 					types.TypeString(targetType, qualifier), tf.Name()))
 			}
 			_, sfIsStruct := sf.Type().Underlying().(*types.Struct)
 			_, tfIsStruct := tf.Type().Underlying().(*types.Struct)
 			if !sfIsStruct || !tfIsStruct {
-				return mkErr(fmt.Sprintf("q.Convert: nested override targets %s.%s, but %s is not a struct",
+				return mkErr(fmt.Sprintf("q.ConvertTo: nested override targets %s.%s, but %s is not a struct",
 					types.TypeString(targetType, qualifier), tf.Name(),
 					types.TypeString(tf.Type(), qualifier)))
 			}
@@ -556,11 +593,11 @@ func resolveStructConversion(srcType, targetType types.Type, tree *overrideNode,
 
 		// 5. Diagnostic.
 		if !hasSF {
-			return mkErr(fmt.Sprintf("q.Convert: target field %s.%s has no counterpart on source %s",
+			return mkErr(fmt.Sprintf("q.ConvertTo: target field %s.%s has no counterpart on source %s",
 				types.TypeString(targetType, qualifier), tf.Name(),
 				types.TypeString(srcType, qualifier)))
 		}
-		return mkErr(fmt.Sprintf("q.Convert: target field %s.%s (%s) is not assignable from source field %s.%s (%s)",
+		return mkErr(fmt.Sprintf("q.ConvertTo: target field %s.%s (%s) is not assignable from source field %s.%s (%s)",
 			types.TypeString(targetType, qualifier), tf.Name(),
 			types.TypeString(tf.Type(), qualifier),
 			types.TypeString(srcType, qualifier), sf.Name(),
@@ -579,36 +616,100 @@ func withSeen(seen map[string]bool, key string) map[string]bool {
 }
 
 // buildConvertReplacement emits the struct literal that replaces the
-// q.Convert call.
+// q.ConvertTo / q.ConvertToE call.
 //
-// Bare-identifier source — splice directly:
+// q.ConvertTo (no error path):
 //
-//	q.Convert[Target](user)  →  Target{F: user.F, ...}
+//   - Bare-identifier source — splice the literal directly:
+//       q.ConvertTo[Target](user)  →  Target{F: user.F, ...}
 //
-// Non-trivial source (call, selector chain, etc.) — bind to a temp
-// inside an IIFE so the source expression evaluates exactly once:
+//   - Non-trivial source — bind to a temp inside an IIFE so it
+//     evaluates exactly once:
+//       q.ConvertTo[Target](getUser())  →
+//         func() Target { _qSrcN := getUser(); return Target{F: _qSrcN.F, ...} }()
 //
-//	q.Convert[Target](getUser())  →
-//	    func() Target { _qSrcN := getUser(); return Target{F: _qSrcN.F, ...} }()
+// q.ConvertToE (error path):
+//
+//   - Always emits an IIFE returning (Target, error). Each q.SetFnE
+//     override pre-binds `_qVN, _qErrN := (<fn>)(<topSrc>)` ahead of
+//     the literal; on error we return zero + bubble. Other field
+//     kinds render inline as in the non-error path.
 //
 // The renderer threads two source-variable names through the
 // recursion: `accessVar` walks deeper as the tree descends (so direct
 // copies at depth read from `srcVar.A.B`), while `topSrcVar` stays
-// rooted at the original source so SetFn invocations always receive
-// the top-level Source value the user declared in the call.
+// rooted at the original source so SetFn / SetFnE invocations always
+// receive the top-level Source value the user declared in the call.
 func buildConvertReplacement(fset *token.FileSet, src []byte, sub qSubCall, subs []qSubCall, subTexts []string, counter int) string {
 	target := sub.ConvertTargetTypeText
 	if target == "" {
 		target = "any"
 	}
 	srcText := exprTextSubst(fset, src, sub.ConvertSrc, subs, subTexts)
+	fields := sub.ConvertFields
+
+	if sub.Family == familyConvertE {
+		// Always IIFE returning (T, error). Even bare-ident sources
+		// share the IIFE shape so the error return is uniform.
+		srcVar := fmt.Sprintf("_qSrc%d", counter)
+		// Walk the field tree, assign a binding var to each SetFnE
+		// override, and collect them in target-declaration order.
+		var binds []convertEBind
+		assignSetFnEBindings(&fields, &binds, counter, fmt.Sprintf("%dE", counter), 0)
+		sub.ConvertFields = fields
+		// Update the carried slice so renderConvertFieldValue sees the
+		// assigned BindingVar names.
+
+		var b strings.Builder
+		fmt.Fprintf(&b, "(func() (%s, error) {\n\t%s := %s", target, srcVar, srcText)
+		for _, bd := range binds {
+			fnText := exprText(fset, src, bd.fnExpr)
+			fmt.Fprintf(&b, "\n\t%s, _qErr := (%s)(%s)", bd.bindVar, fnText, srcVar)
+			fmt.Fprintf(&b, "\n\tif _qErr != nil { return *new(%s), _qErr }", target)
+			_ = bd
+		}
+		literal := renderConvertLiteral(fset, src, target, srcVar, srcVar, sub.ConvertFields)
+		fmt.Fprintf(&b, "\n\treturn %s, nil\n}())", literal)
+		return b.String()
+	}
 
 	if _, ok := sub.ConvertSrc.(*ast.Ident); ok {
-		return renderConvertLiteral(fset, src, target, srcText, srcText, sub.ConvertFields)
+		return renderConvertLiteral(fset, src, target, srcText, srcText, fields)
 	}
 	srcVar := fmt.Sprintf("_qSrc%d", counter)
-	literal := renderConvertLiteral(fset, src, target, srcVar, srcVar, sub.ConvertFields)
+	literal := renderConvertLiteral(fset, src, target, srcVar, srcVar, fields)
 	return fmt.Sprintf("(func() %s { %s := %s; return %s }())", target, srcVar, srcText, literal)
+}
+
+// convertEBind is one pre-bound q.SetFnE call. The renderer emits
+// `<bindVar>, _qErr := (<fnExpr>)(srcVar); if _qErr != nil { ... }`
+// at the top of the IIFE, then the literal references <bindVar> in
+// place of the field's value.
+type convertEBind struct {
+	bindVar string
+	fnExpr  ast.Expr
+}
+
+// assignSetFnEBindings walks the field tree, assigns each SetFnE
+// override a unique binding-variable name, and appends them to binds
+// in declaration order. The recursion mutates fields in place
+// (storing BindingVar on the convertField). counterTag namespaces
+// the bind-var prefix per top-level q.* call so multiple ConvertToE
+// calls in one statement don't collide.
+func assignSetFnEBindings(fields *[]convertField, binds *[]convertEBind, counter int, counterTag string, depth int) {
+	for i := range *fields {
+		f := &(*fields)[i]
+		switch f.Kind {
+		case convertKindOverride:
+			if f.OverrideKind == convertOverrideSetFnE {
+				bv := fmt.Sprintf("_qV%d_%d", counter, len(*binds))
+				f.BindingVar = bv
+				*binds = append(*binds, convertEBind{bindVar: bv, fnExpr: f.OverrideExpr})
+			}
+		case convertKindNested:
+			assignSetFnEBindings(&f.Nested, binds, counter, counterTag, depth+1)
+		}
+	}
 }
 
 func renderConvertLiteral(fset *token.FileSet, src []byte, target, accessVar, topSrcVar string, fields []convertField) string {
@@ -633,18 +734,24 @@ func renderConvertLiteral(fset *token.FileSet, src []byte, target, accessVar, to
 func renderConvertFieldValue(fset *token.FileSet, src []byte, f convertField, accessVar, topSrcVar string) string {
 	switch f.Kind {
 	case convertKindOverride:
-		text := exprText(fset, src, f.OverrideExpr)
-		if f.OverrideKind == convertOverrideSetFn {
+		switch f.OverrideKind {
+		case convertOverrideSet:
+			return exprText(fset, src, f.OverrideExpr)
+		case convertOverrideSetFn:
 			// SetFn always receives the top-level Source, not the
 			// nested struct — even when the override sits at a deep
 			// path. The fn's signature is func(Source) V where Source
-			// is the q.Convert call's source type.
-			return "(" + text + ")(" + topSrcVar + ")"
+			// is the q.ConvertTo call's source type.
+			return "(" + exprText(fset, src, f.OverrideExpr) + ")(" + topSrcVar + ")"
+		case convertOverrideSetFnE:
+			// Pre-bound at the top of the ConvertToE IIFE; the literal
+			// just references the binding var.
+			return f.BindingVar
 		}
-		return text
 	case convertKindNested:
 		return renderConvertLiteral(fset, src, f.NestedTy, accessVar+"."+f.Accessor, topSrcVar, f.Nested)
 	default: // convertKindDirect
 		return accessVar + "." + f.Accessor
 	}
+	return ""
 }

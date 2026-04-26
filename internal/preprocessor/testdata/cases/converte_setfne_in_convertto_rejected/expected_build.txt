@@ -1,0 +1,1 @@
+q.SetFnE is only valid inside q.ConvertToE

@@ -16,5 +16,5 @@ type Target struct {
 
 func main() {
 	s := Source{ID: 1, Name: "x"}
-	_ = q.Convert[Target](s)
+	_ = q.ConvertTo[Target](s)
 }

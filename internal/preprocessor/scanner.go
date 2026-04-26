@@ -138,7 +138,8 @@ const (
 	familyAtomOf         // q.AtomOf[T]() — q.Atom("name-of-T") for switch-case ergonomics
 	familyAsOneOf        // q.AsOneOf[T](v) — wrap v as a OneOfN-derived sum type T
 	familySealed         // var _ = q.Sealed[I](Variant{}, …) — directive: synthesise marker methods
-	familyConvert        // q.Convert[Target, Source any](src Source) Target — Chimney-style struct conversion
+	familyConvert        // q.ConvertTo[Target, Source any](src Source) Target — Chimney-style struct conversion
+	familyConvertE       // q.ConvertToE[Target, Source any](src Source) (Target, error) — fallible variant; SetFnE overrides may bubble
 )
 
 // form is the syntactic position of a recognised q.* call:
@@ -438,7 +439,7 @@ type qSubCall struct {
 	TernElse           ast.Expr
 	TernResultTypeText string
 
-	// q.Convert family — Chimney-style struct conversion.
+	// q.ConvertTo family — Chimney-style struct conversion.
 	//
 	// ConvertSrc is the src argument captured at scan time.
 	// ConvertOptArgs is the variadic options list (q.Set / q.SetFn
@@ -2194,17 +2195,32 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 			OuterCall: expr,
 		}, true, nil
 	}
-	// q.Convert[Target](src) — Chimney-style struct conversion. Target
+	// q.ConvertTo[Target](src) — Chimney-style struct conversion. Target
 	// is the explicit type-arg; Source is inferred from src. The
 	// rewriter walks both struct types via go/types, pairs exported
 	// fields by exact name, and emits the literal Target{F: src.F, ...}
 	// expression. Field gaps surface as build-time diagnostics.
-	if typeArg, ok := isIndexedSelector(call.Fun, alias, "Convert"); ok {
+	if typeArg, ok := isIndexedSelector(call.Fun, alias, "ConvertTo"); ok {
 		if len(call.Args) < 1 {
-			return qSubCall{}, false, fmt.Errorf("q.Convert[Target] takes at least 1 argument (src) plus optional q.Set/q.SetFn overrides; got 0")
+			return qSubCall{}, false, fmt.Errorf("q.ConvertTo[Target] takes at least 1 argument (src) plus optional q.Set/q.SetFn overrides; got 0")
 		}
 		return qSubCall{
 			Family:         familyConvert,
+			AsType:         typeArg,
+			ConvertSrc:     call.Args[0],
+			ConvertOptArgs: call.Args[1:],
+			OuterCall:      expr,
+		}, true, nil
+	}
+	// q.ConvertToE[Target](src, opts...) — fallible variant of
+	// q.ConvertTo. Same shape; the rewriter emits an IIFE returning
+	// (Target, error) so SetFnE overrides can bubble.
+	if typeArg, ok := isIndexedSelector(call.Fun, alias, "ConvertToE"); ok {
+		if len(call.Args) < 1 {
+			return qSubCall{}, false, fmt.Errorf("q.ConvertToE[Target] takes at least 1 argument (src) plus optional q.Set/q.SetFn/q.SetFnE overrides; got 0")
+		}
+		return qSubCall{
+			Family:         familyConvertE,
 			AsType:         typeArg,
 			ConvertSrc:     call.Args[0],
 			ConvertOptArgs: call.Args[1:],

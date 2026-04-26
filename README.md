@@ -493,7 +493,7 @@ When a recipe is missing or duplicated or the graph cycles, the build fails with
 type User    struct { ID int; First, Last, Email string; Internal bool }
 type UserDTO struct { ID int; Email, FullName, Source string }
 
-dto := q.Convert[UserDTO](user,
+dto := q.ConvertTo[UserDTO](user,
     q.Set(UserDTO{}.Source, "v1"),
     q.SetFn(UserDTO{}.Email,    func(u User) string { return strings.ToLower(u.Email) }),
     q.SetFn(UserDTO{}.FullName, func(u User) string { return u.First + " " + u.Last }),
@@ -502,7 +502,9 @@ dto := q.Convert[UserDTO](user,
 // `User.Internal` is silently dropped (target-driven).
 ```
 
-The override field reference is a typed Go selector expression (`UserDTO{}.Field`), not a string — Go's type-checker validates the field exists and the value/fn return type matches. Rename a target field and every override site fails to compile. Multi-hop paths (`UserDTO{}.Address.City`) target nested fields directly. Resolution per target field: override → same-named source field with assignable type → recursive nested derivation when both fields are structs → build-time diagnostic. No runtime reflection; the rewriter emits a plain struct literal. See [`docs/api/convert.md`](docs/api/convert.md).
+The override field reference is a typed Go selector expression (`UserDTO{}.Field`), not a string — Go's type-checker validates the field exists and the value/fn return type matches. Rename a target field and every override site fails to compile. Multi-hop paths (`UserDTO{}.Address.City`) target nested fields directly. Resolution per target field: override → same-named source field with assignable type → recursive nested derivation when both fields are structs → build-time diagnostic. No runtime reflection; the rewriter emits a plain struct literal.
+
+For derivations that may fail at runtime — database lookups, remote fetches — `q.ConvertToE` returns `(Target, error)` and lets `q.SetFnE(field, func(Source) (V, error))` overrides bubble. Pair with `q.Try` for the flat shape: `dto := q.Try(q.ConvertToE[UserDTO](u, q.SetFnE(...)))`. See [`docs/api/convert.md`](docs/api/convert.md).
 
 ### Functional data ops
 

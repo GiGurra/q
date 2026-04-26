@@ -144,7 +144,7 @@ func checkErrorSlotsWithInfo(fset *token.FileSet, pkgPath, importcfgPath string,
 					diags = append(diags, d)
 				}
 			}
-			if sc.Family == familyConvert {
+			if sc.Family == familyConvert || sc.Family == familyConvertE {
 				if d, ok := resolveConvert(fset, sc, info, pkgPath); ok {
 					diags = append(diags, d)
 				}

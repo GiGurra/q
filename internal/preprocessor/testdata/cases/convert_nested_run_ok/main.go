@@ -1,4 +1,4 @@
-// Fixture: q.Convert recurses into nested struct fields when the
+// Fixture: q.ConvertTo recurses into nested struct fields when the
 // same-named source field is itself a struct of a different type
 // whose fields can be auto-derived for the target field's struct.
 //
@@ -46,6 +46,6 @@ func main() {
 			Country: "ZZ",
 		},
 	}
-	dto := q.Convert[UserDTO](u)
+	dto := q.ConvertTo[UserDTO](u)
 	fmt.Printf("dto: %+v\n", dto)
 }
