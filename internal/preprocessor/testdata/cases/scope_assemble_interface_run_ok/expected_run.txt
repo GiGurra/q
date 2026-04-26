@@ -1,0 +1,4 @@
+same: true
+greet: hello#1
+trace: [build:greeter]
+post-close: [build:greeter greeter.Close#1]

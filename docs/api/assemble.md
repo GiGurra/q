@@ -86,6 +86,16 @@ If the scope is closed before or during the assembly, the rewriter returns `(zer
 
 **Inline-value recipes are NOT cached or fetched.** They're per-call user inputs, not shared across assemblies — passing a different `&Config{...}` to two calls in the same scope correctly uses each call's value for that call.
 
+**Cache key is the resolved concrete-type identity, not the requested input type.** If Assembly 1 caches a `*EnglishGreeter` and Assembly 2 needs a `Greeter` interface input, the cache hit fires *as long as Assembly 2 lists `newGreeter` in its recipes too* — the rewriter resolves the iface input to the concrete recipe at compile time, and the cache key emitted matches Assembly 1's. Recipe lists are the resolution context per assembly; the scope is just a typed cache keyed by concrete-type identity.
+
+```go
+g1   := q.Try(q.Assemble[*EnglishGreeter](newGreeter).WithScope(scope))
+app  := q.Try(q.Assemble[*App](newGreeter, newApp).WithScope(scope)) // newApp wants Greeter
+// app.g and g1 are the same instance; newGreeter ran once.
+```
+
+If Assembly 2 leaves `newGreeter` out and instead lists a *different* Iface-providing recipe, that's a fresh build under a different cache key — Assembly 1's cached value is not consulted. There is intentionally no runtime walk-the-cache-and-find-something-that-satisfies-Iface escape hatch; q resolves dependencies at compile time.
+
 **Concurrent assemblies caveat.** Two assemblies in the same scope may both build the same fresh type before either commits — last-writer-wins on the cache, both cleanups end up registered. Document the orphaning risk; for strict singleflight semantics, layer a `singleflight` wrapper in the recipe.
 
 See [`q.Scope`](scope.md) for the full lifetime container surface — construction terminators, manual `Attach`/`Detach`, subscope nesting.

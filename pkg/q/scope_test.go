@@ -51,14 +51,8 @@ func TestScope_BoundTo_ClosesOnCtxCancel(t *testing.T) {
 		t.Fatal("scope closed before ctx cancellation")
 	}
 	cancel()
-	for range 100 {
-		if s.Closed() {
-			break
-		}
-		runtimeGosched()
-	}
-	if !s.Closed() {
-		t.Fatal("scope did not close after ctx cancellation")
+	if !waitClosed(s, 10*time.Second) {
+		t.Fatal("scope did not close within 10s of ctx cancellation")
 	}
 }
 
@@ -417,10 +411,20 @@ func equalSlices[T comparable](a, b []T) bool {
 	return true
 }
 
-// runtimeGosched yields the goroutine briefly so a goroutine
-// dispatched by context.AfterFunc has a chance to run. Used by
-// the BoundTo test which polls Closed() in a bounded loop.
-func runtimeGosched() {
-	for range 1000 {
+// waitClosed polls scope.Closed() every 200ms until it flips true
+// or the deadline expires. Used for tests that depend on a
+// goroutine — context.AfterFunc, manual close on a separate
+// goroutine — that the runtime schedules whenever it pleases.
+// CI runners under load can take seconds, hence the generous cap.
+func waitClosed(s *q.Scope, total time.Duration) bool {
+	deadline := time.Now().Add(total)
+	for {
+		if s.Closed() {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 }
