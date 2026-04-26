@@ -102,8 +102,15 @@ func resolveOneOfTypes(files []*ast.File, info *types.Info, pkgPath string) map[
 	return out
 }
 
+// qEitherImportPath is the import path of the either subpackage,
+// whose Either[L, R] type is structurally a 2-arm OneOf and reuses
+// every typecheck / rewrite path the OneOfN family does.
+const qEitherImportPath = qPkgImportPath + "/either"
+
 // isOneOfGeneric reports whether n is an instantiation of one of the
-// q.OneOfN generic types (OneOf2 … OneOf6 today).
+// recognised sum-type generic types: q.OneOfN (in pkg/q) or
+// either.Either (in pkg/q/either). Both produce a `Tag uint8 + Value
+// any` runtime shape and share the same dispatch machinery.
 func isOneOfGeneric(n *types.Named) bool {
 	origin := n.Origin()
 	if origin == nil {
@@ -113,17 +120,27 @@ func isOneOfGeneric(n *types.Named) bool {
 	if obj == nil || obj.Pkg() == nil {
 		return false
 	}
-	if obj.Pkg().Path() != qPkgImportPath {
-		return false
+	switch obj.Pkg().Path() {
+	case qPkgImportPath:
+		return strings.HasPrefix(obj.Name(), "OneOf") && len(obj.Name()) > len("OneOf")
+	case qEitherImportPath:
+		return obj.Name() == "Either"
 	}
-	return strings.HasPrefix(obj.Name(), "OneOf") && len(obj.Name()) > len("OneOf")
+	return false
 }
 
 // armsForType returns the variant list for a OneOfN-derived type t,
-// or (nil, false) if t isn't OneOfN-derived. Handles both the alias
-// case (`type Status q.OneOf2[…]`) by consulting onesByName, and the
-// bare-instantiation case (`q.OneOf2[…]` with no alias) via TypeArgs().
+// or (nil, false) if t isn't OneOfN-derived. Handles three cases:
+//
+//   - `type Status q.OneOf2[…]` — defined named type with an OneOfN
+//     RHS; recovered via the package's TypeSpec walk (onesByName).
+//   - `type Result = either.Either[L, R]` — alias of an OneOfN
+//     instantiation; unaliased to the named instantiation, then
+//     served via TypeArgs().
+//   - Bare `q.OneOf2[…]` / `either.Either[L, R]` with no alias —
+//     served directly via TypeArgs().
 func armsForType(t types.Type, onesByName map[*types.TypeName]oneOfArms, pkgPath string) (oneOfArms, bool) {
+	t = types.Unalias(t)
 	named, ok := t.(*types.Named)
 	if !ok {
 		return oneOfArms{}, false

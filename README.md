@@ -341,6 +341,8 @@ desc := q.Match(s,
 
 Real sum types — the headline rejected proposal. `q.OneOfN` is the struct-based form (uniform `Tag uint8; Value any` storage). `q.AsOneOf[T](v)` rewrites in place to `T{Tag: <pos>, Value: v}` after validating `v`'s type matches one of `T`'s variants. Dispatch reads through `q.Match`: `q.Case(Variant{}, result)` for tag-only arms (drops the payload), `q.OnType(func(t T) R { ... })` to bind the typed payload. `q.Default` opts out of coverage. Statement-level dispatch via `switch v := q.Exhaustive(s.Value).(type) { ... }` enforces case coverage with the same rules. See [`docs/api/oneof.md`](docs/api/oneof.md).
 
+The Scala-flavoured 2-arm sibling lives in its own subpackage: [`either.Either[L, R]`](docs/api/either.md) with `either.Left` / `either.Right` / `either.AsEither` constructors, right-biased `either.Map` / `either.FlatMap` / `either.GetOrElse`, and `either.Fold` for the value-returning 2-arm dispatch. Reuses every `q.OneOfN` integration point — `q.Match`, `q.OnType`, `q.Exhaustive` — for free.
+
 ### Typed-string atoms (Erlang-flavoured)
 
 ```go

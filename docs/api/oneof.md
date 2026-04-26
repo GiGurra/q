@@ -243,6 +243,9 @@ in TODO.
 
 ## See also
 
+- [`either.Either`](either.md) — Scala-flavoured 2-arm sibling
+  (Left / Right + Fold / Map / FlatMap). Structurally a 2-arm OneOf;
+  reuses every integration point here.
 - [`q.Match`](match.md) — the value-returning switch this integrates with.
 - [`q.Exhaustive`](exhaustive.md) — statement-level coverage on enum
   constants and (via `.(type)`) on OneOfN variants.

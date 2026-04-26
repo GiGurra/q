@@ -831,7 +831,8 @@ var qRuntimeHelpers = map[string]bool{
 // — no work to do.
 func scanFile(fset *token.FileSet, path string, file *ast.File) ([]callShape, []Diagnostic, error) {
 	alias := qImportAlias(file)
-	if alias == "" {
+	eitherAlias := qEitherImportAlias(file)
+	if alias == "" && eitherAlias == "" {
 		return nil, nil, nil
 	}
 
@@ -871,22 +872,235 @@ func scanFile(fset *token.FileSet, path string, file *ast.File) ([]callShape, []
 		return true
 	})
 
-	for _, decl := range file.Decls {
-		switch d := decl.(type) {
-		case *ast.FuncDecl:
-			if d.Body == nil {
-				continue
+	if alias != "" {
+		for _, decl := range file.Decls {
+			switch d := decl.(type) {
+			case *ast.FuncDecl:
+				if d.Body == nil {
+					continue
+				}
+				walkBlock(fset, path, d.Body, alias, d.Type, &shapes, &diags, skip)
+			case *ast.GenDecl:
+				if d.Tok != token.VAR {
+					continue
+				}
+				scanTopLevelVarSpec(fset, path, d, alias, &shapes, &diags)
 			}
-			walkBlock(fset, path, d.Body, alias, d.Type, &shapes, &diags, skip)
-		case *ast.GenDecl:
-			if d.Tok != token.VAR {
-				continue
-			}
-			scanTopLevelVarSpec(fset, path, d, alias, &shapes, &diags)
 		}
 	}
 
+	if eitherAlias != "" {
+		scanEitherCalls(fset, file, eitherAlias, &shapes)
+	}
+
 	return shapes, diags, nil
+}
+
+// scanEitherCalls walks the file for either.AsEither[T](v) calls and
+// adds an in-place hoist shape for each. Structurally identical to
+// q.AsOneOf — same OneOf machinery, different selector LHS. The
+// typecheck pass routes these through resolveAsOneOf and the rewriter
+// emits the same composite-literal replacement.
+//
+// The walker descends function/closure bodies and emits one shape
+// per (immediately-enclosing statement) for each either.AsEither call
+// found. "Immediately-enclosing" matters: binding the call to its
+// outermost block would make the rewriter substitute the entire block,
+// blowing away anything else inside it.
+func scanEitherCalls(fset *token.FileSet, file *ast.File, eitherAlias string, shapes *[]callShape) {
+	// addCall finds either.AsEither calls inside `host` (a single
+	// statement's own expressions, not its nested statements) and
+	// emits a shape rooted at `host` with `fnType` as the enclosing
+	// function. Nested statements / closures are handled by the
+	// caller (walkStmt) recursing.
+	addCall := func(host ast.Stmt, expr ast.Expr, fnType *ast.FuncType) {
+		ast.Inspect(expr, func(n ast.Node) bool {
+			if _, ok := n.(*ast.FuncLit); ok {
+				// Closure bodies have their own scope — handled by walkStmt.
+				return false
+			}
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			typeArg, ok := isIndexedSelector(call.Fun, eitherAlias, "AsEither")
+			if !ok || len(call.Args) != 1 {
+				return true
+			}
+			sub := qSubCall{
+				Family:    familyAsOneOf,
+				AsType:    typeArg,
+				InnerExpr: call.Args[0],
+				OuterCall: call,
+			}
+			*shapes = append(*shapes, callShape{
+				Stmt:              host,
+				Form:              formHoist,
+				Calls:             []qSubCall{sub},
+				EnclosingFuncType: fnType,
+			})
+			return true
+		})
+	}
+
+	var walkStmt func(stmt ast.Stmt, fnType *ast.FuncType)
+	walkBlock := func(b *ast.BlockStmt, fnType *ast.FuncType) {
+		if b == nil {
+			return
+		}
+		for _, s := range b.List {
+			walkStmt(s, fnType)
+		}
+	}
+	// scanExprForClosures finds any nested *ast.FuncLit inside expr and
+	// recurses into its body so calls inside closures are still found.
+	scanExprForClosures := func(expr ast.Expr, fnType *ast.FuncType) {
+		ast.Inspect(expr, func(n ast.Node) bool {
+			if fl, ok := n.(*ast.FuncLit); ok {
+				walkBlock(fl.Body, fl.Type)
+				return false
+			}
+			return true
+		})
+	}
+
+	walkStmt = func(stmt ast.Stmt, fnType *ast.FuncType) {
+		if stmt == nil {
+			return
+		}
+		switch s := stmt.(type) {
+		case *ast.BlockStmt:
+			walkBlock(s, fnType)
+			return
+		case *ast.IfStmt:
+			walkStmt(s.Init, fnType)
+			if s.Cond != nil {
+				addCall(stmt, s.Cond, fnType)
+				scanExprForClosures(s.Cond, fnType)
+			}
+			walkBlock(s.Body, fnType)
+			walkStmt(s.Else, fnType)
+			return
+		case *ast.ForStmt:
+			walkStmt(s.Init, fnType)
+			if s.Cond != nil {
+				addCall(stmt, s.Cond, fnType)
+				scanExprForClosures(s.Cond, fnType)
+			}
+			walkStmt(s.Post, fnType)
+			walkBlock(s.Body, fnType)
+			return
+		case *ast.RangeStmt:
+			if s.X != nil {
+				addCall(stmt, s.X, fnType)
+				scanExprForClosures(s.X, fnType)
+			}
+			walkBlock(s.Body, fnType)
+			return
+		case *ast.SwitchStmt:
+			walkStmt(s.Init, fnType)
+			if s.Tag != nil {
+				addCall(stmt, s.Tag, fnType)
+				scanExprForClosures(s.Tag, fnType)
+			}
+			walkBlock(s.Body, fnType)
+			return
+		case *ast.TypeSwitchStmt:
+			walkStmt(s.Init, fnType)
+			walkStmt(s.Assign, fnType)
+			walkBlock(s.Body, fnType)
+			return
+		case *ast.SelectStmt:
+			walkBlock(s.Body, fnType)
+			return
+		case *ast.CaseClause:
+			for _, e := range s.List {
+				addCall(stmt, e, fnType)
+				scanExprForClosures(e, fnType)
+			}
+			for _, c := range s.Body {
+				walkStmt(c, fnType)
+			}
+			return
+		case *ast.CommClause:
+			walkStmt(s.Comm, fnType)
+			for _, c := range s.Body {
+				walkStmt(c, fnType)
+			}
+			return
+		case *ast.LabeledStmt:
+			walkStmt(s.Stmt, fnType)
+			return
+		case *ast.DeferStmt:
+			if s.Call != nil {
+				addCall(stmt, s.Call, fnType)
+				scanExprForClosures(s.Call, fnType)
+			}
+			return
+		case *ast.GoStmt:
+			if s.Call != nil {
+				addCall(stmt, s.Call, fnType)
+				scanExprForClosures(s.Call, fnType)
+			}
+			return
+		case *ast.AssignStmt:
+			for _, e := range s.Lhs {
+				addCall(stmt, e, fnType)
+				scanExprForClosures(e, fnType)
+			}
+			for _, e := range s.Rhs {
+				addCall(stmt, e, fnType)
+				scanExprForClosures(e, fnType)
+			}
+			return
+		case *ast.ReturnStmt:
+			for _, e := range s.Results {
+				addCall(stmt, e, fnType)
+				scanExprForClosures(e, fnType)
+			}
+			return
+		case *ast.ExprStmt:
+			if s.X != nil {
+				addCall(stmt, s.X, fnType)
+				scanExprForClosures(s.X, fnType)
+			}
+			return
+		case *ast.IncDecStmt:
+			if s.X != nil {
+				addCall(stmt, s.X, fnType)
+				scanExprForClosures(s.X, fnType)
+			}
+			return
+		case *ast.SendStmt:
+			if s.Chan != nil {
+				addCall(stmt, s.Chan, fnType)
+				scanExprForClosures(s.Chan, fnType)
+			}
+			if s.Value != nil {
+				addCall(stmt, s.Value, fnType)
+				scanExprForClosures(s.Value, fnType)
+			}
+			return
+		case *ast.DeclStmt:
+			if gd, ok := s.Decl.(*ast.GenDecl); ok && gd.Tok == token.VAR {
+				for _, spec := range gd.Specs {
+					if vs, ok := spec.(*ast.ValueSpec); ok {
+						for _, e := range vs.Values {
+							addCall(stmt, e, fnType)
+							scanExprForClosures(e, fnType)
+						}
+					}
+				}
+			}
+			return
+		}
+	}
+
+	for _, decl := range file.Decls {
+		if fd, ok := decl.(*ast.FuncDecl); ok && fd.Body != nil {
+			walkBlock(fd.Body, fd.Type)
+		}
+	}
 }
 
 // scanTopLevelVarSpec recognises the package-level directive shape
@@ -1182,9 +1396,21 @@ func walkChildBlocks(fset *token.FileSet, path string, stmt ast.Stmt, alias stri
 // qImportAlias returns the local name under which pkg/q is imported in
 // the file, "q" by default, "" if pkg/q is not imported.
 func qImportAlias(file *ast.File) string {
+	return importAliasFor(file, qPkgImportPath, "q")
+}
+
+// qEitherImportAlias returns the local name under which pkg/q/either is
+// imported in the file, "either" by default, "" if not imported. Used
+// to recognise either.AsEither call sites — structurally identical to
+// q.AsOneOf and routed through the same rewrite path.
+func qEitherImportAlias(file *ast.File) string {
+	return importAliasFor(file, qPkgImportPath+"/either", "either")
+}
+
+func importAliasFor(file *ast.File, importPath, defaultName string) string {
 	for _, imp := range file.Imports {
 		path, err := unquote(imp.Path.Value)
-		if err != nil || path != qPkgImportPath {
+		if err != nil || path != importPath {
 			continue
 		}
 		if imp.Name != nil {
@@ -1195,7 +1421,7 @@ func qImportAlias(file *ast.File) string {
 			}
 			return imp.Name.Name
 		}
-		return "q"
+		return defaultName
 	}
 	return ""
 }

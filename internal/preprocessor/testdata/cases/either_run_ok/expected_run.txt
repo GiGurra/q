@@ -1,0 +1,11 @@
+left set? true right set? false
+left: code=400 msg=bad input
+right: ok
+fold: err 400
+mapped len: 2
+chained right: 42
+match: matched ok: ok
+mixed: got err bad input
+stmt err: code=400
+swapped right (was left): code=401
+r.Tag: 1 r2.Tag: 2

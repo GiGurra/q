@@ -60,6 +60,8 @@ nav:
     - q.Fields / TypeName / Tag (compile-time reflection): api/reflection.md
     - q.FnParams / ValidatedStruct (required-by-default literals): api/fnparams.md
     - q.Match / Case / Default (value-returning switch): api/match.md
+    - q.OneOfN / AsOneOf / OnType (discriminated sum types): api/oneof.md
+    - either.Either / Left / Right / Fold (Scala-flavoured 2-arm sum): api/either.md
     - q.Tern (conditional expression):  api/tern.md
     - q.F / q.Ferr / q.Fln (string interpolation): api/format.md
     - q.SQL / q.PgSQL / q.NamedSQL (injection-safe SQL): api/sql.md
