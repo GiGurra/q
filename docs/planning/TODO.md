@@ -57,9 +57,6 @@ The persistent backlog for `q`. A cold-state reader can pick up here without re-
 
   Big lift: needs flow analysis (or a heavy hand: rewrite every reference into shim-method calls), needs to interop with raw resource access (sometimes you do want the underlying `*Conn`), and adds a real per-call atomic. Probably not worth it for the 90% case (functions that own their own resources) — defer until profiles or user reports show resource ownership crosses function boundaries often enough that the existing diagnostics become annoying.
 
-- **#84 — `q.Assemble` follow-on phases.** Shipped: Phase 1 (single-entry auto-derived DI), 2a (`q.AssembleAll[T]`), 2b (`q.AssembleStruct[T]`), 3 (AssemblyResult chain — `.Release()` / `.NoRelease()` — with explicit `(T, func(), error)` and `(T, func())` resource recipes plus auto-detect of Close() / Close() error / channel on function recipes). Inline values pass through unchanged (user-owned). See [`docs/api/assemble.md`](../api/assemble.md). Remaining work, full plan in [`docs/planning/assemble.md`](assemble.md):
-    - **Phase 4 — parallel construction.** `q.WithAssemblyPar(ctx, n)` rides on the ctx like `q.WithAssemblyDebug`; rewriter emits topo waves with `sync.WaitGroup` per wave.
-
 - **#90 — Recipe-with-cleanup adapter for external types.** When a recipe constructor comes from an external library (no Close() method, no channel) and the user can't change its signature, the natural pattern is to write a 3-line inline wrapper:
 
   ```go
@@ -140,6 +137,8 @@ The persistent backlog for `q`. A cold-state reader can pick up here without re-
   Inspiration: Qt's signal/slot, observable patterns from RxJava / RxJS, but simpler — no operator zoo, just connect/emit/disconnect.
 
 ### Future / parking lot
+
+- **#84 — `q.Assemble` parallel construction (Phase 4).** Surface: `q.WithAssemblyPar(ctx, n)` rides on the ctx like `q.WithAssemblyDebug`; rewriter emits topo waves with `sync.WaitGroup` per wave. Phases 1–3 shipped (single-entry auto-derived DI, `AssembleAll`, `AssembleStruct`, AssemblyResult chain with `.Release()` / `.NoRelease()`). Parked because the sequential path is fast enough for current workloads — revisit if profiles show construction time as a measurable cost. Plan still lives in [`docs/planning/assemble.md`](assemble.md) for when it's picked back up.
 
 - **#11 — `q.<X>` for is-nil-as-failure / comma-ok / etc.** Catch-all for any additional bubble triggers that surface later (e.g. `q.IfNil(x)` for error-less nil checks that don't want to spell `q.NotNilE(…).Err(ErrSomething)`). Existing bubble triggers cover the obvious cases; this is the umbrella for whatever turns up next.
 
