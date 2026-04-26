@@ -35,204 +35,61 @@ markdown_extensions:
   - toc:
       permalink: true
 
-# nav: every exported pkg/q (and pkg/q/either) function gets
-# its own navbar entry. The only collapsing is `Foo` + `FooE`
-# pairs into a single `Foo / FooE` entry. Multiple entries
-# pointing at the same docs page is fine — `q.Try / q.TryE`,
-# `q.Map`, `q.Filter`, etc. all link to their family doc.
-# scripts/docs_navbar_check.sh enforces both invariants.
+# nav: one entry per docs page, sorted case-insensitively. Labels are
+# short (1-3 words) descriptions of what the page covers — no func
+# names. Per-function entries with #anchor disambiguators caused
+# rendering collisions in mkdocs-material; one-page-one-entry sidesteps
+# that and keeps the sidebar scannable. scripts/docs_navbar_check.sh
+# enforces the one-to-one mapping plus alphabetical order.
 nav:
   - Home: index.md
   - Getting Started: getting-started.md
   - API:
-    - q.A: api/atom/#q-a
-    - q.AllFields: api/reflection/#q-allfields
-    - q.As / q.AsE: api/as/#q-as-q-ase
-    - q.AsOneOf: api/oneof/#q-asoneof
-    - q.Assemble: api/assemble/#q-assemble
-    - q.AssembleAll: api/assemble/#q-assembleall
-    - q.AssembleStruct: api/assemble/#q-assemblestruct
-    - q.AssemblyDebugWriter: api/assemble/#q-assemblydebugwriter
-    - q.Async: api/async/#q-async
-    - q.At: api/at/#q-at
-    - q.AtCompileTime: api/atcompiletime/#q-atcompiletime
-    - q.AtCompileTimeCode: api/atcompiletime/#q-atcompiletimecode
-    - q.AtomOf: api/atom/#q-atomof
-    - q.Await / q.AwaitE: api/async/#q-await-q-awaite
-    - q.AwaitAll / q.AwaitAllE: api/await_multi/#q-awaitall-q-awaitalle
-    - q.AwaitAllCtx / q.AwaitAllCtxE: api/await_multi/#q-awaitallctx-q-awaitallctxe
-    - q.AwaitAllRaw: api/await_multi/#q-awaitallraw
-    - q.AwaitAllRawCtx: api/await_multi/#q-awaitallrawctx
-    - q.AwaitAny / q.AwaitAnyE: api/await_multi/#q-awaitany-q-awaitanye
-    - q.AwaitAnyCtx / q.AwaitAnyCtxE: api/await_multi/#q-awaitanyctx-q-awaitanyctxe
-    - q.AwaitAnyRaw: api/await_multi/#q-awaitanyraw
-    - q.AwaitAnyRawCtx: api/await_multi/#q-awaitanyrawctx
-    - q.AwaitCtx / q.AwaitCtxE: api/await_ctx/#q-awaitctx-q-awaitctxe
-    - q.AwaitRaw: api/async/#q-awaitraw
-    - q.AwaitRawCtx: api/await_ctx/#q-awaitrawctx
-    - q.BinaryCodec: api/atcompiletime/#q-binarycodec
-    - q.Camel: api/string_case/#q-camel
-    - q.Case: api/match/#q-case
-    - q.Check / q.CheckE: api/check/#q-check-q-checke
-    - q.Chunk: api/data/#q-chunk
-    - q.Const: api/try/#q-const
-    - q.Convert: api/convert/#q-convert
-    - q.Coro: api/coro/#q-coro
-    - q.Count: api/data/#q-count
-    - q.Deadline: api/timeout/#q-deadline
-    - q.DebugPrintln: api/debug/#q-debugprintln
-    - q.DebugPrintlnAt: api/debug/#q-debugprintlnat
-    - q.DebugSlogAttr: api/debug/#q-debugslogattr
-    - q.Default: api/match/#q-default
-    - q.Distinct: api/data/#q-distinct
-    - q.DistinctBy: api/data/#q-distinctby
-    - q.Drain: api/channel_multi/#q-drain
-    - q.DrainAll: api/channel_multi/#q-drainall
-    - q.DrainAllCtx / q.DrainAllCtxE: api/channel_multi/#q-drainallctx-q-drainallctxe
-    - q.DrainAllRawCtx: api/channel_multi/#q-drainallrawctx
-    - q.DrainCtx / q.DrainCtxE: api/recv_ctx/#q-drainctx-q-drainctxe
-    - q.DrainRawCtx: api/recv_ctx/#q-drainrawctx
-    - q.Drop: api/data/#q-drop
-    - q.either.AsEither: api/either/#q-either-aseither
-    - q.either.FlatMap: api/either/#q-either-flatmap
-    - q.either.Fold: api/either/#q-either-fold
-    - q.either.GetOrElse: api/either/#q-either-getorelse
-    - q.either.Left: api/either/#q-either-left
-    - q.either.Map: api/either/#q-either-map
-    - q.either.MapLeft: api/either/#q-either-mapleft
-    - q.either.Right: api/either/#q-either-right
-    - q.either.Swap: api/either/#q-either-swap
-    - q.EnumName: api/enums/#q-enumname
-    - q.EnumNames: api/enums/#q-enumnames
-    - q.EnumOrdinal: api/enums/#q-enumordinal
-    - q.EnumParse: api/enums/#q-enumparse
-    - q.EnumValid: api/enums/#q-enumvalid
-    - q.EnumValues: api/enums/#q-enumvalues
-    - q.Exhaustive: api/exhaustive/#q-exhaustive
-    - q.Exists: api/data/#q-exists
-    - q.ExistsErr: api/data/#q-existserr
-    - q.Expr: api/slog/#q-expr
-    - q.F: api/format/#q-f
-    - q.Ferr: api/format/#q-ferr
-    - q.Fields: api/reflection/#q-fields
-    - q.File: api/slog/#q-file
-    - q.FileLine: api/slog/#q-fileline
-    - q.Filter: api/data/#q-filter
-    - q.FilterErr: api/data/#q-filtererr
-    - q.Find: api/data/#q-find
-    - q.FlatMap: api/data/#q-flatmap
-    - q.FlatMapErr: api/data/#q-flatmaperr
-    - q.Fln: api/format/#q-fln
-    - q.Fold: api/data/#q-fold
-    - q.FoldErr: api/data/#q-folderr
-    - q.ForAll: api/data/#q-forall
-    - q.ForAllErr: api/data/#q-forallerr
-    - q.ForEach: api/data/#q-foreach
-    - q.ForEachErr: api/data/#q-foreacherr
-    - q.GenEnumJSONLax: api/gen/#q-genenumjsonlax
-    - q.GenEnumJSONStrict: api/gen/#q-genenumjsonstrict
-    - q.Generator: api/generator/#q-generator
-    - q.GenStringer: api/gen/#q-genstringer
-    - q.GetPar: api/par/#q-getpar
-    - q.GobCodec: api/atcompiletime/#q-gobcodec
-    - q.GoroutineID: api/goroutine_id/#q-goroutineid
-    - q.GroupBy: api/data/#q-groupby
-    - q.InstallSlog: api/slog/#q-installslog
-    - q.InstallSlogJSON: api/slog/#q-installslogjson
-    - q.InstallSlogText: api/slog/#q-installslogtext
-    - q.JSONCodec: api/atcompiletime/#q-jsoncodec
-    - q.Kebab: api/string_case/#q-kebab
-    - q.Keys: api/data/#q-keys
-    - q.Lazy / q.LazyE: api/lazy/#q-lazy-q-lazye
-    - q.LazyEFromThunk: api/lazy/#q-lazyefromthunk
-    - q.LazyFromThunk: api/lazy/#q-lazyfromthunk
-    - q.Line: api/slog/#q-line
-    - q.Lock: api/lock/#q-lock
-    - q.LogCloseErr: api/assemble/#q-logcloseerr
-    - q.Lower: api/string_case/#q-lower
-    - q.Map: api/data/#q-map
-    - q.MapEntries: api/data/#q-mapentries
-    - q.MapEntriesErr: api/data/#q-mapentrieserr
-    - q.MapErr: api/data/#q-maperr
-    - q.MapKeys: api/data/#q-mapkeys
-    - q.MapKeysErr: api/data/#q-mapkeyserr
-    - q.MapValues: api/data/#q-mapvalues
-    - q.MapValuesErr: api/data/#q-mapvalueserr
-    - q.Match: api/match/#q-match
-    - q.Max: api/data/#q-max
-    - q.MaxBy: api/data/#q-maxby
-    - q.Min: api/data/#q-min
-    - q.MinBy: api/data/#q-minby
-    - q.NamedSQL: api/sql/#q-namedsql
-    - q.NewScope: api/scope/#q-newscope
-    - q.NotNil / q.NotNilE: api/notnil/#q-notnil-q-notnile
-    - q.Ok / q.OkE: api/ok/#q-ok-q-oke
-    - q.OnType: api/match/#q-ontype
-    - q.Open / q.OpenE: api/open/#q-open-q-opene
-    - q.ParExists: api/par/#q-parexists
-    - q.ParExistsErr: api/par/#q-parexistserr
-    - q.ParFilter: api/par/#q-parfilter
-    - q.ParFilterErr: api/par/#q-parfiltererr
-    - q.ParFlatMap: api/par/#q-parflatmap
-    - q.ParFlatMapErr: api/par/#q-parflatmaperr
-    - q.ParForAll: api/par/#q-parforall
-    - q.ParForAllErr: api/par/#q-parforallerr
-    - q.ParForEach: api/par/#q-parforeach
-    - q.ParForEachErr: api/par/#q-parforeacherr
-    - q.ParGroupBy: api/par/#q-pargroupby
-    - q.ParGroupByErr: api/par/#q-pargroupbyerr
-    - q.ParMap: api/par/#q-parmap
-    - q.ParMapErr: api/par/#q-parmaperr
-    - q.Partition: api/data/#q-partition
-    - q.Pascal: api/string_case/#q-pascal
-    - q.PermitNil: api/assemble/#q-permitnil
-    - q.PgSQL: api/sql/#q-pgsql
-    - q.Recover / q.RecoverE: api/recover/#q-recover-q-recovere
-    - q.Recv / q.RecvE: api/recv/#q-recv-q-recve
-    - q.RecvAny / q.RecvAnyE: api/channel_multi/#q-recvany-q-recvanye
-    - q.RecvAnyCtx / q.RecvAnyCtxE: api/channel_multi/#q-recvanyctx-q-recvanyctxe
-    - q.RecvAnyRaw: api/channel_multi/#q-recvanyraw
-    - q.RecvAnyRawCtx: api/channel_multi/#q-recvanyrawctx
-    - q.RecvCtx / q.RecvCtxE: api/recv_ctx/#q-recvctx-q-recvctxe
-    - q.RecvRawCtx: api/recv_ctx/#q-recvrawctx
-    - q.Reduce: api/data/#q-reduce
-    - q.Require: api/require/#q-require
-    - q.Sealed: api/sealed/#q-sealed
-    - q.Set: api/convert/#q-set
-    - q.SetFn: api/convert/#q-setfn
-    - q.SlogAttr: api/slog/#q-slogattr
-    - q.SlogContextHandler: api/slog/#q-slogcontexthandler
-    - q.SlogCtx: api/slog/#q-slogctx
-    - q.SlogFile: api/slog/#q-slogfile
-    - q.SlogFileLine: api/slog/#q-slogfileline
-    - q.SlogLine: api/slog/#q-slogline
-    - q.Snake: api/string_case/#q-snake
-    - q.Sort: api/data/#q-sort
-    - q.SortBy: api/data/#q-sortby
-    - q.SortFunc: api/data/#q-sortfunc
-    - q.SQL: api/sql/#q-sql
-    - q.Sum: api/data/#q-sum
-    - q.Tag: api/reflection/#q-tag
-    - q.Take: api/data/#q-take
-    - q.Tern: api/tern/#q-tern
-    - q.Timeout: api/timeout/#q-timeout
-    - q.Title: api/string_case/#q-title
-    - q.TODO: api/todo/#q-todo
-    - q.ToErr: typed-nil-guard/#q-toerr
-    - q.Trace / q.TraceE: api/trace/#q-trace-q-tracee
-    - q.Try / q.TryE: api/try/#q-try-q-trye
-    - q.TypeName: api/reflection/#q-typename
-    - q.Unreachable: api/todo/#q-unreachable
-    - q.Unwrap / q.UnwrapE: api/try/#q-unwrap-q-unwrape
-    - q.Unzip: api/data/#q-unzip
-    - q.Upper: api/string_case/#q-upper
-    - q.Values: api/data/#q-values
-    - q.WithAssemblyDebug: api/assemble/#q-withassemblydebug
-    - q.WithAssemblyDebugWriter: api/assemble/#q-withassemblydebugwriter
-    - q.WithPar: api/par/#q-withpar
-    - q.WithParUnbounded: api/par/#q-withparunbounded
-    - q.Yield: api/generator/#q-yield
-    - q.Zip: api/data/#q-zip
-    - q.ZipMap: api/data/#q-zipmap
-  - Why builds fail on `*MyErr` returns: typed-nil-guard.md
+    - Atoms: api/atom.md
+    - Await (ctx): api/await_ctx.md
+    - Await fan-in: api/await_multi.md
+    - Channel fan-in: api/channel_multi.md
+    - Channel recv: api/recv.md
+    - Comptime: api/atcompiletime.md
+    - Coroutines: api/coro.md
+    - Ctx checkpoint: api/checkctx.md
+    - Debug print: api/debug.md
+    - Dependency injection: api/assemble.md
+    - Either: api/either.md
+    - Enum helpers: api/enums.md
+    - Error check: api/check.md
+    - Error trace: api/trace.md
+    - Exhaustive switch: api/exhaustive.md
+    - Futures: api/async.md
+    - Generators: api/generator.md
+    - Goroutine ID: api/goroutine_id.md
+    - Interpolation: api/format.md
+    - Lazy values: api/lazy.md
+    - Lifetime scope: api/scope.md
+    - Match expression: api/match.md
+    - Method codegen: api/gen.md
+    - Mutex sugar: api/lock.md
+    - Nil bubble: api/notnil.md
+    - Ok bubble: api/ok.md
+    - Optional chain: api/at.md
+    - Panic recover: api/recover.md
+    - Parallel ops: api/par.md
+    - Preconditions: api/require.md
+    - Recv (ctx): api/recv_ctx.md
+    - Reflection: api/reflection.md
+    - Required fields: api/fnparams.md
+    - Resource open: api/open.md
+    - Slice ops: api/data.md
+    - Slog attrs: api/slog.md
+    - SQL builder: api/sql.md
+    - String case: api/string_case.md
+    - Struct convert: api/convert.md
+    - Sum (interface): api/sealed.md
+    - Sum (struct): api/oneof.md
+    - Ternary: api/tern.md
+    - Timeout: api/timeout.md
+    - TODO marker: api/todo.md
+    - Try: api/try.md
+    - Type assert: api/as.md
+  - Typed-nil guard: typed-nil-guard.md
   - Design: design.md
