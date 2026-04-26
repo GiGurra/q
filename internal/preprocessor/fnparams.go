@@ -85,7 +85,7 @@ func checkFnParamsLit(fset *token.FileSet, lit *ast.CompositeLit, info *types.In
 	if !ok || tv.Type == nil {
 		return nil, false
 	}
-	required, ok := fnParamsRequiredFields(tv.Type)
+	required, markerName, ok := fnParamsRequiredFields(tv.Type)
 	if !ok {
 		return nil, false
 	}
@@ -133,30 +133,30 @@ func checkFnParamsLit(fset *token.FileSet, lit *ast.CompositeLit, info *types.In
 		File: pos.Filename,
 		Line: pos.Line,
 		Col:  pos.Column,
-		Msg:  fmt.Sprintf("q.FnParams: required field(s) %v not set in %s literal (mark optional fields with `q:\"optional\"` to opt them out)", missing, typeName),
+		Msg:  fmt.Sprintf("q.%s: required field(s) %v not set in %s literal (mark optional fields with `q:\"optional\"` or `q:\"opt\"` to opt them out)", markerName, missing, typeName),
 	})
 	return diags, true
 }
 
 // fnParamsRequiredFields returns the list of required field names on
-// a type if it has the FnParams marker, plus a bool indicating
-// whether the marker was found at all. Required = field is exported
-// (named, not blank) AND not tagged `q:"optional"` AND not the marker
-// itself.
+// a type, plus the name of the marker found (e.g. "FnParams" or
+// "ValidatedStruct"), plus a bool indicating whether any marker was
+// found at all. Required = field is exported (named, not blank) AND
+// not tagged `q:"optional"`/`q:"opt"` AND not the marker itself.
 //
 // Cross-package types are handled because go/types resolves their
 // fields and tags transparently.
-func fnParamsRequiredFields(t types.Type) ([]string, bool) {
+func fnParamsRequiredFields(t types.Type) ([]string, string, bool) {
 	st, ok := unwrapStruct(t)
 	if !ok {
-		return nil, false
+		return nil, "", false
 	}
-	hasMarker := false
+	markerName := ""
 	var required []string
 	for i := 0; i < st.NumFields(); i++ {
 		f := st.Field(i)
-		if isFnParamsMarker(f) {
-			hasMarker = true
+		if name, ok := fnParamsMarkerName(f); ok {
+			markerName = name
 			continue
 		}
 		if f.Name() == "_" {
@@ -167,10 +167,34 @@ func fnParamsRequiredFields(t types.Type) ([]string, bool) {
 		}
 		required = append(required, f.Name())
 	}
-	if !hasMarker {
-		return nil, false
+	if markerName == "" {
+		return nil, "", false
 	}
-	return required, true
+	return required, markerName, true
+}
+
+// fnParamsMarkerName returns the marker type's bare name (e.g.
+// "FnParams" or "ValidatedStruct") when the field is a recognised
+// blank marker, or ("", false) otherwise.
+func fnParamsMarkerName(f *types.Var) (string, bool) {
+	if f.Name() != "_" {
+		return "", false
+	}
+	named, ok := f.Type().(*types.Named)
+	if !ok {
+		return "", false
+	}
+	obj := named.Obj()
+	if obj == nil || obj.Pkg() == nil {
+		return "", false
+	}
+	if obj.Pkg().Path() != qPkgImportPath {
+		return "", false
+	}
+	if !validationMarkerNames[obj.Name()] {
+		return "", false
+	}
+	return obj.Name(), true
 }
 
 // unwrapStruct returns the *types.Struct underlying a type if any.
@@ -189,28 +213,6 @@ func unwrapStruct(t types.Type) (*types.Struct, bool) {
 			return nil, false
 		}
 	}
-}
-
-// isFnParamsMarker reports whether a struct field is one of the
-// q.* validation markers (`_ q.FnParams` or `_ q.ValidatedStruct`).
-// The check matches by package path + type name so users can rename
-// their q import alias freely.
-func isFnParamsMarker(f *types.Var) bool {
-	if f.Name() != "_" {
-		return false
-	}
-	named, ok := f.Type().(*types.Named)
-	if !ok {
-		return false
-	}
-	obj := named.Obj()
-	if obj == nil || obj.Pkg() == nil {
-		return false
-	}
-	if obj.Pkg().Path() != qPkgImportPath {
-		return false
-	}
-	return validationMarkerNames[obj.Name()]
 }
 
 // hasOptionalTag reports whether a struct tag carries the
