@@ -82,6 +82,12 @@ Manual toolexec runs against an existing module should keep their own cache:
 re-running toolexec builds, or the old binary on `$PATH` will run instead. The e2e harness does this automatically in
 `TestMain`.
 
+## Lint before pushing
+
+Always run `golangci-lint run ./...` before any `git push`. CI runs the same lint and will reject a push that introduces lint failures, so catching it locally avoids a wasted round-trip. If lint fails, fix the underlying issue rather than waivering it — the only acceptable `//nolint:` is one with a comment explaining why the rule's spirit doesn't apply (precedent: `pkg/q/q.go`'s `//nolint:unused // documented as part of the chain contract` on chain-method receiver fields the rewriter erases).
+
+This applies even when the diff is doc-only or test-only — the lint runs over everything in the repo, and a stale failure from earlier work blocks the push.
+
 ## Keep the docs fresh
 
 After every significant change — a new or renamed API, a new package, a new convention, a design reconsideration, or

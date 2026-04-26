@@ -85,7 +85,7 @@ func buildAtomReplacement(fset *token.FileSet, src []byte, sub qSubCall, alias s
 		bare = t.Sel.Name
 		full = exprText(fset, src, t)
 	default:
-		return fmt.Sprintf("/* q.A: unsupported type argument */ \"\"")
+		return `/* q.A: unsupported type argument */ ""`
 	}
 	if sub.Family == familyAtomOf {
 		return fmt.Sprintf("%s.Atom(%q)", alias, bare)
