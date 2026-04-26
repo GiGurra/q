@@ -63,6 +63,10 @@ For every `*ast.CompositeLit` in your package, the preprocessor:
   struct.
 - **Cross-package types work.** go/types resolves struct fields and
   tags transparently across module / package boundaries.
+- **Nested literals are validated.** A marked struct used as a
+  field type, pointer field, slice element, or map value is checked
+  the same way as a top-level literal — the preprocessor walks every
+  `CompositeLit` in the package, so nesting falls out for free.
 - **Lower tag noise than alternatives.** In real param structs most
   fields are required; tagging the minority (optionals) is shorter
   than tagging the majority (the "mark required" alternative).
@@ -123,6 +127,46 @@ Positional literals set every field by construction, so the
 keyed-field check doesn't apply. (The Go compiler already complains
 if you omit positional values for visible fields, so this is
 naturally safe.)
+
+### Nested marked structs
+
+```go
+type DBOptions struct {
+    _    q.FnParams
+    Host string
+    Port int
+    TLS  bool `q:"optional"`
+}
+
+type ServerOptions struct {
+    _        q.FnParams
+    Bind     string
+    DB       DBOptions             // value-nested marked struct
+    Backup   *DBOptions            `q:"optional"`
+    Replicas []DBOptions           `q:"optional"`
+    NamedDBs map[string]DBOptions  `q:"optional"`
+}
+
+// Every inner literal is validated, including elided-type forms in
+// slice / map / pointer positions:
+Server(ServerOptions{
+    Bind: ":8080",
+    DB:   DBOptions{Host: "primary", Port: 5432},
+    Replicas: []DBOptions{
+        {Host: "r1", Port: 5440},          // checked
+        {Host: "r2", Port: 5441, TLS: true},
+    },
+    NamedDBs: map[string]DBOptions{
+        "prod": {Host: "p", Port: 5500},   // checked (elided type)
+    },
+})
+
+// MISSING the inner Port — fails the build:
+Server(ServerOptions{
+    Bind: ":8080",
+    DB:   DBOptions{Host: "primary"},  // diagnostic: Port required
+})
+```
 
 ### Migrating an existing struct
 

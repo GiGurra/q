@@ -1,0 +1,5 @@
+s1.DB: {{} primary 5432 false}
+s2.Backup.Host: backup
+s3.Replicas[0]: {{} r1 5440 false}
+s4.NamedDBs[prod]: {{} p 5500 false}
+s5.Backup.TLS: true

@@ -1,0 +1,5 @@
+# Each nested literal must trigger a q.FnParams diagnostic naming the missing field.
+required field(s) [Port] not set
+required field(s) [Host] not set
+required field(s) [Port] not set
+required field(s) [Host] not set
