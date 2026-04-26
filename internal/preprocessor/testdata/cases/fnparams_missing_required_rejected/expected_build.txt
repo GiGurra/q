@@ -1,0 +1,3 @@
+# Both literals must trigger a q.FnParams diagnostic naming the missing required fields.
+required field(s) [Format] not set
+required field(s) [Format Path] not set

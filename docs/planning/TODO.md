@@ -196,41 +196,7 @@ The persistent backlog for `q`. A cold-state reader can pick up here without re-
 
   **When this matters:** if a real workload shows q.AtCompileTime decode time as a measurable startup-cost line item OR if the encoded JSON/Gob blob bloats the binary noticeably. Until then, the codec route earns its keep.
 
-- **#93 — Required-by-default parameter structs (opt-out via `q:"optional"`).** `func Foo(p Params)` with a struct param is the standard Go alternative to named arguments. The gap: Go can't distinguish "user explicitly set this to its zero value" from "user didn't set it," so a "required field" check on top of plain struct literals has no clean shape in pure Go. Distinct from the dropped `q.Call` / `q.Named` shape (see "Considered and dropped"); that attached named semantics at the call site, this attaches required-by-default semantics to the parameter struct's *definition* and lets callers keep plain Go literal syntax.
-
-  **Mechanism.** Flip the polarity: every field is required by default; mark optional fields explicitly.
-
-  ```go
-  type Params struct {
-      A       int                                 // required
-      B       string                              // required
-      Timeout time.Duration `q:"optional"`        // optional, zero = use default
-      Logger  *slog.Logger  `q:"optional"`        // optional
-  }
-  ```
-
-  Preprocessor inspects each struct type's AST and tag set (same machinery as the per-package q.* scan; conceptually similar to what `q.AtCompileTime` does for arbitrary expressions, but specialised to struct-tag reading). For each function whose param is one of these types, every call site whose arg is a struct literal must syntactically name every required (= non-optional) field. Missing required field → preprocess-time error.
-
-  **Why flip the polarity from required-marker to optional-marker.**
-  - **Fail-safe default.** With a "mark required" tag, forgetting the tag silently degrades to "no check." Required-by-default makes forgetting fail loud — the call site won't compile, which is the right direction.
-  - **Lower tag noise.** In real Go param structs most fields are mandatory; you put them there because the function needed them. Tagging the minority (optionals) is shorter than tagging the majority.
-  - **Composes with existing tooling.** `golangci-lint`'s `exhaustruct` enforces "every field set" but lacks a clean opt-out for legitimately-optional fields. Required-by-default + `q:"optional"` opt-out is exactly that opt-out.
-
-  **Hard limit (deliberately accepted — no data-flow analysis).** Only struct literals at the call site are checkable.
-  - `Foo(Params{A: 1, B: "x"})` ✓ — checked, every required field present.
-  - `Foo(Params{1, "x", 0, nil})` ✓ — positional literal, every field set by construction.
-  - `Foo(Params{A: 1})` ✗ — required field `B` missing, preprocess-time error.
-  - `Foo(p)` where `p := Params{A: 1, B: "x"}` — *not* checked. Document; users who want stricter coverage do their own entry-time check or rely on `exhaustruct`.
-  - `Foo(getParams())` — not checked. Same reasoning.
-
-  **Open design questions.**
-  - **Cross-package struct.** `Foo(otherpkg.Params{A: 1})` — preprocessor reads otherpkg's struct definition via go/types like the rest of q. Works the same.
-  - **Embedded fields with tags.** Punt for v1; rare, and the recursion semantics (does an untagged embedded struct count as one required field, or do its inner required fields propagate?) deserve their own design pass.
-  - **Zero-as-explicit-default.** `Foo(Params{A: 0, B: "x"})` — A is syntactically present, treat as set. Users wanting "non-zero required" semantics layer `q.NonZero(p.A)` runtime check on top.
-  - **Tag value extension.** Start with bare `q:"optional"`. If documentation hints become useful later (`q:"optional,doc:request timeout"`), extend incrementally.
-  - **Migration of existing code.** Adding the convention to a struct that already has callers immediately turns previously-passing `Foo(Params{A: 1})` calls into preprocess errors. That's correct (those calls were probably bugs), but document the migration step: tag every field that wasn't always set in practice with `q:"optional"`, then tighten over time.
-
-  **Why now-ish.** The flipped polarity makes this an actual ergonomic win: most fields don't need tags, optionals are visibly marked, forgetting fails loud. Preprocessor work is bounded — AST tag scan + per-call-site keyed-field verification, no flow analysis.
+- **#93 follow-up — q.FnParams: embedded struct propagation.** v1 of `q.FnParams` validates only direct field membership. Embedded structs are skipped — if `Inner` has the marker and `Outer` embeds `Inner`, `Outer` literals that don't go through Inner aren't validated. Decide whether the marker should propagate (and how — flatten vs. recursive validation) before users hit it in practice.
 
 ### Considered and dropped
 

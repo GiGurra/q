@@ -1,0 +1,5 @@
+out1: path=/etc format=yaml timeout=0s
+out2: path=/etc format=json timeout=5s
+out3: path=/etc format=toml timeout=1s
+plain: {0 }
+pos: {1 x}

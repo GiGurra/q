@@ -320,6 +320,22 @@ if userRequested {
 
 `q.Lazy(<expr>)` reads as if the expression were eager but the rewriter wraps it in a thunk closure. The first `.Value()` call evaluates the thunk under `sync.Once`; later calls return the cached result. Concurrency-safe by construction. `q.LazyE(<call>)` is the `(T, error)`-shaped sibling — pair `.Value()` with `q.Try` at the consumer. See [`docs/api/lazy.md`](docs/api/lazy.md).
 
+### Required-by-default parameter structs
+
+```go
+type LoadOptions struct {
+    _       q.FnParams
+    Path    string                              // required
+    Format  string                              // required
+    Timeout time.Duration `q:"optional"`        // optional
+}
+
+Load(LoadOptions{Path: "/etc", Format: "yaml"}) // OK
+Load(LoadOptions{Path: "/etc"})                  // build error: Format required
+```
+
+Add `_ q.FnParams` as a blank field on a parameter struct to flip the polarity: every field is required by default, opt out per field via the `q:"optional"` tag. The preprocessor checks each marked struct literal at its construction site; missing required fields fail the build with a diagnostic naming the gap. See [`docs/api/fnparams.md`](docs/api/fnparams.md).
+
 ### Auto-derived dependency injection
 
 ```go

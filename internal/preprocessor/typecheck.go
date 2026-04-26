@@ -76,7 +76,13 @@ func checkErrorSlotsWithInfo(fset *token.FileSet, pkgPath, importcfgPath string,
 		Uses:  map[*ast.Ident]types.Object{},
 		Defs:  map[*ast.Ident]types.Object{},
 	}
-	if len(shapes) == 0 || pkgPath == "" || importcfgPath == "" {
+	// Skip the typecheck pass entirely when the package has no
+	// preprocessor-relevant code: no q.* shapes AND no file imports
+	// pkg/q (which is what q.FnParams literal validation hangs off).
+	if pkgPath == "" || importcfgPath == "" {
+		return info, nil
+	}
+	if len(shapes) == 0 && !packageImportsQ(files) {
 		return info, nil
 	}
 
@@ -177,6 +183,12 @@ func checkErrorSlotsWithInfo(fset *token.FileSet, pkgPath, importcfgPath string,
 	// passes above — purely syntactic, but it consults the scanner's
 	// classified shapes to recognise q.Open(...).DeferCleanup(...) bindings.
 	diags = append(diags, checkResourceEscapes(fset, files, shapes)...)
+
+	// q.FnParams validation — required-by-default param structs.
+	// Walks every CompositeLit in the package and checks marked
+	// types. Independent of the q.* call shapes; piggy-backs on the
+	// same go/types info.
+	diags = append(diags, validateFnParams(fset, files, info)...)
 
 	return info, diags
 }
