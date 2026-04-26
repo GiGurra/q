@@ -78,27 +78,6 @@ The persistent backlog for `q`. A cold-state reader can pick up here without re-
 
   Park until users actually hit the inline-wrapper pattern often enough that one of these earns its keep.
 
-- **#87 — Ctx-attached assembly cache.** `q.WithAssemblyCache(ctx)` (name TBD) attaches a `*sync.Map` keyed by typeKey; `q.Assemble` / `q.AssembleAll` consult it before building each dep. Two consecutive calls in the same ctx scope reuse `*Config`, `*DB`, etc. — useful in long-running services where the same dep set is rebuilt for each request handler.
-
-  **Open design questions.**
-
-  - **Lookup key.** typeKey alone (simplest, but two recipes producing the same type silently share) is fine for most cases since the branded-variant pattern (`type PrimaryDB struct{ *DB }`) already gives each variant its own typeKey. If finer-grained scoping is needed later, the cache could key on `(typeKey, callSite)` to localise sharing.
-  - **Phase 3 collision.** A cached `*DB` carries a `func()` cleanup. Cleanup must fire ONCE, tied to ctx cancellation — not per-Assemble-call. Either the cache owns the cleanup (registered via `context.AfterFunc(ctx, cleanup)`) or resource recipes are excluded from caching and rebuilt every time.
-  - **Errors.** Re-attempt on each call, or cache the error? Default: no cache on error so transient failures don't get pinned.
-  - **Recipe-identity divergence.** If two `q.Assemble` call sites use different recipe functions but request the same `*Config` type, the second call gets the first's `*Config`. Spec it as "ctx is the cache scope; you own its membership" rather than trying to be clever.
-
-  **Mechanism sketch.** Rewriter detects `q.AssemblyCache(ctx) != nil` at IIFE entry (one ctx.Value lookup, like the debug-trace prelude). When non-nil, each step emits `if v, ok := _qCache.Load(typeKey); ok { _qDep<N> = v.(T) } else { _qDep<N> = recipe(...); _qCache.Store(typeKey, _qDep<N>) }`. When nil, sequential serial emit unchanged.
-
-  **Partial-failure semantics — write-at-end pattern.** The cache is only written AT THE END of a successful assembly, never mid-flight. Two consequences fall out:
-
-  1. **No failure-path cache invalidation.** If assembly fails mid-chain, the cache is unchanged — there's nothing to roll back. Local cleanups still fire (in reverse-topo order, unconditional, built into the chain rewriter). Pre-existing cache entries from earlier successful assemblies remain valid.
-
-  2. **No mid-flight race window.** A failed assembly can't pollute the cache with half-built deps that another concurrent assembly could grab.
-
-  Mechanism: rewriter emits per-step `if cached, ok := _qCache.Load(key); ok { use cached } else { build fresh }`. The "build fresh" path does NOT Store. After the IIFE's final success path, ONE pass `_qCache.Store(...)` for each freshly-built dep. Failure paths skip the Store pass entirely.
-
-  **Concurrency caveat (for the docs, not a hard problem).** Two assemblies running concurrently in the same cache scope may both build the same dep type before either reaches the success-path Store; whichever Stores first wins, the other's instance is orphaned (not cleaned up — it was never registered in any local cleanup chain that survived to fire). For the strict singleflight semantics, layer a sync.Mutex per typeKey or use golang.org/x/sync/singleflight; defer that until users actually hit the orphaning.
-
 ### Coroutines
 
 - **#85 tier 3 — Stackless coroutines (preprocessor-rewritten state machines).** The preprocessor analyses a function containing `q.Yield(v)` calls, identifies yield points as state-machine transitions, and rewrites the entire function into a state-machine struct with a `Resume(input) (output, done)` method. No goroutine. No channel. Just a struct holding the saved local variables and a `state int` field.
@@ -138,6 +117,91 @@ The persistent backlog for `q`. A cold-state reader can pick up here without re-
   - **Typed payload constraints.** Generic on T; no runtime type assertion. For heterogeneous payloads users wrap in a struct or use `any`.
 
   Inspiration: Qt's signal/slot, observable patterns from RxJava / RxJS, but simpler — no operator zoo, just connect/emit/disconnect.
+
+### Type conversion / structural typing
+
+- **#94 — Auto-derive conversions between near-compatible types.** Scala's [Chimney](https://chimney.readthedocs.io/) is the reference: derive a transformer between two case classes (or other shapes) where the source has all the fields the target needs (perhaps under different names, with implicit type widening, or wrapped in `Option`); the macro emits the per-field copy code at compile time without runtime reflection. `q.From[Source](v).To[Target]()` would be the analogue here — the preprocessor reads both struct shapes via `go/types`, walks fields, emits the literal `Target{Field: src.Field, ...}` expression, and reports unmappable fields as build-time diagnostics with the per-field gap.
+
+  **Surface (sketch):**
+
+  ```go
+  // bare:
+  dst := q.From(src).To[Target]()                                 // 1:1 by name
+  // with renames / explicit overrides:
+  dst := q.From(src).To[Target](q.Rename("FooID", "ID"), q.Const("Source", "v1"))
+  // shapes:
+  // - struct -> struct (recursive); copy by exported-name match.
+  // - T -> Option/sql.Null/pointer wrapping (lift trivially).
+  // - []T -> []U if T -> U is derivable (recurse).
+  // - map[K]T -> map[K]U if T -> U derivable (recurse).
+  // - duck-typed interfaces: target needs a subset of source's methods.
+  ```
+
+  **Why preprocessor over runtime reflection:** the unmapped-field check is a compile-time error, not a runtime panic; emitted code is straight field assignment (zero overhead); IDE jump-to-definition still finds source/target struct fields naturally. The Chimney/Scala-macros story is the same trade-off: compile-time derivation beats runtime reflection in both perf and correctness signals.
+
+  **Open design questions before picking up:** how aggressive is the implicit lifting (e.g. `int → int64` yes; `int → string` no; `*T → T` deref ok if non-nil enforced); how does the surface handle nested struct mismatches (auto-recurse vs. require explicit `q.NestedFrom`); whether to support iterators/streams or only finite collections. Worth picking up when the design space feels narrow enough to commit — start with struct-to-struct exact-name + nested recursion, expand from there.
+
+- **#95 — Variance tags / casting tricks for covariance & contravariance.** Go's type system is strictly invariant: `[]Animal` and `[]Dog` are unrelated even when `Dog` satisfies `Animal`; `func(Animal)` and `func(Dog)` likewise. Common Go idiom is to copy element-by-element or to introduce an interface, both of which leak into call sites. The question this entry parks: can the preprocessor offer a Scala-like variance annotation (`q.Covariant[T]` / `q.Contravariant[T]` markers, or a `q.Variant[+A]` shape declaration) that gets erased at rewrite time, with the rewriter emitting the per-element copy / interface-conversion / unsafe-cast that Go won't generate itself?
+
+  **Investigation directions before coding:**
+  - **Type-system pressure points.** Where does invariance bite hardest in real Go code? Slice element widening (`[]*Concrete` → `[]Iface`) is the canonical case; `chan<-` / `<-chan` on directional channels is another; function-argument variance (parameters contravariant, returns covariant) shows up when assigning method values. Pick one or two concrete pain points, design the annotation around those.
+  - **Erasure mechanism.** A pure rewriter trick — the annotation is a compile-time marker, the rewriter emits `runtime: copy slice / wrap iter / unsafe.Slice cast` based on inferred direction. Avoid `unsafe` if a typed shape suffices. Slice covariance: emit `dst := make([]Iface, len(src)); for i := range src { dst[i] = src[i] }`. Channel directionality: rewrite to a goroutine-bridged copy. Function variance: emit a wrapper closure.
+  - **Hack-the-type-system option.** Investigate whether Go's existing type assertions + unsafe.Pointer can fake covariance for slices of interfaces under specific layout conditions (interface header is fixed-size, so `[]*T → []I` *might* be a no-op cast under tight constraints — but Go's runtime layout for interface slices includes itab pointers, so a memcpy fake almost certainly UB. Document conclusively before promising anything.)
+  - **Surface options to compare:** declarative (`type Container[+A] struct{...}` with the rewriter generating the conversion at use-site), imperative (`q.Widen[Iface](slice)` returns the converted slice), or annotation on existing types (`var _ = q.Covariant[*Dog, Animal]()` directives that set up auto-conversion rules globally for the package).
+
+  **Realistic scope:** this is a research entry. The hard part is the type-system spelunking, not the codegen. Pick the most fun shape first — slice element widening is the canonical entry point and exercises the rewriter's per-element copy machinery.
+
+- **#96 — Implicit conversions, Scala-style.** Scala 2's `implicit def` and Scala 3's `given`/`Conversion` let the compiler insert a conversion between mismatched types at the call site without the user spelling it. Useful when calling APIs that want a slightly different type than the one in hand, and the conversion is unambiguous (`int → BigInt`, `String → Path`, domain-specific units like `Duration → Long`). Both versions paid for the convenience: Scala 2 implicits became infamous for invisible action-at-a-distance; Scala 3's `given` pulled the surface toward explicit `using` clauses to claw clarity back. Worth investigating which (if either) generalises into a sane Go-via-q feature.
+
+  **What an analogue would look like:**
+  - User declares a registered conversion: `var _ = q.Implicit(func(d time.Duration) int64 { return int64(d) })`. The directive is read by the rewriter at scan time.
+  - At any call site where Go's type checker would reject (e.g. `setTimeout(5*time.Second)` where `setTimeout` takes `int64`), the preprocessor consults its registered conversions and, if exactly one applies, inserts the call: `setTimeout(int64(5*time.Second))`.
+  - Ambiguity (two conversions both apply) is a build-time error with both candidates listed.
+  - Visibility scopes: per-package, per-file, or per-import. Scala 3's `given` is the lesson here — Scala 2 leaked implicits across the whole compilation unit and projects regretted it.
+
+  **Comparing Scala 2 vs Scala 3 framings:**
+  - **Scala 2 (`implicit def`)**: implicit conversions auto-applied wherever a type mismatch exists; readers can't see the conversion at the call site. Frequently led to surprise bugs when removed conversions caused wide breakage. Lesson: don't make conversions invisible at call sites.
+  - **Scala 3 (`given`/`Conversion[A, B]` + `import x.given`)**: conversions are still implicit but require an opt-in import; the type signature `Conversion[A, B]` is more discoverable than a free-standing `implicit def`. Lesson: explicit-import gates make implicits manageable.
+  - **Hybrid for q:** make the directive opt-in per-file (e.g. `var _ = q.UseImplicits(myConversionSet)` at file scope), and require the conversion's source/target pair to be unambiguous within the registered set. Build-time errors over runtime panics; per-file activation over global.
+
+  **Why this is q-shaped, not Go-shaped:** Go intentionally rejects implicit conversion to keep call sites obvious. q can offer this as a deliberate opt-in feature for codebases that want it, with the rewriter making the inserted call explicit in the generated code (an IDE that follows q's debug output sees the explicit conversion). The rejection-by-default rule of Go stands; q lets a project lift it locally.
+
+  **Open questions that gate any work:** is the build-time discoverability cost (conversions are non-local — readers might not know which conversions are registered without reading the directives) worth the call-site brevity? The Scala 3 `using`-import gating is a workable answer; whether the noise reduction at `int64(5*time.Second)`-style call sites earns the invisibility cost is the call to make.
+
+- **#97 — Truly immutable data, with build-time enforcement.** Go's only built-in immutability is `const` (basic types only) and unexported fields (which discipline the *package*, not the *value*). Real immutability — "this struct CANNOT be mutated after construction, period, and the compiler tells you when you try" — is missing. q's preprocessor sees enough source to enforce it; the question is whether the surface earns the lift.
+
+  **What "immutable" means here:**
+  - Direct field write rejected: `cfg.DB = "x"` → build error.
+  - Pointer rebinding rejected: if `cfg *Config` is immutable, `*cfg = Config{...}` → build error (same address, mutated payload).
+  - Slice/map/chan elements: trickier — Go's slice/map are reference types; mutation through them isn't a write to the holder. Either declare the holder *and* its contents recursively immutable, or stick to value semantics.
+  - Method calls that mutate via pointer receiver: rejected unless the method is itself marked pure.
+
+  **Surface candidates:**
+  - **Type-level marker.** `type Config q.Immutable[struct{ DB string }]` — the marker is erased at rewrite time but the scanner records that any value of `Config` is immutable.
+  - **Field-level marker.** `type Config struct { DB string `q:"immutable"` }` — finer grain, allows mixed structs.
+  - **Construction-only.** `cfg := q.Frozen(&Config{DB: "x"})` returns a typed-immutable wrapper; the wrapper is unwrapped only by `q.Read(cfg).DB` access syntax. Loud at use sites.
+
+  **Enforcement mechanism — preprocessor's role:**
+  - At scan time, build a set of immutable type identities (from markers) and immutable-value bindings (from `q.Frozen` results).
+  - Walk every assignment / address-taking / pointer-deref-write site; flag any write whose LHS resolves to an immutable type or binding.
+  - Emit build-time diagnostics with file:line:col, same format as the existing q.Assemble diagnostics.
+  - Method calls: walk method bodies looking for writes to `*receiver`; flag any non-pure method called on an immutable value.
+
+  **Slice/map element story.** Two layers to consider:
+  - Holder immutability: the field referencing the slice can't be reassigned (covered by direct write enforcement).
+  - Element immutability: the slice's contents can't change. Requires the slice's *element type* to also be immutable, or a marker like `[]q.Immutable[T]`. Recursive depth.
+
+  **Why this is q-shaped:**
+  - Pure runtime can't enforce it (reflection can copy and mutate; finalizers see writes).
+  - Codegen can detect-and-reject at scan time. The user's effort is one annotation per type; q does the consistency check across the whole compile.
+  - IDE-friendly: the markers are valid Go (a generic type wrapper or a struct tag); editors don't squiggle. The immutability is a build-time invariant, not a syntax extension.
+
+  **Known hard cases:**
+  - **Embedded struct with mutable fields:** does the immutability propagate? Probably yes, recursively, with explicit opt-out via `q.Mutable[X]` for narrow fields that need it.
+  - **Interfaces:** an interface holding an immutable concrete is fine; an interface holding a `*Mutable` is not. Tracking this requires the rewriter to know, at every interface-typed binding, what concrete type was assigned.
+  - **Generics:** `func Update[T any](v T)` — the body can't write to `v` (Go already restricts that; T-via-pointer is the loophole). The check needs to be on the call site or on the param type.
+
+  **Open question worth chewing on:** what fraction of the bugs an immutable-data feature would prevent are *not* already prevented by Go's value semantics + small structs? Real codebases use mutability deliberately for builders, accumulators, lazy initialization. The pitch is "truly immutable for the cases where mutation is wrong" — the framing matters more than the surface here. Reference: Scala's `val`, Rust's `let` (vs `let mut`), Swift's `let`, and Kotlin's `val` are all worth comparing for surface trade-offs.
 
 ### Future / parking lot
 

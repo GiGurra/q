@@ -129,6 +129,7 @@ const (
 	familyAssemble       // q.Assemble[T](recipes...) (T, error) — auto-derived DI
 	familyAssembleAll    // q.AssembleAll[T](recipes...) ([]T, error) — multi-provider aggregation
 	familyAssembleStruct // q.AssembleStruct[T](recipes...) (T, error) — field-decomposed multi-output
+	familyNewScopeDefer  // q.NewScope().DeferCleanup() — defer-injected scope close
 	familyTern           // q.Tern[T](cond, ifTrue, ifFalse) T — conditional expression
 	familyAt             // q.At[T](chain).OrElse(alt)*.Or(fallback) | .OrDefault() — nested-nil safe traversal
 	familyLazy           // q.Lazy[T](v) — wrap arg expression in a thunk closure for sync.Once-backed deferred eval
@@ -415,6 +416,13 @@ type qSubCall struct {
 	// emits a guiding diagnostic.
 	AssembleChain assembleChain
 
+	// AssembleScopeArg is the *Scope expression handed to .WithScope(s).
+	// Captured at scan time as an ast.Expr; the rewriter splices its
+	// source text (with nested q.* substitutions) into the IIFE
+	// emitting the cache-aware path. nil for chains other than
+	// assembleChainWithScope.
+	AssembleScopeArg ast.Expr
+
 	// TernCond / TernThen / TernElse are the three q.Tern args
 	// captured at scan time. TernResultTypeText is T's spelling under
 	// the q.Tern call's package qualifier (populated by resolveTern).
@@ -528,6 +536,7 @@ const (
 	assembleChainNone assembleChain = iota
 	assembleChainDeferCleanup
 	assembleChainNoDeferCleanup
+	assembleChainWithScope // .WithScope(s) — bind the assembly's lifetime to a *Scope
 )
 
 // matchCase is one arm of a q.Match expression — either a
@@ -629,6 +638,15 @@ type assembleStep struct {
 	// rewriter to derive the final-step's "is this T?" decision and
 	// by other steps' InputKeys lookups.
 	OutputKey string
+
+	// OutputTypeText is the source-text spelling of the recipe's
+	// output type, qualified with the import alias the user picked
+	// (e.g. `*foo.Config`). Used by the WithScope rewriter to
+	// declare `var _qDep<N> <OutputTypeText>` and to type-assert
+	// the cached value (`v.(*foo.Config)`). Empty when typecheck
+	// was skipped — the rewriter's WithScope path doesn't run in
+	// that codepath.
+	OutputTypeText string
 
 	// OutputIsNilable is true when the recipe's output type can hold
 	// a nil value at runtime — pointer, interface, slice, map, chan,
@@ -860,6 +878,7 @@ var qRuntimeHelpers = map[string]bool{
 	"WithPar":          true,
 	"WithParUnbounded": true,
 	"GetPar":           true,
+	"NewScope":         true,
 }
 
 // scanFile walks one parsed source file and returns the list of
@@ -2486,8 +2505,26 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 				if isAssembleEntry(entry, alias) {
 					return classifyAssembleChain(call, sel, entry, alias)
 				}
+				if isNewScopeEntry(entry, alias) {
+					// q.NewScope().NoDeferCleanup() is a plain runtime
+					// chain — Scope's NoDeferCleanup body returns
+					// (scope, scope.Close) directly. q.NewScope().DeferCleanup()
+					// needs rewriter-injected defer.
+					if sel.Sel.Name == "NoDeferCleanup" {
+						return qSubCall{}, false, nil
+					}
+					return classifyNewScopeDeferChain(call, entry)
+				}
 			}
 			return classifyOpenChain(call, sel, alias)
+		}
+		// .WithScope(s) — only valid on the q.Assemble family.
+		if sel.Sel.Name == "WithScope" {
+			if entry, ok := sel.X.(*ast.CallExpr); ok {
+				if isAssembleEntry(entry, alias) {
+					return classifyAssembleChain(call, sel, entry, alias)
+				}
+			}
 		}
 		// Reject .RecoverIs / .RecoverAs as the outer (terminal)
 		// method — they continue the chain and must be followed by
@@ -2733,6 +2770,35 @@ func peelRecovers(entry *ast.CallExpr) (*ast.CallExpr, []recoverStep, error) {
 // call is the outer DeferCleanup/NoDeferCleanup CallExpr; sel is its .Fun
 // SelectorExpr (sel.Sel.Name ∈ {"DeferCleanup", "NoDeferCleanup"}). expr is
 // the source expression (== call) used for OuterCall span.
+// isNewScopeEntry reports whether the given CallExpr is `q.NewScope()`
+// — the entry call of a q.NewScope().DeferCleanup() /
+// .NoDeferCleanup() / .BoundTo(ctx) chain. Differentiator from
+// q.Open: q.NewScope takes zero args and is not indexed.
+func isNewScopeEntry(call *ast.CallExpr, alias string) bool {
+	if !isSelector(call.Fun, alias, "NewScope") {
+		return false
+	}
+	return len(call.Args) == 0
+}
+
+// classifyNewScopeDeferChain captures `q.NewScope().DeferCleanup()`
+// as a single shape needing rewriter-injected defer. The bare
+// q.NewScope() entry takes no args; .DeferCleanup() also takes no
+// args (the rewriter synthesises a `defer scope.Close()` in the
+// enclosing function so the call site receives the live scope).
+func classifyNewScopeDeferChain(call *ast.CallExpr, entry *ast.CallExpr) (qSubCall, bool, error) {
+	if len(call.Args) != 0 {
+		return qSubCall{}, false, fmt.Errorf("q.NewScope().DeferCleanup takes no arguments; got %d", len(call.Args))
+	}
+	if len(entry.Args) != 0 {
+		return qSubCall{}, false, fmt.Errorf("q.NewScope takes no arguments; got %d", len(entry.Args))
+	}
+	return qSubCall{
+		Family:    familyNewScopeDefer,
+		OuterCall: ast.Expr(call),
+	}, true, nil
+}
+
 // isAssembleEntry reports whether the given CallExpr is the entry
 // call of a q.Assemble / q.AssembleAll / q.AssembleStruct chain
 // (i.e. the receiver of `.DeferCleanup()` / `.NoDeferCleanup()` in an Assemble
@@ -2758,12 +2824,27 @@ func isAssembleEntry(call *ast.CallExpr, alias string) bool {
 // recipe list; the outer `call` carries the chain method invocation
 // (no args; both terminators are zero-arg today).
 func classifyAssembleChain(call *ast.CallExpr, sel *ast.SelectorExpr, entry *ast.CallExpr, alias string) (qSubCall, bool, error) {
-	if len(call.Args) != 0 {
-		return qSubCall{}, false, fmt.Errorf("q.Assemble[T](...).%s takes no arguments; got %d", sel.Sel.Name, len(call.Args))
-	}
-	chain := assembleChainDeferCleanup
-	if sel.Sel.Name == "NoDeferCleanup" {
+	var chain assembleChain
+	var scopeArg ast.Expr
+	switch sel.Sel.Name {
+	case "DeferCleanup":
+		chain = assembleChainDeferCleanup
+		if len(call.Args) != 0 {
+			return qSubCall{}, false, fmt.Errorf("q.Assemble[T](...).DeferCleanup takes no arguments; got %d", len(call.Args))
+		}
+	case "NoDeferCleanup":
 		chain = assembleChainNoDeferCleanup
+		if len(call.Args) != 0 {
+			return qSubCall{}, false, fmt.Errorf("q.Assemble[T](...).NoDeferCleanup takes no arguments; got %d", len(call.Args))
+		}
+	case "WithScope":
+		chain = assembleChainWithScope
+		if len(call.Args) != 1 {
+			return qSubCall{}, false, fmt.Errorf("q.Assemble[T](...).WithScope requires exactly one argument (a *q.Scope); got %d", len(call.Args))
+		}
+		scopeArg = call.Args[0]
+	default:
+		return qSubCall{}, false, fmt.Errorf("q.Assemble[T](...) chain method %q not recognised; valid: DeferCleanup, NoDeferCleanup, WithScope", sel.Sel.Name)
 	}
 
 	var fam family
@@ -2800,6 +2881,7 @@ func classifyAssembleChain(call *ast.CallExpr, sel *ast.SelectorExpr, entry *ast
 		AssembleRecipes:   recipes,
 		AssemblePermitNil: permitNil,
 		AssembleChain:     chain,
+		AssembleScopeArg:  scopeArg,
 		OuterCall:         ast.Expr(call),
 	}, true, nil
 }

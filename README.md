@@ -432,6 +432,11 @@ func newServer(d *DB, c *Config) *Server { return &Server{db: d, cfg: c} }
 //                  use when lifetime spans more than the function
 //                  scope (main / signal handlers / background workers).
 //
+//   .WithScope(s)     — returns (T, error). Built deps cache + cleanup
+//                  in `s` (a *q.Scope); subsequent assemblies in the
+//                  same scope reuse cached deps. Per-request, per-tenant,
+//                  per-session lifetimes — see docs/api/scope.md.
+//
 // Recipes can be (T), (T, error), (T, func()), (T, func(), error),
 // or an inline value. Resource shapes (and types with auto-detected
 // Close() / Close() error / writable channel) feed cleanups onto
@@ -444,6 +449,17 @@ func main() {
     server, shutdown, err := q.Assemble[*Server](newConfig, openDB, newServer).NoDeferCleanup()
     if err != nil { log.Fatal(err) }
     defer shutdown() // reverse-topo, blocking; idempotent
+    server.Run()
+}
+
+// Per-request scope: handler-built deps share a request-scoped scope.
+func handle(w http.ResponseWriter, r *http.Request) {
+    scope := q.NewScope().BoundTo(r.Context())
+    server := q.Try(q.Assemble[*Server](newConfig, openDB, newServer).WithScope(scope))
+    // Subsequent assemblies in the same scope reuse cached *Config / *DB.
+    worker := q.Try(q.Assemble[*Worker](newConfig, openDB, newWorker).WithScope(scope))
+    // server, db, worker all close when r.Context() is cancelled.
+    _ = worker
     server.Run()
 }
 

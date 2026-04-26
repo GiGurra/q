@@ -51,6 +51,7 @@ import (
 	"go/token"
 	"go/types"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -695,6 +696,7 @@ func resolveAssemble(fset *token.FileSet, sc *qSubCall, info *types.Info, pkgPat
 			AutoCleanup:     r.autoCleanup,
 			InputKeys:       append([]string(nil), r.resolvedInputKeys...),
 			OutputKey:       r.outputKey,
+			OutputTypeText:  typeText(r.output),
 			OutputIsNilable: isNilableType(r.output),
 			PermitNil:       r.permitNil,
 			Label:           recipeLabel(fset, r),
@@ -1017,6 +1019,10 @@ func buildAssembleReplacement(fset *token.FileSet, src []byte, sub qSubCall, sub
 //                    block. The pre-statement block is emitted
 //                    separately via buildAssembleDeferCleanupBlock.
 func buildAssembleSubText(fset *token.FileSet, src []byte, sub qSubCall, subs []qSubCall, subTexts []string, alias string, counter int) string {
+	if sub.AssembleChain == assembleChainWithScope {
+		text, _ := buildAssembleWithScopeReplacement(fset, src, sub, subs, subTexts, alias, counter)
+		return text
+	}
 	text, _ := buildAssembleReplacement(fset, src, sub, subs, subTexts, alias)
 	if sub.AssembleChain != assembleChainDeferCleanup {
 		return text
@@ -1053,6 +1059,201 @@ func buildAssembleDeferCleanupBlock(fset *token.FileSet, src []byte, sub qSubCal
 	shutVar := fmt.Sprintf("_qAShut%d", counter)
 	errVar := fmt.Sprintf("_qAErr%d", counter)
 	return fmt.Sprintf("%s, %s, %s := %s\n\tdefer %s()", depVar, shutVar, errVar, text, shutVar)
+}
+
+// buildAssembleWithScopeReplacement emits the IIFE for
+// q.Assemble[T](...).WithScope(s). Returns (T, error) directly; the
+// scope IS the lifetime owner so there's no caller-managed cleanup
+// closure to thread through.
+//
+// The IIFE shape:
+//
+//	(func() (T, error) {
+//	    _qScopeInt := q.NewScope()
+//	    _qScopeAttached := false
+//	    defer func() { if !_qScopeAttached { _qScopeInt.Close() } }()
+//	    _qScopeExt := <scopeArg>
+//	    var _qFresh []q.ScopeEntry
+//	    // per-step: Load-or-build with closed-check on miss
+//	    if !_qScopeAttached && len(_qFresh) > 0 {
+//	        if err := _qScopeExt.Commit(_qFresh, _qScopeInt); err != nil {
+//	            return *new(T), err
+//	        }
+//	    }
+//	    _qScopeAttached = true
+//	    return <target>, nil
+//	}())
+//
+// On any failure path the deferred close fires `_qScopeInt`,
+// running the cleanups for everything built fresh in this call.
+// Cached entries are untouched (their cleanups are owned by the
+// scope they were committed to in the original assembly).
+//
+// Inline-value recipes are NOT cached or fetched — they're per-
+// call user inputs, not shared across assemblies. They go through
+// the standard nil-check unchanged.
+func buildAssembleWithScopeReplacement(fset *token.FileSet, src []byte, sub qSubCall, subs []qSubCall, subTexts []string, alias string, counter int) (string, bool) {
+	elemText := assembleTargetText(sub)
+	returnText := elemText
+	if sub.Family == familyAssembleAll {
+		returnText = "[]" + elemText
+	}
+	body, fmtUsed := buildAssembleWithScopeBody(fset, src, sub, subs, subTexts, returnText, alias, counter)
+	return fmt.Sprintf("(func() (%s, error) {%s\n}())", returnText, body), fmtUsed
+}
+
+// buildAssembleWithScopeBody emits the IIFE body for
+// q.Assemble[T](...).WithScope(s). Each function-recipe step
+// consults the scope's cache; on a hit, the cached value is used
+// and the recipe is skipped. On a miss, the recipe runs as
+// normal — cleanup attaches to the per-call internal scope, and
+// the freshly-built dep is queued for atomic Commit at the end.
+//
+// Inline-value recipes are not cached or fetched — they emit
+// unchanged.
+func buildAssembleWithScopeBody(fset *token.FileSet, src []byte, sub qSubCall, subs []qSubCall, subTexts []string, targetText, alias string, counter int) (string, bool) {
+	var b bytes.Buffer
+	depVar := map[string]string{}
+	depByRecipe := map[int]string{}
+	familyName := assembleFamilyLabel(sub.Family)
+	fmtUsed := false
+
+	intVar := fmt.Sprintf("_qScopeInt%d", counter)
+	attachedVar := fmt.Sprintf("_qScopeAttached%d", counter)
+	freshVar := fmt.Sprintf("_qScopeFresh%d", counter)
+	extVar := fmt.Sprintf("_qScopeExt%d", counter)
+
+	// Capture the scope arg via exprTextSubst so any nested q.* in the
+	// scope expression has already been hoisted to its temp.
+	scopeArgText := exprTextSubst(fset, src, sub.AssembleScopeArg, subs, subTexts)
+
+	zeroExpr := fmt.Sprintf("*new(%s)", targetText)
+
+	fmt.Fprintf(&b, "\n\t%s := %s.NewScope()", intVar, alias)
+	fmt.Fprintf(&b, "\n\t%s := false", attachedVar)
+	fmt.Fprintf(&b, "\n\tdefer func() { if !%s { %s.Close() } }()", attachedVar, intVar)
+	fmt.Fprintf(&b, "\n\t%s := %s", extVar, scopeArgText)
+	fmt.Fprintf(&b, "\n\tvar %s []%s.ScopeEntry", freshVar, alias)
+
+	for n, step := range sub.AssembleSteps {
+		recipeExpr := sub.AssembleRecipes[step.RecipeIdx]
+		recipeText := exprTextSubst(fset, src, recipeExpr, subs, subTexts)
+		dep := fmt.Sprintf("_qDep%d", n)
+		depVar[step.OutputKey] = dep
+		depByRecipe[step.RecipeIdx] = dep
+
+		// Inline values (no cache, no scope interaction) — bind the
+		// expression directly. Same shape as the existing IIFE for
+		// inline values.
+		if step.IsValue {
+			fmt.Fprintf(&b, "\n\t%s := %s", dep, recipeText)
+			if step.OutputIsNilable && !step.PermitNil {
+				label := step.Label
+				if label == "" {
+					label = fmt.Sprintf("#%d", step.RecipeIdx+1)
+				}
+				msg := fmt.Sprintf(`%s: recipe %s returned nil`, familyName, label)
+				nilErr := fmt.Sprintf("fmt.Errorf(%q + %q, %s.ErrNil)", msg, ": %w", alias)
+				fmt.Fprintf(&b, "\n\tif %s == nil { return %s, %s }", dep, zeroExpr, nilErr)
+				fmtUsed = true
+			}
+			continue
+		}
+
+		// Function recipe — check scope cache first.
+		args := make([]string, len(step.InputKeys))
+		for k, ik := range step.InputKeys {
+			args[k] = depVar[ik]
+		}
+		callText := fmt.Sprintf("%s(%s)", recipeText, strings.Join(args, ", "))
+
+		key := strconv.Quote(step.OutputKey)
+		fmt.Fprintf(&b, "\n\tvar %s %s", dep, step.OutputTypeText)
+		fmt.Fprintf(&b, "\n\tif _qV, _qOk := %s.Load(%s); _qOk { %s = _qV.(%s) } else if %s.Closed() { return %s, %s.ErrScopeClosed } else {",
+			extVar, key, dep, step.OutputTypeText, extVar, zeroExpr, alias)
+
+		// Bind the fresh value with the right shape (auto-cleanup
+		// vs explicit, errored vs not).
+		switch {
+		case step.IsResource && step.AutoCleanup != cleanupUnknown && step.Errored:
+			errVar := fmt.Sprintf("_qAErr%d", n)
+			fmt.Fprintf(&b, "\n\t\t%s2, %s := %s", dep, errVar, callText)
+			fmt.Fprintf(&b, "\n\t\tif %s != nil { return %s, %s }", errVar, zeroExpr, errVar)
+			fmt.Fprintf(&b, "\n\t\t%s = %s2", dep, dep)
+			cleanup := autoCleanupExpr(step.AutoCleanup, dep, alias, step.Label)
+			fmt.Fprintf(&b, "\n\t\t_ = %s.AttachFn(%s, %s)", intVar, dep, cleanup)
+		case step.IsResource && step.AutoCleanup != cleanupUnknown:
+			fmt.Fprintf(&b, "\n\t\t%s = %s", dep, callText)
+			cleanup := autoCleanupExpr(step.AutoCleanup, dep, alias, step.Label)
+			fmt.Fprintf(&b, "\n\t\t_ = %s.AttachFn(%s, %s)", intVar, dep, cleanup)
+		case step.IsResource && step.Errored:
+			cleanupVar := fmt.Sprintf("_qCleanup%d", n)
+			errVar := fmt.Sprintf("_qAErr%d", n)
+			fmt.Fprintf(&b, "\n\t\t%s2, %s, %s := %s", dep, cleanupVar, errVar, callText)
+			fmt.Fprintf(&b, "\n\t\tif %s != nil { return %s, %s }", errVar, zeroExpr, errVar)
+			fmt.Fprintf(&b, "\n\t\t%s = %s2", dep, dep)
+			fmt.Fprintf(&b, "\n\t\tif %s != nil { _ = %s.AttachFn(%s, %s) }", cleanupVar, intVar, dep, cleanupVar)
+		case step.IsResource:
+			cleanupVar := fmt.Sprintf("_qCleanup%d", n)
+			fmt.Fprintf(&b, "\n\t\t%s2, %s := %s", dep, cleanupVar, callText)
+			fmt.Fprintf(&b, "\n\t\t%s = %s2", dep, dep)
+			fmt.Fprintf(&b, "\n\t\tif %s != nil { _ = %s.AttachFn(%s, %s) }", cleanupVar, intVar, dep, cleanupVar)
+		case step.Errored:
+			errVar := fmt.Sprintf("_qAErr%d", n)
+			fmt.Fprintf(&b, "\n\t\t%s2, %s := %s", dep, errVar, callText)
+			fmt.Fprintf(&b, "\n\t\tif %s != nil { return %s, %s }", errVar, zeroExpr, errVar)
+			fmt.Fprintf(&b, "\n\t\t%s = %s2", dep, dep)
+		default:
+			fmt.Fprintf(&b, "\n\t\t%s = %s", dep, callText)
+		}
+
+		if step.OutputIsNilable && !step.PermitNil {
+			label := step.Label
+			if label == "" {
+				label = fmt.Sprintf("#%d", step.RecipeIdx+1)
+			}
+			msg := fmt.Sprintf(`%s: recipe %s returned nil`, familyName, label)
+			nilErr := fmt.Sprintf("fmt.Errorf(%q + %q, %s.ErrNil)", msg, ": %w", alias)
+			fmt.Fprintf(&b, "\n\t\tif %s == nil { return %s, %s }", dep, zeroExpr, nilErr)
+			fmtUsed = true
+		}
+
+		fmt.Fprintf(&b, "\n\t\t%s = append(%s, %s.ScopeEntry{Key: %s, Value: %s})", freshVar, freshVar, alias, key, dep)
+		fmt.Fprintf(&b, "\n\t}")
+	}
+
+	// Final commit: fresh entries + internal scope as child.
+	fmt.Fprintf(&b, "\n\tif len(%s) > 0 {", freshVar)
+	fmt.Fprintf(&b, "\n\t\tif err := %s.Commit(%s, %s); err != nil { return %s, err }", extVar, freshVar, intVar, zeroExpr)
+	fmt.Fprintf(&b, "\n\t}")
+	fmt.Fprintf(&b, "\n\t%s = true", attachedVar)
+
+	switch sub.Family {
+	case familyAssembleAll:
+		parts := make([]string, 0, len(sub.AssembleAllProviderRidxs))
+		for _, ridx := range sub.AssembleAllProviderRidxs {
+			if dep, ok := depByRecipe[ridx]; ok {
+				parts = append(parts, dep)
+			}
+		}
+		fmt.Fprintf(&b, "\n\treturn %s{%s}, nil", targetText, strings.Join(parts, ", "))
+	case familyAssembleStruct:
+		parts := make([]string, 0, len(sub.AssembleStructFieldKeys))
+		for i, fk := range sub.AssembleStructFieldKeys {
+			if dep, ok := depVar[fk]; ok {
+				parts = append(parts, fmt.Sprintf("%s: %s", sub.AssembleStructFieldNames[i], dep))
+			}
+		}
+		fmt.Fprintf(&b, "\n\treturn %s{%s}, nil", targetText, strings.Join(parts, ", "))
+	default:
+		targetDep, ok := depVar[sub.AssembleTargetKey]
+		if !ok {
+			targetDep = zeroExpr
+		}
+		fmt.Fprintf(&b, "\n\treturn %s, nil", targetDep)
+	}
+
+	return b.String(), fmtUsed
 }
 
 // assembleTargetText returns the spelling of the target type T, with

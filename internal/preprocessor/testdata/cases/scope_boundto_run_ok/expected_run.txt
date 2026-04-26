@@ -1,0 +1,4 @@
+db-id: 1
+trace-pre: [build:db#1]
+trace-post: [build:db#1 db.Close#1]
+post-cancel-err: true

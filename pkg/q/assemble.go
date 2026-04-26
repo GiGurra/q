@@ -138,6 +138,36 @@ func (r AssemblyResult[T]) NoDeferCleanup() (T, func(), error) {
 	return zero, func() {}, nil
 }
 
+// WithScope binds the assembly to a q.Scope. Each step consults
+// the scope's cache before invoking its recipe; built deps and
+// their cleanups register with the scope on the assembly's
+// success path. Mutually exclusive with .DeferCleanup() /
+// .NoDeferCleanup() — the scope is the sole lifetime owner.
+//
+//	scope := q.NewScope().DeferCleanup()
+//	server := q.Try(q.Assemble[*Server](recipes...).WithScope(scope))
+//
+// Cache hits skip both the recipe call AND the cleanup
+// registration. Cache misses build fresh and stage the cleanup
+// for atomic registration with the scope on success.
+//
+// If the scope is closed before or during the assembly, returns
+// (zero, q.ErrScopeClosed). Fresh deps built in this call before
+// the close fire their staged cleanups locally; pre-cached deps
+// are not affected (their cleanups were registered earlier and
+// fire when the scope itself closes).
+//
+// Concurrent assemblies in the same scope may both build the same
+// fresh type before either commits — last-writer-wins on the
+// cache, both cleanups end up registered. Document the orphaning
+// risk; use a singleflight wrapper in the recipe if exact-once
+// build is required.
+func (r AssemblyResult[T]) WithScope(s *Scope) (T, error) {
+	panicUnrewritten("q.Assemble[...].WithScope")
+	var zero T
+	return zero, nil
+}
+
 // Assemble builds T from the supplied recipes. Returns an
 // AssemblyResult[T]; pick `.DeferCleanup()` or `.NoDeferCleanup()` to
 // terminate the chain and choose the resource-lifetime policy.

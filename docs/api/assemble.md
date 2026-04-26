@@ -25,6 +25,7 @@ func Assemble[T any](recipes ...any) AssemblyResult[T]
 
 func (AssemblyResult[T]) DeferCleanup() (T, error)
 func (AssemblyResult[T]) NoDeferCleanup() (T, func(), error)
+func (AssemblyResult[T]) WithScope(*q.Scope) (T, error)
 ```
 
 `q.Assemble` returns a chain handle. The terminator picks the resource-lifetime policy.
@@ -65,9 +66,33 @@ func main() {
 
 Use `.NoDeferCleanup()` when the assembled value's lifetime spans more than the enclosing function — main loops, signal handlers, background workers.
 
+### `.WithScope(scope)` — share built deps across calls
+
+Returns `(T, error)`. The supplied `*q.Scope` owns the lifetime. Each step consults the scope's cache before invoking its recipe; built deps and their cleanups register with the scope on the assembly's success path. Mutually exclusive with `.DeferCleanup()` / `.NoDeferCleanup()` — the scope is the sole lifetime owner.
+
+```go
+scope := q.NewScope().DeferCleanup()
+server := q.Try(q.Assemble[*Server](newConfig, newDB, newServer).WithScope(scope))
+// Later in the same scope, the same recipes hit the cache:
+worker := q.Try(q.Assemble[*Worker](newConfig, newDB, newWorker).WithScope(scope))
+// newConfig / newDB are not re-invoked; *Config and *DB are pulled from scope.
+```
+
+**Cache hits skip both the recipe call AND the cleanup registration.** The dep was already built and registered to a prior assembly's internal scope; reusing it doesn't double-register the cleanup.
+
+**Cache misses build fresh** and stage cleanups onto a per-call internal scope. On the assembly's success path, the rewriter atomically commits the fresh cache entries plus the internal scope as a child of the supplied scope. Closing the supplied scope cascades through the child so per-call deps close together, after later-registered scope entries.
+
+If the scope is closed before or during the assembly, the rewriter returns `(zero, q.ErrScopeClosed)`. Fresh deps built in this call before the close fire their staged cleanups locally; pre-cached deps are not affected (their cleanups were registered earlier and fire when the scope itself closes).
+
+**Inline-value recipes are NOT cached or fetched.** They're per-call user inputs, not shared across assemblies — passing a different `&Config{...}` to two calls in the same scope correctly uses each call's value for that call.
+
+**Concurrent assemblies caveat.** Two assemblies in the same scope may both build the same fresh type before either commits — last-writer-wins on the cache, both cleanups end up registered. Document the orphaning risk; for strict singleflight semantics, layer a `singleflight` wrapper in the recipe.
+
+See [`q.Scope`](scope.md) for the full lifetime container surface — construction terminators, manual `Attach`/`Detach`, subscope nesting.
+
 ### Mandatory chain terminator
 
-Bare `q.Assemble[T](...)` — without `.DeferCleanup()` or `.NoDeferCleanup()` — does not compile (`AssemblyResult[T]` isn't `(T, error)`). The preprocessor surfaces a friendly diagnostic too. Pick one terminator at every call site.
+Bare `q.Assemble[T](...)` — without `.DeferCleanup()`, `.NoDeferCleanup()`, or `.WithScope(scope)` — does not compile (`AssemblyResult[T]` isn't `(T, error)`). The preprocessor surfaces a friendly diagnostic too. Pick one terminator at every call site.
 
 `recipes` is `...any` because Go's type system can't express "any function with any number of inputs and one output". The preprocessor's typecheck pass takes over validation. Errors in the recipe set surface as build-time diagnostics with file:line:col plus a dependency-tree visualisation.
 
@@ -183,8 +208,9 @@ Whether the cleanup is auto-detected or explicit, the chain terminator decides w
 
 - **`.DeferCleanup()`** — defer-injected; fires on enclosing function return in reverse-topo order.
 - **`.NoDeferCleanup()`** — handed to the caller as an idempotent closure for explicit control.
+- **`.WithScope(scope)`** — registered with the supplied `*q.Scope`; fires when the scope closes (defer-style, ctx-bound, or manual — see [`q.Scope`](scope.md)).
 
-In both cases, **partial-failure cleanup is automatic.** If recipe N fails, the cleanups for recipes 0..N-1 fire in reverse-topo before the error bubbles. The chain emerges intact: nothing leaks even on failure paths.
+In all three cases, **partial-failure cleanup is automatic.** If recipe N fails, the cleanups for recipes 0..N-1 fire in reverse-topo before the error bubbles. The chain emerges intact: nothing leaks even on failure paths.
 
 ## Happy path examples
 
@@ -669,12 +695,11 @@ The auto-aggregation behavior may be added later as an opt-in.
 
 ## What's coming
 
-Active surface covers single-call DI, `q.AssembleAll` for multi-provider aggregation, `q.AssembleStruct` for struct-target multi-output, full resource-lifetime management (auto-detected and explicit cleanups, partial-failure rollback, `.DeferCleanup()` / `.NoDeferCleanup()` chain), debug tracing, and `q.PermitNil` for opt-in nilable recipes. No phases are currently in active development.
+Active surface covers single-call DI, `q.AssembleAll` for multi-provider aggregation, `q.AssembleStruct` for struct-target multi-output, full resource-lifetime management (auto-detected and explicit cleanups, partial-failure rollback, `.DeferCleanup()` / `.NoDeferCleanup()` / `.WithScope(scope)` chain), debug tracing, and `q.PermitNil` for opt-in nilable recipes. No phases are currently in active development.
 
 Parked, may revisit:
 
 - **Parallel construction.** `q.WithAssemblyPar(ctx, n)` riding on the ctx like `q.WithAssemblyDebug` — the rewriter would emit topo waves with a `sync.WaitGroup` per wave. Sequential construction is fast enough for current workloads; revisit if profiles show construction time as a measurable cost.
-- **Ctx-attached assembly cache.** `q.WithAssemblyCache(ctx)` to share built deps across multiple `q.Assemble` calls in the same ctx scope. Useful in long-running services; design notes live in [`docs/planning/TODO.md`](https://github.com/GiGurra/q/blob/main/docs/planning/TODO.md) under #87.
 
 See [`docs/planning/TODO.md`](https://github.com/GiGurra/q/blob/main/docs/planning/TODO.md) for the persistent backlog.
 
@@ -682,4 +707,5 @@ See [`docs/planning/TODO.md`](https://github.com/GiGurra/q/blob/main/docs/planni
 
 - [`q.Try` / `q.TryE`](try.md) — the bubble vocabulary `q.Assemble` composes with.
 - [`q.Open`](open.md) — single-resource lifetime helper; same auto-detected cleanup shapes as `q.Assemble` recipes.
+- [`q.Scope`](scope.md) — lifetime container used by `.WithScope(scope)`; supports manual `Attach`/`Detach`, subscope nesting, and ctx-bound close.
 - [ZIO `ZLayer`](https://zio.dev/reference/di/) — the inspiration. The conceptual model maps closely; the operator-heavy composition (`++`, `>>>`, `>+>`) does not.

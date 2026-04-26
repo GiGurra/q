@@ -145,8 +145,13 @@ func rewriteFile(fset *token.FileSet, file *ast.File, src []byte, shapes []callS
 			case familyGenerator:
 				needsIter = true
 			case familyAssemble, familyAssembleAll, familyAssembleStruct:
-				// IIFE always wraps fireAll with sync.OnceFunc.
-				needsSync = true
+				// DeferCleanup / NoDeferCleanup IIFE wraps fireAll
+				// with sync.OnceFunc. WithScope's IIFE delegates
+				// idempotency to *Scope.Close (sync.Once internally),
+				// so it doesn't import sync directly.
+				if c.AssembleChain != assembleChainWithScope {
+					needsSync = true
+				}
 			}
 		}
 	}
@@ -356,6 +361,8 @@ func renderShape(fset *token.FileSet, src []byte, sh callShape, counter *int, al
 			}
 		case familyAssemble, familyAssembleAll, familyAssembleStruct:
 			subTexts[i] = buildAssembleSubText(fset, src, sh.Calls[i], sh.Calls, subTexts, alias, counters[i])
+		case familyNewScopeDefer:
+			subTexts[i] = fmt.Sprintf("_qScope%d", counters[i])
 		case familyTern:
 			subTexts[i] = buildTernReplacement(fset, src, sh.Calls[i], sh.Calls, subTexts)
 		case familyAt:
@@ -842,6 +849,11 @@ func isInPlaceSub(sub qSubCall) bool {
 		// bind-and-bubble check; they're NOT in-place. .Or / .OrZero
 		// stay in-place.
 		return !isErroredAtTerminal(sub.AtTerminal)
+	case familyNewScopeDefer:
+		// q.NewScope().DeferCleanup() injects a bind+defer block in
+		// the enclosing function — same shape as Assemble's
+		// DeferCleanup. Not in-place.
+		return false
 	}
 	return isInPlaceFamily(sub.Family)
 }
@@ -1135,6 +1147,27 @@ func renderSubCall(fset *token.FileSet, src []byte, sh callShape, subIdx int, su
 			return block, fmtUsed, false, false, nil
 		}
 		return "", fmtUsed, false, false, nil
+	case familyNewScopeDefer:
+		// q.NewScope().DeferCleanup() — emit prelude binding the
+		// scope and deferring its close in the enclosing function.
+		// For direct-bind forms (formDefine / formAssign /
+		// formDiscard) the prelude IS the entire replacement — we
+		// reconstruct the LHS bind ourselves since renderShape's
+		// suffix-append path only fires for formReturn / formHoist.
+		// formReturn / formHoist let renderShape substitute the
+		// chain span via subTexts[i] in the suffix.
+		scopeVar := fmt.Sprintf("_qScope%d", counter)
+		indent := indentOf(src, fset.Position(sh.Stmt.Pos()).Offset)
+		block := fmt.Sprintf("%s := %s.NewScope()\n%sdefer %s.Close()", scopeVar, alias, indent, scopeVar)
+		switch sh.Form {
+		case formDefine:
+			lhs := exprText(fset, src, sh.LHSExpr)
+			block += fmt.Sprintf("\n%s%s := %s", indent, lhs, scopeVar)
+		case formAssign:
+			lhs := exprText(fset, src, sh.LHSExpr)
+			block += fmt.Sprintf("\n%s%s = %s", indent, lhs, scopeVar)
+		}
+		return block, false, false, false, nil
 	case familyTern:
 		// q.Tern emits an IIFE in-place; no extra bind/check block.
 		return "", false, false, false, nil

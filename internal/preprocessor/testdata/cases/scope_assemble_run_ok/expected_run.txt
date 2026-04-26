@@ -1,0 +1,5 @@
+same: true
+trace: [build:cfg build:db build:srv]
+post-close: [build:cfg build:db build:srv srv.Close#3 db.Close#2]
+closed-err: true
+closed-trace: []
