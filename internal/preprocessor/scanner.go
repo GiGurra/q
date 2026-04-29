@@ -1685,6 +1685,15 @@ func matchStatement(stmt ast.Stmt, alias string, fnType *ast.FuncType) (callShap
 		}
 		return callShape{}, false, nil
 
+	case *ast.IncDecStmt:
+		// `m[q.A[T]()]++` and similar — q.* calls inside the LHS of an
+		// increment/decrement statement. The hoist path binds every
+		// q.* to a temp, then re-emits the IncDecStmt verbatim with
+		// each q.* span substituted by its `_qTmpN`. Same semantics
+		// as the compound-assign case (`m[q.A[T]()] += 1`), just
+		// matched by a different stmt kind.
+		return matchHoist(stmt, fnType, alias, []ast.Expr{s.X})
+
 	case *ast.ReturnStmt:
 		// Find every q.* call anywhere inside the return's result
 		// expressions — not just top-level. This makes shapes like

@@ -1,0 +1,9 @@
+Pending value: main.Pending
+Done value: main.Done
+ack(p): still pending
+classify(AtomOf[Pending]): p
+classify(AtomOf[Done]): d
+classify(AtomOf[Failed]): f
+classify(other): ?
+counts[Pending]: 2
+A[Pending]==AtomOf[Pending]: true
