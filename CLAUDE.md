@@ -56,6 +56,11 @@ When you ship work, **delete** its TODO.md entry rather than moving it to a "Don
   already in source are a smell — derive from the AST so API evolution in `pkg/q` flows through mechanically.
 - Test via the e2e fixture harness, not ad-hoc shell scripts. Each new rewriter pattern gets a fixture under
   `internal/preprocessor/testdata/cases/<name>/`.
+- **Doc examples are tests too.** Each `docs/<page>.md` has a 1:1 mate at `example/<page>/`. The example mirrors
+  the doc's snippets as literally as possible (no helper-function dedup, optimised for "demo a feature, not be a
+  concise test") and is enforced by `TestExamples` — its `expected_run.txt` must equal `go run -toolexec=q
+  ./example/<page>` stdout. When you change a doc page, update its example in the same commit. Negative
+  build-must-fail cases that back doc invariants live under `internal/preprocessor/testdata/cases/<name>_rejected/`.
 
 ## Developing the preprocessor
 

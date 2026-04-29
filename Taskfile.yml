@@ -31,6 +31,11 @@ tasks:
     cmds:
       - go test ./internal/preprocessor/ -run '^(TestFixtures|TestChainAndThen_|TestLinkGate)' -count=1
 
+  test:examples:
+    desc: Run every example/<page>/ under -toolexec=q and diff stdout against expected_run.txt — the doc-coverage harness.
+    cmds:
+      - go test ./internal/preprocessor/ -run '^TestExamples$' -count=1
+
   clean:
     desc: Remove build artifacts
     cmds:

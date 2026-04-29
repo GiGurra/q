@@ -7,10 +7,13 @@
 *.out
 
 # Binaries accidentally built inside example subdirs — extensionless
-# Go binaries that `go build` produces if you omit -o.
+# Go binaries that `go build` produces if you omit -o. Whitelist the
+# files the doc-coverage harness needs (expected_run.txt) and any
+# READMEs/Go sources alongside them.
 /example/*/*
 !/example/*/*.go
 !/example/*/README.md
+!/example/*/expected_run.txt
 
 # IDE
 .idea/

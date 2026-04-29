@@ -1,0 +1,1 @@
+cannot use _qErr1 (variable of interface type error) as int value in return statement

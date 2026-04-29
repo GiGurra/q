@@ -1,0 +1,30 @@
+whatQTryDoes(21): ok=21
+whatQTryDoes(abc): err=strconv.Atoi: parsing "abc": invalid syntax
+tryEErr(abc): err=bad input
+tryEErr.is(ErrBadInput): true
+tryEErrF(abc): err=db: strconv.Atoi: parsing "abc": invalid syntax
+tryEWrap(abc): err=parsing: strconv.Atoi: parsing "abc": invalid syntax
+tryEWrapf(abc): err=parsing "abc": strconv.Atoi: parsing "abc": invalid syntax
+tryECatch(abc-syntax-recovers): ok=0
+recoverBefore(abc): ok=0
+recoverAfter(abc): ok=0
+multiRecover.A: ok=1
+multiRecover.B: ok=2
+multiRecover.MyErr: ok=3
+multiRecover.other: err=loading: other
+multiRecover.ok: ok=7
+constCatch(abc): ok=0
+formDefine(21): ok=21
+formAssign(21): ok=21
+formDiscard(21): ok
+formDiscard(abc): err=strconv.Atoi: parsing "abc": invalid syntax
+formReturn(21): ok=21
+formHoist(21): ok=42
+formMulti(2,3,5): ok=1
+formMulti(2,bad,5): err=strconv.Atoi: parsing "bad": invalid syntax
+formNested(3): ok=30
+formNested(-1): err=negative: -1
+closureBubble(21): ok=21
+closureBubble(abc): err=strconv.Atoi: parsing "abc": invalid syntax
+parseT(Atoi,42): ok=42
+parseT(Atoi,bad): err=strconv.Atoi: parsing "bad": invalid syntax
