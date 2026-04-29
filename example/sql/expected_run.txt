@@ -1,0 +1,14 @@
+SQL.Query="SELECT * FROM users WHERE id = ? AND status = ?"
+SQL.Args=[42 active]
+PgSQL.Query="SELECT * FROM users WHERE id = $1 AND status = $2"
+PgSQL.Args=[42 active]
+NamedSQL.Query="SELECT * FROM users WHERE id = :name1 AND status = :name2"
+NamedSQL.Args=[42 active]
+Inj.Query="DELETE FROM cache WHERE key = ?"
+Inj.Args=[alice'; DROP TABLE users; --]
+---
+a.Query="SELECT * FROM events WHERE user_id = ?" a.Args=[7]
+b.Query="SELECT * FROM logs WHERE created_at > NOW() - INTERVAL '? minutes'" b.Args=[15]
+c.Query="INSERT INTO audit (event, payload) VALUES (?, ?)" c.Args[0]=login c.Args[1]={"who":"ada"}
+---
+braces.Query="INSERT INTO docs (data) VALUES ('{json}') WHERE id = ?" braces.Args=[1]
