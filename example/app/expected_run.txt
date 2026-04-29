@@ -1,0 +1,18 @@
+=== todoapp (max=100, queue=16) ===
+audit flag: ON
+{"level":"INFO","msg":"todo.add","id":1,"owner":"anon"}
+Added: id=1 title="first todo" owner=anon status=pending
+{"level":"INFO","msg":"todo.add","id":2,"owner":"batch"}
+{"level":"INFO","msg":"todo.add","id":3,"owner":"batch"}
+{"level":"INFO","msg":"todo.add","id":4,"owner":"batch"}
+Batch DTO: id=2 title="buy milk" owner=batch status=done@12:00
+Batch DTO: id=3 title="ship release" owner=batch status=done@12:00
+Batch DTO: id=4 title="review PR" owner=batch status=done@12:00
+{"level":"INFO","msg":"worker.exit","processed":2,"reason":"q: channel closed"}
+GetOrErr(999): todo 999
+GetOrErr(1): owner=anon status=failed:worker rejected
+MemStore.Len() via q.As: 4
+ownerOrDefault(1)=anon
+ownerOrDefault(999)=anon
+All todos: 1:first todo/anon/failed:worker rejected | 2:buy milk/batch/failed:network down | 3:ship release/batch/done@worker | 4:review PR/batch/done@par
+App shutting down (scope closes)
