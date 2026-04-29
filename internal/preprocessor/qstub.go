@@ -201,5 +201,8 @@ func writeTempGoFile(pattern string, content []byte) (string, func(), error) {
 		return "", nil, err
 	}
 	path := f.Name()
+	if os.Getenv("Q_KEEP_REWRITES") != "" {
+		return path, func() {}, nil
+	}
 	return path, func() { _ = os.Remove(path) }, nil
 }

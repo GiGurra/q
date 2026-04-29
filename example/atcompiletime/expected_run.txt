@@ -1,0 +1,16 @@
+Days: 604800
+Hash: 5d41402abc4b2a76b9719d911017c592
+Primes: [2 3 5 7 11 13 17 19 23 29]
+CRC8[0..3]: [0 7 14 9]
+CRC8[255]: 0xf3
+Greeting: Hello
+Farewell: Goodbye
+Banner: Hello / Goodbye
+Greet(alice): Hi, alice
+IsAllowed(alice): true
+IsAllowed(dave): false
+Tag: prod-edge-v2
+Names: [alice bob]
+GreetByIndex(0): hi alice
+GreetByIndex(1): hi bob
+GreetByIndex(99): ""

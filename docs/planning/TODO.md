@@ -137,6 +137,10 @@ The persistent backlog for `q`. A cold-state reader can pick up here without re-
 
 - **#91 follow-up — additional `q.At` bubble terminals.** v1 ships `.OrError(err)` and `.OrE(call())` for the bubble shapes. Sibling vocabularies from the q.NotNilE chain are still pending: `.OrErrF(fn func() error)`, `.OrWrap(msg)`, `.OrWrapf(format, args…)`, `.OrCatch(fn func() (T, error))`. Same machinery as `.OrError` — just different ways of shaping the bubbled error. Park until users actually want them.
 
+### Rewriter bugs
+
+- **#102 — Grouped `var ( … )` blocks containing q.AtCompileTime mangle.** When `var Greeting = q.AtCompileTime[…](…)` and friends sit inside one `var ( … )` declaration block, the rewriter's span substitution leaks tail bytes of an unrelated outer rewrite into the block's closing `)`. Workaround: split the entries into separate top-level `var X = q.AtCompileTime(…)` statements (each its own AST node). Mechanism: probably the rewriter is picking up the q.* call's source span but not extending substitution to cover trailing bytes correctly when the call is nested in a `*ast.GenDecl` with multiple specs. Reproducer: `example/atcompiletime`'s old "Capturing earlier results" block before splitting.
+
 ### Cleanup-shape uniformity across q
 
 - **#101 — q.Open should attach to q.Scope.** Today, only q.Assemble can route resource lifetimes through a `*q.Scope` (via `.WithScope(scope)`). q.Open's three terminators are `.DeferCleanup(cleanup)` / `.DeferCleanup()` / `.NoDeferCleanup()` — none attach to a scope. Surface idea:
@@ -170,6 +174,7 @@ Progress through `docs/api/<page>.md` ↔ `example/<page>/` 1:1 coverage. Each p
 - assemble.md
 - async.md
 - at.md
+- atcompiletime.md
 
 ### Todo (api pages)
  async.md, atcompiletime.md, at.md, atom.md, await_ctx.md, await_multi.md, channel_multi.md, checkctx.md, convert.md, coro.md, data.md, debug.md, either.md, enums.md, exhaustive.md, fnparams.md, format.md, gen.md, generator.md, goroutine_id.md, lazy.md, lock.md, match.md, ok.md, oneof.md, par.md, recover.md, recv.md, recv_ctx.md, reflection.md, require.md, scope.md, sealed.md, slog.md, sql.md, string_case.md, tern.md, timeout.md, todo.md, trace.md

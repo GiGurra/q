@@ -900,7 +900,9 @@ func runAtCompileTimeProgram(modRoot, pkgPath, mainSrc string) ([]byte, Diagnost
 	if err := os.MkdirAll(dirPath, 0o755); err != nil {
 		return nil, Diagnostic{}, fmt.Errorf("mkdir %s: %w", dirPath, err)
 	}
-	defer func() { _ = os.RemoveAll(dirPath) }()
+	if os.Getenv("Q_KEEP_COMPTIME") == "" {
+		defer func() { _ = os.RemoveAll(dirPath) }()
+	}
 
 	mainPath := filepath.Join(dirPath, "main.go")
 	if err := os.WriteFile(mainPath, []byte(mainSrc), 0o644); err != nil {
