@@ -1,0 +1,20 @@
+process(ok).IsRight=true
+process(bad).IsLeft=true
+describeFold(ok): ok
+describeFold(bad): bad input
+describeMatch(ok): ok
+describeMatch(bad): bad input
+ctorNamed.r: ok-named
+ctorNamed.e: 1 err-named
+ctorAsEither.r.IsRight=true
+ctorAsEither.e.IsLeft=true
+ctorAsOneOf.IsRight=true
+Map(ok)={2 2} IsRight=true
+FlatMap(ok)={2 {2}} IsRight=true
+GetOrElse(ok)={ok}
+Map(bad).IsLeft=true
+GetOrElse(bad)={default}
+MapLeft(bad).IsLeft=true left=[400] bad input
+Swap(bad).IsRight=true (left of original is now right)
+exhaustiveCoverage(ok): ok: ok
+exhaustiveCoverage(bad): err: 400 bad input
