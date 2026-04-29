@@ -1,0 +1,9 @@
+loaded: user-7
+level=INFO msg=loaded "main.go:61 userID"=42
+level=INFO msg=step intermediate=99 file=main.go line=68
+nesting: user-11
+---
+DebugWriter output:
+main.go:46 id = 7
+main.go:54 n*2 + offset = 11
+main.go:75 id = 11
