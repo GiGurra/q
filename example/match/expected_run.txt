@@ -1,0 +1,16 @@
+describe(Red): warm
+describe(Green): natural
+describe(Blue): cool
+describeNumber(0): zero
+describeNumber(5): positive
+describeNumber(-7): other
+laziness(0): expensive(0), expensive=1 log=0 fallback=0
+laziness(5): log(5), expensive=0 log=1 fallback=0
+laziness(-3): fallback, expensive=0 log=0 fallback=1
+httpStatus(200): ok
+httpStatus(418): unknown
+direction(left): {X:-1 Y:0}
+direction(?): {X:0 Y:0}
+describeStatus(Pending): waiting
+describeStatus(Done): done at 12:34:56
+describeStatus(Failed): failed: boom
