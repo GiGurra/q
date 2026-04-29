@@ -1,0 +1,14 @@
+describe(pending): waiting
+describe(done): done at 12:34:56
+describe(failed): failed: timeout
+describeActivity(Idle): idle
+describeActivity(Working): working
+describeStatusValue(pending): waiting
+describeStatusValue(done): done at 12:34:56
+describeStatusValue(failed): failed: timeout
+describeActivityValue(Idle): idle
+describeActivityValue(Working): working
+describeResult(NotFound): 404: /missing
+describeResult(Forbidden): 403: no perm
+describeResult(Created): 201 (id=7)
+describeResult(Updated): 200 (id=9)
