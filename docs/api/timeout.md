@@ -86,5 +86,5 @@ Without `q.Timeout`, the same function would declare `ctx, cancel := context.Wit
 
 ## See also
 
-- [q.CheckCtx](bubble.md) — cancellation checkpoints at natural yield points
+- [q.CheckCtx](checkctx.md) — cancellation checkpoints at natural yield points
 - [q.RecvCtx](recv_ctx.md) / [q.AwaitCtx](await_ctx.md) — ctx-aware blocking primitives

@@ -1,0 +1,4 @@
+shadowingForm: err=context deadline exceeded is(DeadlineExceeded)=true
+defineForm: parent.Err=<nil> tight.Err=context deadline exceeded
+deadlineForm: err=context deadline exceeded is(DeadlineExceeded)=true
+fetch: err=context deadline exceeded is(DeadlineExceeded)=true

@@ -205,9 +205,10 @@ Progress through `docs/api/<page>.md` ↔ `example/<page>/` 1:1 coverage. Each p
 - sql.md
 - string_case.md
 - tern.md
+- timeout.md
 
 ### Todo (api pages)
-timeout.md, todo.md, trace.md
+todo.md, trace.md
 
 ### Todo (top-level docs — lower priority, most snippets duplicate api pages)
 
