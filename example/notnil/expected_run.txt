@@ -1,0 +1,15 @@
+whatQNotNilDoes(1): ok=Ada
+whatQNotNilDoes(2): err=q: nil value
+whatQNotNilDoes(2).is(q.ErrNil): true
+notNilEErr(2): err=not found
+notNilEErrF(2): err=no user 2
+notNilEWrap(2): err=user not found
+notNilEWrapf(2): err=no user 2
+notNilECatch(2): ok=backfilled-2
+formDefine(1): ok=Ada
+formAssign(1): ok=Ada
+formReturn(1): ok=Ada
+formHoist(1): ok=Ada
+formHoist(2): err=q: nil value
+discardPrecondition(1): ok=Ada
+discardPrecondition(2): err=q: nil value
