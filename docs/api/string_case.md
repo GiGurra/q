@@ -45,25 +45,21 @@ The `Snake` / `Kebab` / `Camel` / `Pascal` family splits the input into words, t
 
 ## Use cases
 
-Both function-body and top-level `var` initializers are walked. Grouped `var ( ... )` blocks work too. (Regular `const` is *not* supported — Go's typechecker rejects function calls in const initializers before any rewrite happens.)
-
 ```go
-// Top-level vars work:
-var (
-    userIDColumn = q.Snake("UserID")     // "user_id"
-    dbHostEnv    = q.Upper("db_host")    // "DB_HOST"
-)
+// Generated SQL column names from a Go field name:
+var userIDColumn = q.Snake("UserID")  // "user_id"
 
-func init() {
-    // URL slugs from a title:
-    url := "/posts/" + q.Kebab("My First Post")  // "/posts/my-first-post"
+// Env vars from a config struct field:
+var dbHostEnv = q.Upper("db_host")    // "DB_HOST"
 
-    // JSON field names from Go identifiers:
-    fmt.Println(q.Camel("user_id"))              // "userId"
+// URL slugs from a title:
+url := "/posts/" + q.Kebab("My First Post")   // "/posts/my-first-post"
 
-    _ = url
-}
+// JSON field names from Go identifiers:
+fmt.Println(q.Camel("user_id"))              // "userId"
 ```
+
+Calls work in any expression position: function bodies, package-level `var` (including grouped `var ( … )` blocks), function args, struct literal fields, return statements.
 
 ## Why compile-time?
 
@@ -74,16 +70,14 @@ The transformations are deterministic and the inputs are known at compile time, 
 3. Runs the family-specific transform.
 4. Re-quotes and substitutes at the call site.
 
-### Use `var`, not `const`
-
-The fold replaces the call with a string literal in the rewritten source, so the *value* is known at compile time. Function-body `:=`, package-level `var`, and grouped `var ( … )` blocks all work — but `const` does not, because Go's typechecker rejects function calls in const initializers before any rewrite has a chance to run:
+### `var`, not `const`
 
 ```go
 var v = q.Snake("UserID")        // ✓ folds to var v = "user_id"
 const c = q.Snake("UserID")      // ✗ build error: q.Snake(...) is not constant
 ```
 
-If you need a true compile-time constant, use [`q.AtCompileTime`](atcompiletime.md) — it's the package-level escape hatch and accepts a closure, so any expression is fair game.
+For a true compile-time constant, use [`q.AtCompileTime`](atcompiletime.md) — it accepts a closure so any expression composes.
 
 ## Implementation notes
 

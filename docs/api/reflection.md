@@ -69,11 +69,7 @@ func rowOf(u User) map[string]any {
 }
 ```
 
-(For the SQL string itself, use [`q.PgSQL`](sql.md) on a literal — `q.PgSQL` doesn't accept string concatenation, so the column list lives in the literal directly.)
-
 ### Type-aware error messages
-
-`q.F` / `q.Ferr` placeholders are not re-scanned for nested `q.*` calls, so hoist the lookup into a variable first:
 
 ```go
 err := decode(b)

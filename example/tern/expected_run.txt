@@ -1,0 +1,17 @@
+displayName(nil)="anonymous"
+displayName(Ada)="Ada"
+maxConn(nil)=8
+maxConn(MaxConn=42)=42
+cachedOrSlow(true)=fast-result
+cachedOrSlow(false)=slow:k
+makeReq(Timeout=10): {Timeout:10 Endpoint:https://example.com}
+makeReq(zero): {Timeout:30 Endpoint:https://example.com}
+sign(-3)=-1
+sign(0)=0
+sign(7)=1
+tier(95)=A
+tier(85)=B
+tier(75)=C
+tier(50)=F
+widen(true)=concrete
+widen(false)=fallback

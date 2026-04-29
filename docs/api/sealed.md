@@ -1,15 +1,6 @@
 # `q.Sealed` — interface-based sealed sum types
 
-> **Experimental.** q.Sealed works end-to-end under `-toolexec=q`,
-> but the synthesised marker methods are invisible to plain Go
-> tooling — `gopls`, `golangci-lint`, `staticcheck`, and any IDE
-> using them all paint red squiggles at every `chan Message <-
-> Ping{}` site, because the pre-rewrite source has Variant types
-> that don't implement Message. The runtime build is fine; the
-> editor experience is not. For day-to-day code where IDE comfort
-> matters, prefer [`q.OneOfN`](oneof.md), which carries variants
-> in a Tag/Value box that plain Go's typechecker is happy with.
-> See "IDE-clean opt-out" below for a partial mitigation.
+> **Experimental — looking for a better solution.** Variants don't satisfy the marker interface in pre-rewrite source, so editors / `gopls` / `golangci-lint` flag every `chan Message <- Ping{}` site as a type error even though the toolexec build is clean. Hand-writing the marker (see "IDE-clean opt-out") sidesteps this but defeats sealed's main point. For everyday code, [`q.OneOfN`](oneof.md) is the IDE-clean alternative — variants travel in a Tag/Value wrapper Go's typechecker accepts as-is.
 
 `q.Sealed` is the interface-based sibling of [`q.OneOfN`](oneof.md):
 each variant lives as its own type at runtime (no `Tag` / `Value`
@@ -19,10 +10,9 @@ declared at package level via a single directive call, and the q
 preprocessor synthesises one `func (Variant) markerName() {}` per
 variant in a companion file.
 
-This is the right tool for **message-passing systems**: variants flow
+The right tool for **message-passing systems**: variants flow
 through `chan Message` as themselves, type switches dispatch
-naturally, and `q.Exhaustive` enforces coverage at build time — at
-the cost noted in the experimental box above.
+naturally, and `q.Exhaustive` enforces coverage at build time.
 
 ## At a glance
 
@@ -104,10 +94,7 @@ After step 3, each variant satisfies `I` — the type system enforces
 
 ### IDE-clean opt-out: hand-written markers
 
-The synthesis pass skips any variant that already declares a method
-matching the marker (same name, no params, no results). So you can
-hand-write the marker yourself to keep the pre-rewrite source clean
-in editors / `golangci-lint`:
+Variants that declare the marker themselves skip synthesis, so the pre-rewrite source is plain valid Go:
 
 ```go
 type Ping struct{ ID int }
@@ -116,10 +103,7 @@ func (Ping) message() {}                    // hand-written; gopls sees it
 var _ = q.Sealed[Message](Ping{}, /* … */)  // synthesis skipped for Ping
 ```
 
-This trades the boilerplate-elimination win for the IDE-clean win.
-If both matter, `q.OneOfN` carries variants in a Tag/Value wrapper
-that has neither problem — at the cost of an extra `q.AsOneOf` /
-`.Value` hop at producer / consumer sites.
+Trades the boilerplate-elimination win for an IDE-clean source.
 
 ## Construction
 
