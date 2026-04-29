@@ -1205,6 +1205,24 @@ func RecvRawCtx[T any](ctx context.Context, ch <-chan T) (T, error) {
 	}
 }
 
+// CheckCtx is a context-cancellation checkpoint. Returns nothing —
+// only valid as an expression statement. The preprocessor rewrites
+// the call site into `if err := ctx.Err(); err != nil { return zero,
+// err }`, bubbling either context.Canceled or context.DeadlineExceeded
+// out of the enclosing function. Reach for q.CheckCtxE for chain-style
+// error shaping around the bubble. See `docs/api/checkctx.md`.
+func CheckCtx(ctx context.Context) {
+	panicUnrewritten("q.CheckCtx")
+}
+
+// CheckCtxE is the chain variant of q.CheckCtx. Reuses CheckResult so
+// the chain vocabulary is identical to q.CheckE — Err / ErrF / Wrap /
+// Wrapf / Catch — applied to ctx.Err() before the bubble fires.
+func CheckCtxE(ctx context.Context) CheckResult {
+	panicUnrewritten("q.CheckCtxE")
+	return CheckResult{}
+}
+
 // RecvCtx receives from ch while honouring ctx cancellation. The
 // preprocessor rewrites the call site into `v, err := q.RecvRawCtx(ctx,
 // ch); if err != nil { return zero, err }`. Use q.RecvCtxE to shape

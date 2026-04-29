@@ -1,0 +1,9 @@
+whatCheckCtxDoes(live): ok
+whatCheckCtxDoes(cancelled): err=context canceled
+processBatch(live): ok
+processBatch(cancelled): err=context canceled
+checkCtxEWrap(cancelled): err=loading users: context canceled
+checkCtxECatch(cancelled): ok (suppressed)
+checkCtxEErr(cancelled): err=replaced
+checkCtxEErrF(cancelled): err=transformed: context canceled
+checkCtxEWrapf(cancelled,42): err=loading id=42: context canceled
