@@ -151,14 +151,23 @@ The persistent backlog for `q`. A cold-state reader can pick up here without re-
 
 ## Doc-coverage progress
 
-Progress through `docs/api/<page>.md` ↔ `example/<page>/` 1:1 coverage. Tracked here so a cold-state reader can resume; remove entries as they ship.
+Progress through `docs/api/<page>.md` ↔ `example/<page>/` 1:1 coverage. Each page ships in its own commit with the example mate + `expected_run.txt` + (when relevant) impl fixes that the doc-mirroring exposes. Tracked here so a cold-state reader can resume.
 
-- [x] try.md
-- [x] check.md
-- [x] notnil.md
-- [ ] open.md (in progress this session — landing the `func(T) error` slog support together with the doc mate)
-- [ ] async.md, atom.md, atcompiletime.md, at.md, await_ctx.md, await_multi.md, channel_multi.md, checkctx.md, convert.md, coro.md, data.md, debug.md, either.md, enums.md, exhaustive.md, fnparams.md, format.md, gen.md, generator.md, goroutine_id.md, lazy.md, lock.md, match.md, ok.md, oneof.md, par.md, recover.md, recv.md, recv_ctx.md, reflection.md, require.md, scope.md, sealed.md, slog.md, sql.md, string_case.md, tern.md, timeout.md, todo.md, trace.md, as.md, assemble.md
-- [ ] design.md, getting-started.md, index.md, typed-nil-guard.md (top-level, lower priority — most snippets duplicate the api pages)
+### Done
+
+- try.md
+- check.md
+- notnil.md
+- open.md
+- as.md
+
+### Todo (api pages)
+
+assemble.md, async.md, atcompiletime.md, at.md, atom.md, await_ctx.md, await_multi.md, channel_multi.md, checkctx.md, convert.md, coro.md, data.md, debug.md, either.md, enums.md, exhaustive.md, fnparams.md, format.md, gen.md, generator.md, goroutine_id.md, lazy.md, lock.md, match.md, ok.md, oneof.md, par.md, recover.md, recv.md, recv_ctx.md, reflection.md, require.md, scope.md, sealed.md, slog.md, sql.md, string_case.md, tern.md, timeout.md, todo.md, trace.md
+
+### Todo (top-level docs — lower priority, most snippets duplicate api pages)
+
+design.md, getting-started.md, index.md, typed-nil-guard.md
 
 ### Resource lifetime + dependency injection
 

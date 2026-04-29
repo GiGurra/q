@@ -1,0 +1,16 @@
+whatQAsDoes(42): ok=42
+whatQAsDoes(hi): err=q: type assertion failed
+whatQAsDoes(hi).is(q.ErrBadTypeAssert): true
+chainExample(admin): ok=ada/L1
+chainExample(user): err=main.User is not an admin
+asEErr(hi): err=not an int
+asEErrF(hi): err=nope: string
+asEWrap(hi): err=expected int
+asEWrapf(hi): err=expected int, got string
+asECatch(hi)[recover]: ok=-1
+formDefine(7): ok=7
+formAssign(7): ok=7
+formDiscard(7): ok
+formDiscard(hi): err=q: type assertion failed
+formReturn(7): ok=7
+formHoist(7): ok=14
