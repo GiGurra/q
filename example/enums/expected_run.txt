@@ -1,0 +1,22 @@
+EnumValues[Color]: [Red Green Blue]
+EnumNames[Color]: [Red Green Blue]
+EnumName[Color](Green): "Green"
+EnumName[Color](Color(99)): ""
+EnumParse[Color](Green): Green
+EnumParse[Color](Pink): err="Pink": q: unknown enum value
+EnumValid[Color](Red): true
+EnumValid[Color](Color(99)): false
+EnumOrdinal[Color](Blue): 2
+EnumOrdinal[Color](Color(99)): -1
+EnumValues[Status]: [Pending Done Failed]
+EnumNames[Status]: [Pending Done Failed]
+EnumName[Status](Done): "Done"
+Color.String: Red, Green, Blue
+Status.String: Pending, Done, Failed, unknown-fallback
+json.Marshal(Green): "Green"
+json.Unmarshal("Blue"): Blue (Blue=true)
+ParseStatusValue(done): Done
+ParseStatusValue(nope): err=q: unknown enum value
+warmth(Red): warm
+warmth(Green): natural
+warmth(Blue): cool
