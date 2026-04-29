@@ -119,6 +119,11 @@ func checkErrorSlotsWithInfo(fset *token.FileSet, pkgPath, importcfgPath string,
 					diags = append(diags, d)
 				}
 			}
+			if sc.CleanupArg != nil {
+				if d, ok := validateExplicitCleanup(fset, sc, info, errType); ok {
+					diags = append(diags, d)
+				}
+			}
 			if isEnumFamily(sc.Family) {
 				if d, ok := resolveEnum(fset, sc, info, pkgPath); ok {
 					diags = append(diags, d)
@@ -1249,6 +1254,83 @@ func inferCleanupKind(t, errType types.Type) cleanupKind {
 		}
 	}
 	return cleanupUnknown
+}
+
+// validateExplicitCleanup inspects the type of sc.CleanupArg (the
+// explicit cleanup passed to q.Open(...).DeferCleanup(cleanup) or
+// q.OpenE(...).DeferCleanup(cleanup)) and either populates
+// sc.CleanupRetErr (so the rewriter can dispatch between
+// `defer cleanup(v)` and the slog-wrapping defer for a returned
+// error) or surfaces a diagnostic when the argument doesn't match
+// either accepted shape.
+//
+// Accepted shapes (T = the resource type, the first return of InnerExpr):
+//
+//   - func(T)        → CleanupRetErr=false, rewrites to `defer cleanup(v)`.
+//   - func(T) error  → CleanupRetErr=true,  rewrites to a deferred
+//                      wrapper that logs the close-time err via
+//                      slog.Error.
+//
+// The cleanup MUST take the resource as its argument — q.Open is
+// scoped to the resource it wraps. Global / package-level teardowns
+// or arbitrary call expressions are out of scope; the user can write
+// `defer myCleanup()` themselves at the q.Open site if that's what
+// they want.
+//
+// The variadic `...any` signature on DeferCleanup means Go itself
+// won't catch a wrong-shape cleanup before the rewriter runs — that's
+// what this validator is for.
+func validateExplicitCleanup(fset *token.FileSet, sc *qSubCall, info *types.Info, errType types.Type) (Diagnostic, bool) {
+	innerT := info.TypeOf(sc.InnerExpr)
+	if innerT == nil {
+		return Diagnostic{}, false
+	}
+	tup, ok := innerT.(*types.Tuple)
+	if !ok || tup.Len() < 2 {
+		return Diagnostic{}, false
+	}
+	resourceT := tup.At(0).Type()
+
+	cleanupT := info.TypeOf(sc.CleanupArg)
+	if cleanupT == nil {
+		return Diagnostic{}, false
+	}
+	sig, ok := cleanupT.Underlying().(*types.Signature)
+	if !ok {
+		return cleanupShapeDiag(fset, sc, resourceT, cleanupT), true
+	}
+	if sig.Params().Len() != 1 || !types.Identical(sig.Params().At(0).Type(), resourceT) {
+		return cleanupShapeDiag(fset, sc, resourceT, cleanupT), true
+	}
+	switch sig.Results().Len() {
+	case 0:
+		sc.CleanupRetErr = false
+		return Diagnostic{}, false
+	case 1:
+		if types.Identical(sig.Results().At(0).Type(), errType) {
+			sc.CleanupRetErr = true
+			return Diagnostic{}, false
+		}
+	}
+	return cleanupShapeDiag(fset, sc, resourceT, cleanupT), true
+}
+
+func cleanupShapeDiag(fset *token.FileSet, sc *qSubCall, resourceT, cleanupT types.Type) Diagnostic {
+	pos := fset.Position(sc.OuterCall.Pos())
+	msg := fmt.Sprintf(
+		"q.Open/OpenE(...).DeferCleanup(cleanup): cleanup must be `func(%s)` or `func(%s) error`, got %s. "+
+			"Reach for `func(T)` when Close is void (e.g. `(*Conn).Close`); reach for `func(T) error` when "+
+			"Close returns an error (e.g. `(*os.File).Close`). For cleanups that don't take the resource, "+
+			"write `defer myCleanup()` at the q.Open call site directly — q.Open's DeferCleanup is "+
+			"intentionally scoped to the resource it wraps.",
+		resourceT.String(), resourceT.String(), cleanupT.String(),
+	)
+	return Diagnostic{
+		File: pos.Filename,
+		Line: pos.Line,
+		Col:  pos.Column,
+		Msg:  "q: " + msg,
+	}
 }
 
 // validateSlot returns a diagnostic when sc's error slot type is

@@ -8,9 +8,9 @@ Resource acquisition with defer-on-success cleanup — the `(T, error)` bubble p
 func Open[T any](v T, err error) OpenResult[T]
 func OpenE[T any](v T, err error) OpenResultE[T]
 
-func (OpenResult[T])  DeferCleanup(cleanup ...func(T)) T   // 0 or 1 args
+func (OpenResult[T])  DeferCleanup(cleanup ...any) T   // 0 or 1 args; cleanup is func(T) or func(T) error
 func (OpenResult[T])  NoDeferCleanup() T
-func (OpenResultE[T]) DeferCleanup(cleanup ...func(T)) T   // 0 or 1 args
+func (OpenResultE[T]) DeferCleanup(cleanup ...any) T   // 0 or 1 args; cleanup is func(T) or func(T) error
 func (OpenResultE[T]) NoDeferCleanup() T
 ```
 
@@ -18,8 +18,22 @@ func (OpenResultE[T]) NoDeferCleanup() T
 
 `.DeferCleanup` accepts zero or one cleanup function:
 
-- `DeferCleanup(cleanup)` — explicit cleanup, used for any T.
+- `DeferCleanup(cleanup)` — explicit cleanup. Two accepted shapes (the preprocessor validates at compile time and rejects anything else with a typed diagnostic):
+
+  | Shape                  | Generated defer |
+  |------------------------|-----------------|
+  | `func(T)`              | `defer cleanup(v)` |
+  | `func(T) error`        | wrapped defer that `slog.Error`s the close-time err |
+
+  ```go
+  q.Open(dial(addr)).DeferCleanup((*Conn).Close)     // func(T)         (Close is void here)
+  q.Open(open(path)).DeferCleanup((*os.File).Close)  // func(T) error   (Close returns error)
+  ```
+
+  q.Open's `DeferCleanup` is intentionally scoped to the resource it wraps — it does not accept no-arg cleanups (`func()` / `func() error`) or arbitrary call expressions. For cleanups that don't need the resource, write `defer myCleanup()` at the q.Open call site directly. Wrap the cleanup yourself if you need different handling on the close-time error — suppress, retry, or transform.
 - `DeferCleanup()` — no args; the preprocessor infers the cleanup from T at compile time.
+
+The signature is `DeferCleanup(cleanup ...any) T` — Go itself can't pick between the two cleanup shapes via overloading, so the parameter is `any` and the rewriter / typecheck pass is what enforces the constraint.
 
 ## What `q.Open` does
 
@@ -55,7 +69,7 @@ The typecheck pass inspects the resource type T at compile time and dispatches:
 | T's shape                   | Generated defer                                            |
 |-----------------------------|------------------------------------------------------------|
 | channel type (`chan X`, `chan<- X`, `<-chan X`) | `defer close(v)`                       |
-| `Close() error` method      | `defer func() { _ = v.Close() }()` (close-time error discarded — pass an explicit cleanup if you need to handle it) |
+| `Close() error` method      | `defer func() { if err := v.Close(); err != nil { slog.Error("q.Open: cleanup returned error", "err", err) } }()` — pass an explicit `func(T) error` wrapper if you need different handling |
 | `Close()` method (no return)| `defer v.Close()`                                          |
 | anything else               | build error — pass an explicit cleanup or `.NoDeferCleanup()`   |
 

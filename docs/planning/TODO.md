@@ -137,6 +137,29 @@ The persistent backlog for `q`. A cold-state reader can pick up here without re-
 
 - **#91 follow-up — additional `q.At` bubble terminals.** v1 ships `.OrError(err)` and `.OrE(call())` for the bubble shapes. Sibling vocabularies from the q.NotNilE chain are still pending: `.OrErrF(fn func() error)`, `.OrWrap(msg)`, `.OrWrapf(format, args…)`, `.OrCatch(fn func() (T, error))`. Same machinery as `.OrError` — just different ways of shaping the bubbled error. Park until users actually want them.
 
+### Cleanup-shape uniformity across q
+
+- **#99 — Cleanup-shape uniformity across q.** `q.Open(...).DeferCleanup(cleanup)` accepts `func(T)` and `func(T) error`, with the err-returning form rewritten to a `slog.Error`-wrapped defer. Other cleanup-accepting sites in q should accept the same two-shape vocabulary so users don't have to remember which API takes which shape:
+
+  - `q.Assemble[T](...).DeferCleanup(cleanup)` — currently zero-arg only (auto-cleanup); add explicit-cleanup support with the same two shapes.
+  - `q.NewScope().DeferCleanup(cleanup)` — same.
+  - Recipe-cleanup hooks in q.Assemble's recipe shape (`(T, func(), error)`) — the `func()` slot could be either `func()` or `func() error` from the recipe author's perspective; the rewriter would normalise.
+
+  Mechanism: extract `validateExplicitCleanup` + the `func(T) error` slog-wrap defer-line emission (landed for q.Open) into a reusable helper and call it from each cleanup-accepting site. Each site needs a parameter-shape switch on `...any` plus the corresponding `slog`-import wiring; the log message can be parameterised on the source ("q.Open / q.Assemble / q.Scope") so it names the offending site.
+
+  Out of scope: no-arg cleanups (`func()` / `func() error`) and arbitrary call expressions. q.Open's DeferCleanup is intentionally scoped to the resource it wraps — write `defer myCleanup()` at the call site if the cleanup doesn't need the resource.
+
+## Doc-coverage progress
+
+Progress through `docs/api/<page>.md` ↔ `example/<page>/` 1:1 coverage. Tracked here so a cold-state reader can resume; remove entries as they ship.
+
+- [x] try.md
+- [x] check.md
+- [x] notnil.md
+- [ ] open.md (in progress this session — landing the `func(T) error` slog support together with the doc mate)
+- [ ] async.md, atom.md, atcompiletime.md, at.md, await_ctx.md, await_multi.md, channel_multi.md, checkctx.md, convert.md, coro.md, data.md, debug.md, either.md, enums.md, exhaustive.md, fnparams.md, format.md, gen.md, generator.md, goroutine_id.md, lazy.md, lock.md, match.md, ok.md, oneof.md, par.md, recover.md, recv.md, recv_ctx.md, reflection.md, require.md, scope.md, sealed.md, slog.md, sql.md, string_case.md, tern.md, timeout.md, todo.md, trace.md, as.md, assemble.md
+- [ ] design.md, getting-started.md, index.md, typed-nil-guard.md (top-level, lower priority — most snippets duplicate the api pages)
+
 ### Resource lifetime + dependency injection
 
 - **#83 ARC for non-RAM resources (long-term).** "Last-usage-site closes" is what Rust gets through linear types and what Swift / Objective-C get through reference counting. q's seed is already half-built: `q.Open` is the resource constructor, `.DeferCleanup` is the destructor, the rewriter knows where every resource binding flows, and the resource-escape detection pass identifies when a binding outlives its function.

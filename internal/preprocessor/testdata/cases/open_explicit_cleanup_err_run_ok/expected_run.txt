@@ -1,0 +1,6 @@
+methodValueCleanup(1, ok): ok closes=[1]
+methodValueCleanup(1, fail): err=dial failed for 1 closes=[]
+level=ERROR msg="q.Open: cleanup returned error" err="close failed"
+failingCloseCleanup(7) [err logged↓]: ok closes=[7]
+explicitFnCleanup(2, ok): ok closes=[2000]
+explicitFnCleanup(2, fail): err=dial failed for 2 closes=[]

@@ -204,6 +204,12 @@ type qSubCall struct {
 	// returns.
 	CleanupArg ast.Expr
 
+	// CleanupRetErr is true when CleanupArg's type is `func(T) error`
+	// (rather than `func(T)`). The typecheck pass populates this so
+	// the rewriter can dispatch a defer that calls slog.Error on the
+	// close-time err rather than discarding it.
+	CleanupRetErr bool
+
 	// NoDeferCleanup is true when the Open chain terminates with the
 	// zero-arg .NoDeferCleanup() instead of .DeferCleanup(cleanup). Bubble
 	// path is identical; the rewriter skips the defer-cleanup line.
@@ -2998,7 +3004,7 @@ func classifyOpenChain(call *ast.CallExpr, sel *ast.SelectorExpr, alias string) 
 	noDeferCleanup := sel.Sel.Name == "NoDeferCleanup"
 
 	var (
-		releaseArg  ast.Expr
+		releaseArg   ast.Expr
 		inferCleanup bool
 	)
 	switch {
@@ -3030,12 +3036,12 @@ func classifyOpenChain(call *ast.CallExpr, sel *ast.SelectorExpr, alias string) 
 			return qSubCall{}, false, fmt.Errorf("q.Open/OpenE's argument must itself be a call expression returning (T, error)")
 		}
 		return qSubCall{
-			Family:      family,
-			InnerExpr:   entry.Args[0],
-			OuterCall:   expr,
-			CleanupArg:  releaseArg,
+			Family:         family,
+			InnerExpr:      entry.Args[0],
+			OuterCall:      expr,
+			CleanupArg:     releaseArg,
 			NoDeferCleanup: noDeferCleanup,
-			InferCleanup: inferCleanup,
+			InferCleanup:   inferCleanup,
 		}, true, nil
 	}
 
@@ -3065,14 +3071,14 @@ func classifyOpenChain(call *ast.CallExpr, sel *ast.SelectorExpr, alias string) 
 		return qSubCall{}, false, fmt.Errorf("q.OpenE's argument must itself be a call expression returning (T, error)")
 	}
 	return qSubCall{
-		Family:      familyOpenE,
-		Method:      shapeSel.Sel.Name,
-		MethodArgs:  inner.Args,
-		InnerExpr:   entry.Args[0],
-		OuterCall:   expr,
-		CleanupArg:  releaseArg,
+		Family:         familyOpenE,
+		Method:         shapeSel.Sel.Name,
+		MethodArgs:     inner.Args,
+		InnerExpr:      entry.Args[0],
+		OuterCall:      expr,
+		CleanupArg:     releaseArg,
 		NoDeferCleanup: noDeferCleanup,
-		InferCleanup: inferCleanup,
+		InferCleanup:   inferCleanup,
 	}, true, nil
 }
 

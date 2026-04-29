@@ -142,6 +142,13 @@ func rewriteFile(fset *token.FileSet, file *ast.File, src []byte, shapes []callS
 			switch c.Family {
 			case familyDebugSlogAttr, familySlogAttr, familySlogFile, familySlogLine, familySlogFileLine:
 				needsSlog = true
+			case familyOpen, familyOpenE:
+				// q.Open(...).DeferCleanup with a `func(T) error`
+				// cleanup (explicit or auto-inferred) emits a defer
+				// that slog.Errors the close-time err.
+				if c.CleanupRetErr || c.AutoCleanup == cleanupCloseErr {
+					needsSlog = true
+				}
 			case familyGenerator:
 				needsIter = true
 			case familyAssemble, familyAssembleAll, familyAssembleStruct:
@@ -1458,7 +1465,14 @@ func renderOpen(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, cou
 		deferLine = text
 	} else {
 		cleanupText := exprTextSubst(fset, src, sub.CleanupArg, subs, subTexts)
-		deferLine = fmt.Sprintf("defer (%s)(%s)", cleanupText, valueVar)
+		if sub.CleanupRetErr {
+			// `func(T) error` — log the close-time error rather than
+			// silently discarding it. Wrap the cleanup yourself for
+			// different handling (suppress / retry / transform).
+			deferLine = fmt.Sprintf(`defer func() { if _qCleanupErr := (%s)(%s); _qCleanupErr != nil { slog.Error("q.Open: cleanup returned error", "err", _qCleanupErr) } }()`, cleanupText, valueVar)
+		} else {
+			deferLine = fmt.Sprintf("defer (%s)(%s)", cleanupText, valueVar)
+		}
 	}
 	return block + "\n" + indent + deferLine, fmtUsed, nil
 }
@@ -1476,7 +1490,7 @@ func inferredDeferLine(sub qSubCall, valueVar string) (string, error) {
 	case cleanupCloseVoid:
 		return fmt.Sprintf("defer %s.Close()", valueVar), nil
 	case cleanupCloseErr:
-		return fmt.Sprintf("defer func() { _ = %s.Close() }()", valueVar), nil
+		return fmt.Sprintf(`defer func() { if _qCleanupErr := %s.Close(); _qCleanupErr != nil { slog.Error("q.Open: cleanup returned error", "err", _qCleanupErr) } }()`, valueVar), nil
 	}
 	return "", nil
 }

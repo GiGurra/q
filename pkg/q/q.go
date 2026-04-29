@@ -545,21 +545,30 @@ type OpenResult[T any] struct {
 //
 // Two forms:
 //
-//   - DeferCleanup(cleanup) — explicit cleanup function, used for any T.
+//   - DeferCleanup(cleanup) — explicit cleanup. Two accepted shapes:
+//       func(T)         → defer cleanup(v)
+//       func(T) error   → defer wrapper that slog.Errors the close-time err
+//     The cleanup MUST take the resource — q.Open's DeferCleanup is
+//     scoped to the resource it wraps. For cleanups that don't need
+//     the resource, write `defer myCleanup()` at the call site. The
+//     preprocessor validates the argument at compile time; any other
+//     shape is a build error. Wrap the cleanup yourself for different
+//     handling on the close-time error — suppress, retry, or transform.
 //   - DeferCleanup()        — no args; the preprocessor infers the
 //     cleanup from T's type at compile time. Supported shapes:
 //     bidirectional and send-only channels (rewrites to
 //     `defer close(v)` — recv-only channels are rejected since the
 //     consumer doesn't own close), types with a `Close() error`
-//     method (rewrites to `defer func() { _ = v.Close() }()`), and
-//     types with a `Close()` method (rewrites to `defer v.Close()`).
-//     Any other T is a build error — pass an explicit cleanup or
-//     use .NoDeferCleanup() to opt out.
+//     method (rewrites to a deferred wrapper that logs the error via
+//     `slog.Error`), and types with a `Close()` method (rewrites to
+//     `defer v.Close()`). Any other T is a build error — pass an
+//     explicit cleanup or use .NoDeferCleanup() to opt out.
 //
-// The variadic signature is the smallest Go-valid shape that
-// admits both forms; calls with two-or-more args are rejected by
-// the preprocessor.
-func (r OpenResult[T]) DeferCleanup(cleanup ...func(T)) T {
+// The cleanup parameter is `...any` so the source compiles whether
+// the caller hands in `func(T)` or `func(T) error`; the preprocessor
+// rejects anything else with a typed diagnostic. Calls with two-or-
+// more args are also rejected by the preprocessor.
+func (r OpenResult[T]) DeferCleanup(cleanup ...any) T {
 	panicUnrewritten("q.Open(...).DeferCleanup")
 	return r.v
 }
@@ -616,9 +625,10 @@ func (r OpenResultE[T]) Catch(fn func(error) (T, error)) OpenResultE[T] {
 
 // DeferCleanup bubbles the shaped error on failure; registers
 // `defer cleanup(v)` in the enclosing function and returns v on
-// success. Same auto-cleanup inference as q.Open.DeferCleanup when
-// called with zero args — see that doc for the supported T shapes.
-func (r OpenResultE[T]) DeferCleanup(cleanup ...func(T)) T {
+// success. Same explicit-cleanup shapes (`func(T)` or `func(T) error`)
+// and same auto-cleanup inference as q.Open.DeferCleanup — see that
+// doc for the supported T shapes.
+func (r OpenResultE[T]) DeferCleanup(cleanup ...any) T {
 	panicUnrewritten("q.OpenE(...).DeferCleanup")
 	return r.v
 }
