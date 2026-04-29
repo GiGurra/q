@@ -54,17 +54,33 @@ func basicAssemble() *Server {
 
 // ---------- ".DeferCleanup() — auto-defer (the fast path)" ----------
 //
-//	func boot() (*Server, error) {
+// .DeferCleanup() ties the assembled value's lifetime to the enclosing
+// function. The shape is consume-in-function: don't return the value.
+// For factory shapes that return the value, take a *q.Scope and use
+// .WithScope(scope) — see boot() below.
+//
+//	func main() {
 //	    server, err := q.Assemble[*Server](newConfig, openDB, newServer).DeferCleanup()
-//	    if err != nil { return nil, err }
-//	    return server, nil
+//	    if err != nil { log.Fatal(err) }
+//	    server.Run()
 //	}
-func boot() (*Server, error) {
+func deferCleanupDemo() string {
 	server, err := q.Assemble[*Server](newConfig, newDB, newCache, newServer).DeferCleanup()
 	if err != nil {
-		return nil, err
+		return "err: " + err.Error()
 	}
-	return server, nil
+	return "ok cfg=" + server.cfg.DB
+}
+
+// boot() is the factory shape — caller passes in a scope, the
+// assembled server's lifetime is the scope's. The caller gets a live
+// instance back and decides when to close the scope.
+//
+//	func boot(scope *q.Scope) (*Server, error) {
+//	    return q.Assemble[*Server](newConfig, openDB, newServer).WithScope(scope)
+//	}
+func boot(scope *q.Scope) (*Server, error) {
+	return q.Assemble[*Server](newConfig, newDB, newCache, newServer).WithScope(scope)
 }
 
 // ---------- ".NoDeferCleanup() — caller-managed shutdown" ----------
@@ -246,7 +262,10 @@ func main() {
 	s := basicAssemble()
 	fmt.Printf("basicAssemble: server.cfg.DB=%s\n", s.cfg.DB)
 
-	if s, err := boot(); err != nil {
+	fmt.Printf("deferCleanupDemo: %s\n", deferCleanupDemo())
+
+	bootScope := q.NewScope().DeferCleanup()
+	if s, err := boot(bootScope); err != nil {
 		fmt.Printf("boot: err=%s\n", err)
 	} else {
 		fmt.Printf("boot: ok cfg=%s\n", s.cfg.DB)

@@ -34,20 +34,32 @@ func (AssemblyResult[T]) WithScope(*q.Scope) (T, error)
 
 Returns `(T, error)`. The preprocessor injects a `defer` into the *enclosing function* that fires every collected cleanup in reverse-topo order when the function returns. No bookkeeping at the call site.
 
+The shape is **consume-in-function** — the assembled value lives only as long as the enclosing function. `main`, an HTTP handler, a `t.Run` body. Don't return the value: the caller would receive a disposed instance.
+
 ```go
-func boot() (*Server, error) {
+func main() {
     server, err := q.Assemble[*Server](newConfig, openDB, newServer).DeferCleanup()
-    if err != nil { return nil, err }
-    return server, nil
+    if err != nil { log.Fatal(err) }
+    server.Run()
+    // db.Close() / server.Close() fire when main returns.
 }
-// db.Close() runs when boot returns, regardless of err path.
 ```
 
 Compose with q.Try / q.Unwrap to drop the err:
 
 ```go
-server := q.Try(q.Assemble[*Server](recipes...).DeferCleanup())
-server := q.Unwrap(q.Assemble[*Server](recipes...).DeferCleanup())
+func main() {
+    server := q.Unwrap(q.Assemble[*Server](recipes...).DeferCleanup())
+    server.Run()
+}
+```
+
+For factory shapes that **return** the assembled value, take a `*q.Scope` and use [`.WithScope(scope)`](#withscopescope--share-built-deps-across-calls) — the caller owns the lifetime and gets a live instance back:
+
+```go
+func boot(scope *q.Scope) (*Server, error) {
+    return q.Assemble[*Server](newConfig, openDB, newServer).WithScope(scope)
+}
 ```
 
 ### `.NoDeferCleanup()` — caller-managed shutdown
@@ -268,9 +280,10 @@ func newDB(c *Config) (*DB, error) {
 
 func newServer(d *DB, c *Config) (*Server, error) { ... }
 
-// Inside an (T, error)-returning function:
-func boot() (*Server, error) {
-    return q.Assemble[*Server](newConfig, newDB, newServer)
+func main() {
+    server, err := q.Assemble[*Server](newConfig, newDB, newServer).DeferCleanup()
+    if err != nil { log.Fatal(err) }                   // newDB("") triggered "missing db url"
+    server.Run()
 }
 ```
 

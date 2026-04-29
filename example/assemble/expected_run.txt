@@ -1,4 +1,5 @@
 basicAssemble: server.cfg.DB=primary
+deferCleanupDemo: ok cfg=primary
 boot: ok cfg=primary
 nodeferShutdown: ok cfg=primary
 withScopeDemo: ok server.cfg=primary cache.db.cfg=primary
