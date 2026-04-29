@@ -74,5 +74,5 @@ case err != nil:
 ## See also
 
 - [q.Recv](recv.md) — no ctx, just the close-sentinel bubble
-- [q.CheckCtx](bubble.md) — standalone ctx checkpoint, no channel
+- [q.CheckCtx](checkctx.md) — standalone ctx checkpoint, no channel
 - [q.AwaitCtx](await_ctx.md) — same idea for `q.Future`

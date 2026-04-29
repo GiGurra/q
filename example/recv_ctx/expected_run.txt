@@ -1,0 +1,11 @@
+recvCtxDemo(open): ok job=1/build
+recvCtxDemo(closed): err=q: channel closed
+recvCtxDemo(closed).is(q.ErrChanClosed): true
+recvCtxDemo(timeout): err=context deadline exceeded
+recvCtxDemo(timeout).is(context.DeadlineExceeded): true
+recvCtxEWrap(closed): err=waiting for job: q: channel closed
+recvCtxECatch(closed): recovered job=0
+recvCtxECatch(timeout).is(context.DeadlineExceeded): true
+classify(open): ok
+classify(closed): closed
+classify(timeout): deadline
