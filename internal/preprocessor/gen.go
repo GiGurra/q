@@ -132,6 +132,7 @@ func synthesizeGenFile(pkgName string, dirs []genDirective) string {
 		case familyGenEnumJSONStrict:
 			addImport("encoding/json")
 			addImport("fmt")
+			addImport("github.com/GiGurra/q/pkg/q")
 			bodies = append(bodies, generateJSONStrictMethods(d))
 		case familyGenEnumJSONLax:
 			addImport("encoding/json")
@@ -189,7 +190,7 @@ func generateJSONStrictMethods(d genDirective) string {
 	for _, name := range d.constNames {
 		fmt.Fprintf(&b, "\tcase %s:\n\t\treturn []byte(%q), nil\n", name, strconv.Quote(name))
 	}
-	fmt.Fprintf(&b, "\t}\n\treturn nil, fmt.Errorf(\"q.GenEnumJSONStrict[%s]: unknown value %%v\", v)\n}\n", d.typeName)
+	fmt.Fprintf(&b, "\t}\n\treturn nil, fmt.Errorf(\"q.GenEnumJSONStrict[%s]: unknown value %%v: %%w\", v, q.ErrEnumUnknown)\n}\n", d.typeName)
 
 	// Unmarshal: parse string, look up by name, error on unknown.
 	fmt.Fprintf(&b, "\nfunc (v *%s) UnmarshalJSON(b []byte) error {\n", d.typeName)
@@ -201,7 +202,7 @@ func generateJSONStrictMethods(d genDirective) string {
 	for _, name := range d.constNames {
 		fmt.Fprintf(&b, "\tcase %q:\n\t\t*v = %s\n\t\treturn nil\n", name, name)
 	}
-	fmt.Fprintf(&b, "\t}\n\treturn fmt.Errorf(\"q.GenEnumJSONStrict[%s]: unknown name %%q\", s)\n}\n", d.typeName)
+	fmt.Fprintf(&b, "\t}\n\treturn fmt.Errorf(\"q.GenEnumJSONStrict[%s]: unknown name %%q: %%w\", s, q.ErrEnumUnknown)\n}\n", d.typeName)
 	return b.String()
 }
 

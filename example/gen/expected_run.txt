@@ -1,0 +1,10 @@
+Color.String: Red, Green, Blue
+strict json marshal Green: "Green"
+strict unmarshal Blue: Blue
+strict unmarshal Pink: err=q.GenEnumJSONStrict[Color]: unknown name "Pink": q: unknown enum value, is(q.ErrEnumUnknown)=true
+lax json marshal Done: "done"
+lax unmarshal future-value: future-value
+handle(Pending): wait
+handle(Done): ok
+handle(Failed): fail
+handle(future-value): unknown:future-value
