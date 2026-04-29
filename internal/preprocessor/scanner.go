@@ -424,12 +424,13 @@ type qSubCall struct {
 	// emits a guiding diagnostic.
 	AssembleChain assembleChain
 
-	// AssembleScopeArg is the *Scope expression handed to .WithScope(s).
-	// Captured at scan time as an ast.Expr; the rewriter splices its
-	// source text (with nested q.* substitutions) into the IIFE
-	// emitting the cache-aware path. nil for chains other than
-	// assembleChainWithScope.
-	AssembleScopeArg ast.Expr
+	// ScopeArg is the *q.Scope expression handed to a .WithScope(s)
+	// terminal — populated by the q.Assemble chain (assembleChainWithScope)
+	// and by the q.Open / q.OpenE chain. The rewriter splices its
+	// source text (with nested q.* substitutions) into the emitted
+	// scope.Attach* call. nil for chains that don't terminate with
+	// .WithScope.
+	ScopeArg ast.Expr
 
 	// TernCond / TernThen / TernElse are the three q.Tern args
 	// captured at scan time. TernResultTypeText is T's spelling under
@@ -2608,12 +2609,17 @@ func classifyQCall(expr ast.Expr, alias string) (qSubCall, bool, error) {
 			}
 			return classifyOpenChain(call, sel, alias)
 		}
-		// .WithScope(s) — only valid on the q.Assemble family.
+		// .WithScope(...) — valid on q.Assemble (single arg: scope) and
+		// on q.Open / q.OpenE (variadic: scope, or cleanup+scope).
 		if sel.Sel.Name == "WithScope" {
 			if entry, ok := sel.X.(*ast.CallExpr); ok {
 				if isAssembleEntry(entry, alias) {
 					return classifyAssembleChain(call, sel, entry, alias)
 				}
+				// Otherwise fall through to the Open chain classifier
+				// — it walks both the bare Open(...) entry and
+				// OpenE(...).<shape>(...) entry shapes.
+				return classifyOpenChain(call, sel, alias)
 			}
 		}
 		// Reject .RecoverIs / .RecoverAs as the outer (terminal)
@@ -2971,7 +2977,7 @@ func classifyAssembleChain(call *ast.CallExpr, sel *ast.SelectorExpr, entry *ast
 		AssembleRecipes:   recipes,
 		AssemblePermitNil: permitNil,
 		AssembleChain:     chain,
-		AssembleScopeArg:  scopeArg,
+		ScopeArg:  scopeArg,
 		OuterCall:         ast.Expr(call),
 	}, true, nil
 }
@@ -3035,15 +3041,30 @@ func entryNameForFamily(f family) string {
 func classifyOpenChain(call *ast.CallExpr, sel *ast.SelectorExpr, alias string) (qSubCall, bool, error) {
 	expr := ast.Expr(call)
 	noDeferCleanup := sel.Sel.Name == "NoDeferCleanup"
+	withScope := sel.Sel.Name == "WithScope"
 
 	var (
 		releaseArg   ast.Expr
+		scopeArg     ast.Expr
 		inferCleanup bool
 	)
 	switch {
 	case noDeferCleanup:
 		if len(call.Args) != 0 {
 			return qSubCall{}, false, fmt.Errorf("q.Open/OpenE(...).NoDeferCleanup takes no arguments; got %d", len(call.Args))
+		}
+	case withScope:
+		// WithScope(scope) — auto-detect cleanup from T.
+		// WithScope(cleanup, scope) — explicit cleanup + scope.
+		switch len(call.Args) {
+		case 1:
+			scopeArg = call.Args[0]
+			inferCleanup = true
+		case 2:
+			releaseArg = call.Args[0]
+			scopeArg = call.Args[1]
+		default:
+			return qSubCall{}, false, fmt.Errorf("q.Open/OpenE(...).WithScope takes 1 (scope) or 2 (cleanup, scope) arguments; got %d", len(call.Args))
 		}
 	case len(call.Args) == 0:
 		// .DeferCleanup() with no args — preprocessor infers the cleanup
@@ -3073,6 +3094,7 @@ func classifyOpenChain(call *ast.CallExpr, sel *ast.SelectorExpr, alias string) 
 			InnerExpr:      entry.Args[0],
 			OuterCall:      expr,
 			CleanupArg:     releaseArg,
+			ScopeArg:       scopeArg,
 			NoDeferCleanup: noDeferCleanup,
 			InferCleanup:   inferCleanup,
 		}, true, nil
@@ -3110,6 +3132,7 @@ func classifyOpenChain(call *ast.CallExpr, sel *ast.SelectorExpr, alias string) 
 		InnerExpr:      entry.Args[0],
 		OuterCall:      expr,
 		CleanupArg:     releaseArg,
+		ScopeArg:       scopeArg,
 		NoDeferCleanup: noDeferCleanup,
 		InferCleanup:   inferCleanup,
 	}, true, nil

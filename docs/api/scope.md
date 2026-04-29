@@ -92,7 +92,7 @@ Direct `scope.Close()` remains valid; both paths are idempotent.
 
 ## Attaching things — `Attach`, `AttachE`, `AttachFn`, `AttachFnE`
 
-Beyond `q.Assemble[T](...).WithScope(s)`, anything implementing `Close()` (or `Close() error`) — including subscopes — can be attached manually:
+Beyond `q.Assemble[T](...).WithScope(s)` and [`q.Open(...).WithScope(s)`](open.md#withscopescope--hand-the-lifetime-to-a-qscope), anything implementing `Close()` (or `Close() error`) — including subscopes — can be attached manually:
 
 ```go
 // Closer with void Close().
@@ -149,5 +149,5 @@ Closing mid-flight while a `q.Assemble[T](...).WithScope(s)` is running is suppo
 ## See also
 
 - [`q.Assemble`](assemble.md) — the recipe-driven DI framework whose `.WithScope(scope)` chain leaf is the primary consumer of scopes.
-- [`q.Open`](open.md) — single-resource lifetime helper. Useful when one resource and one cleanup is the whole pattern.
+- [`q.Open`](open.md) — single-resource lifetime helper. Its `.WithScope(scope)` terminal hands the resource to a scope instead of a function-local `defer`.
 - [ZIO Scope](https://zio.dev/reference/contextual/scope/) — the conceptual ancestor.

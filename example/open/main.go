@@ -233,6 +233,33 @@ func formHoist(addr string) (int, error) {
 
 func identify(c *Conn) int { return c.id }
 
+// ---------- ".WithScope(scope) — hand the lifetime to a *q.Scope" ----------
+//
+//	conn := q.Open(dial(addr)).WithScope(scope)
+//
+// Auto-detects the cleanup the same way .DeferCleanup() does (chan
+// close, Close(), Close() error). The scope owns the resource; the
+// caller can return / pass it freely. If the scope is already closed
+// at attach time, the cleanup fires eagerly and q.ErrScopeClosed is
+// bubbled.
+
+func openWithScopeAuto(scope *q.Scope, addr string) (*Conn, error) {
+	conn := q.Open(dial(addr)).WithScope(scope)
+	return conn, nil
+}
+
+// .WithScope(cleanup, scope) — explicit cleanup + scope.
+func openWithScopeExplicit(scope *q.Scope, addr string) (*Conn, error) {
+	conn := q.Open(dial(addr)).WithScope(cleanup, scope)
+	return conn, nil
+}
+
+// q.OpenE shape methods compose with .WithScope as the terminal.
+func openWithScopeWrapped(scope *q.Scope, addr string) (*Conn, error) {
+	conn := q.OpenE(dial(addr)).Wrap("dialing").WithScope(scope)
+	return conn, nil
+}
+
 // ---------- "//q:no-escape-check opt-out" ----------
 //
 //	//q:no-escape-check
@@ -310,6 +337,38 @@ func main() {
 	ch, _ := channelAutoInner()
 	v2 := <-ch
 	fmt.Printf("channelAutoInner -> received=%d\n", v2)
+
+	// .WithScope: scope owns the lifetime, resource may escape.
+	scope := q.NewScope()
+	if c, err := openWithScopeAuto(scope, "remote"); err != nil {
+		report("openWithScopeAuto(remote)", err)
+	} else {
+		fmt.Printf("openWithScopeAuto(remote)=%d (scope owns)\n", c.id)
+	}
+	scope.Close()
+	report("openWithScopeAuto.afterScopeClose", nil)
+
+	scope2 := q.NewScope()
+	if c, err := openWithScopeExplicit(scope2, "remote"); err != nil {
+		report("openWithScopeExplicit(remote)", err)
+	} else {
+		fmt.Printf("openWithScopeExplicit(remote)=%d (scope owns)\n", c.id)
+	}
+	scope2.Close()
+	report("openWithScopeExplicit.afterScopeClose", nil)
+
+	scope3 := q.NewScope()
+	if _, err := openWithScopeWrapped(scope3, ""); err != nil {
+		report("openWithScopeWrapped(empty)", err)
+	}
+	scope3.Close()
+
+	scope4 := q.NewScope()
+	scope4.Close()
+	if _, err := openWithScopeAuto(scope4, "remote"); err != nil {
+		fmt.Printf("openWithScopeAuto(closed-scope): err=%s is(ErrScopeClosed)=%v\n", err, errors.Is(err, q.ErrScopeClosed))
+	}
+	report("openWithScopeAuto.eagerClose", nil)
 }
 
 func itoa(n int) string {

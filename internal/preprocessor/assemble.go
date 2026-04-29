@@ -1125,7 +1125,7 @@ func buildAssembleWithScopeBody(fset *token.FileSet, src []byte, sub qSubCall, s
 
 	// Capture the scope arg via exprTextSubst so any nested q.* in the
 	// scope expression has already been hoisted to its temp.
-	scopeArgText := exprTextSubst(fset, src, sub.AssembleScopeArg, subs, subTexts)
+	scopeArgText := exprTextSubst(fset, src, sub.ScopeArg, subs, subTexts)
 
 	zeroExpr := fmt.Sprintf("*new(%s)", targetText)
 

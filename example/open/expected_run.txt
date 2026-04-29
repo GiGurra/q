@@ -23,3 +23,10 @@ formDiscard(local): ok closes=[conn-5]
 formReturnPosition(local)=5: ok closes=[]
 formHoist(local)=5: ok closes=[conn-5]
 channelAutoInner -> received=7
+openWithScopeAuto(remote)=6 (scope owns)
+openWithScopeAuto.afterScopeClose: ok closes=[conn-6]
+openWithScopeExplicit(remote)=6 (scope owns)
+openWithScopeExplicit.afterScopeClose: ok closes=[conn-6]
+openWithScopeWrapped(empty): err=dialing: empty addr closes=[]
+openWithScopeAuto(closed-scope): err=q: scope closed is(ErrScopeClosed)=true
+openWithScopeAuto.eagerClose: ok closes=[conn-6]

@@ -139,13 +139,6 @@ The persistent backlog for `q`. A cold-state reader can pick up here without re-
 
 ### Cleanup-shape uniformity across q
 
-- **#101 — q.Open should attach to q.Scope.** Today, only q.Assemble can route resource lifetimes through a `*q.Scope` (via `.WithScope(scope)`). q.Open's three terminators are `.DeferCleanup(cleanup)` / `.DeferCleanup()` / `.NoDeferCleanup()` — none attach to a scope. Surface idea:
-
-      conn := q.Open(dial(addr)).WithScope(scope)                   // auto-detect cleanup from T
-      conn := q.Open(dial(addr)).WithScope((*Conn).Close, scope)    // explicit cleanup + scope
-
-  The optional `closeExpr` slot accepts the same shapes q.Open's `.DeferCleanup(cleanup)` does today (`func(T)` / `func(T) error`). Variadic on `...any` again, with the rewriter / typecheck pass distinguishing the (close, scope) pair from the bare-(scope) form by inspecting argument types. The rewriter emits `scope.Attach(v, cleanup)` (or the auto-inferred cleanup) so the scope owns the lifetime, mirroring q.Assemble's `.WithScope`. Mutually exclusive with `.DeferCleanup` / `.NoDeferCleanup` since a scope-attached resource has its lifetime owned by the scope.
-
 - **#99 — Cleanup-shape uniformity across q.** `q.Open(...).DeferCleanup(cleanup)` accepts `func(T)` and `func(T) error`, with the err-returning form rewritten to a `slog.Error`-wrapped defer. Other cleanup-accepting sites in q should accept the same two-shape vocabulary so users don't have to remember which API takes which shape:
 
   - `q.Assemble[T](...).DeferCleanup(cleanup)` — currently zero-arg only (auto-cleanup); add explicit-cleanup support with the same two shapes.

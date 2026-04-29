@@ -10,11 +10,13 @@ func OpenE[T any](v T, err error) OpenResultE[T]
 
 func (OpenResult[T])  DeferCleanup(cleanup ...any) T   // 0 or 1 args; cleanup is func(T) or func(T) error
 func (OpenResult[T])  NoDeferCleanup() T
+func (OpenResult[T])  WithScope(args ...any) T          // (scope) or (cleanup, scope)
 func (OpenResultE[T]) DeferCleanup(cleanup ...any) T   // 0 or 1 args; cleanup is func(T) or func(T) error
 func (OpenResultE[T]) NoDeferCleanup() T
+func (OpenResultE[T]) WithScope(args ...any) T          // (scope) or (cleanup, scope)
 ```
 
-`.DeferCleanup(...)` and `.NoDeferCleanup()` are both terminals — what actually returns `T`. `q.Open(v, err)` on its own returns an `OpenResult[T]` that exposes nothing else; you always chain one of the two terminals onto it. (Why a method, not an extra arg: Go's multi-return spread only fires when the multi-return call is the sole argument, so `q.Open(call(), cleanup)` won't compile. The terminal-method shape side-steps that.)
+`.DeferCleanup(...)`, `.NoDeferCleanup()`, and `.WithScope(...)` are the three terminals — what actually returns `T`. `q.Open(v, err)` on its own returns an `OpenResult[T]` that exposes nothing else; you always chain one terminal onto it. (Why a method, not an extra arg: Go's multi-return spread only fires when the multi-return call is the sole argument, so `q.Open(call(), cleanup)` won't compile. The terminal-method shape side-steps that.)
 
 `.DeferCleanup` accepts zero or one cleanup function:
 
@@ -100,6 +102,29 @@ val := q.OpenE(loadValue(key)).Wrap("loading").NoDeferCleanup()
 ```
 
 Why a separate terminal instead of `DeferCleanup(q.NoDeferCleanup)` (a no-op cleanup)? Spelling it as a method makes the intent obvious in code review — "we acquired this and we're not closing it, here's the call that says so" — instead of needing to look up what `q.NoDeferCleanup` does in the docs.
+
+## `.WithScope(scope)` — hand the lifetime to a `*q.Scope`
+
+Routes the cleanup through `scope.Attach*` instead of a function-local `defer`. Use it when the resource needs to outlive the function that opens it — per-request scopes, per-tenant lifetimes, anything where `defer` at this level is too short.
+
+```go
+conn := q.Open(dial(addr)).WithScope(scope)              // auto-detect cleanup from T
+conn := q.Open(dial(addr)).WithScope(myCleanup, scope)   // explicit cleanup + scope
+return conn, nil                                         // safe to return — scope owns the lifetime
+```
+
+Two call shapes:
+
+| Args                | Routing                                                                         |
+|---------------------|----------------------------------------------------------------------------------|
+| `(scope)`           | Auto-detect (chan / `Close()` / `Close() error`), same shapes `DeferCleanup()` infers. Maps to `scope.AttachFn(v, func(){ close(v) })` / `scope.Attach(v)` / `scope.AttachE(v)` respectively. |
+| `(cleanup, scope)`  | Explicit cleanup. `func(T)` → `scope.AttachFn`, `func(T) error` → `scope.AttachFnE`. |
+
+If the scope is already closed at attach time, the cleanup fires *eagerly* and `q.ErrScopeClosed` is bubbled — different from `DeferCleanup`'s "always succeeds" success path. The bubble exists because the resource has just been disposed; the caller shouldn't keep using it.
+
+The `args` parameter is `...any` so the source compiles whether the caller passes one (`scope`) or two (`cleanup, scope`); the preprocessor enforces the ordering at build time.
+
+`.WithScope` is mutually exclusive with `.DeferCleanup` and `.NoDeferCleanup` — pick one terminal per `q.Open` call. The resource-escape check is skipped for `.WithScope` calls (the scope is the owner; returning the value is the point).
 
 ## Chain methods on `q.OpenE`
 

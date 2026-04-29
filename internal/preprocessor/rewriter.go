@@ -145,7 +145,13 @@ func rewriteFile(fset *token.FileSet, file *ast.File, src []byte, shapes []callS
 			case familyOpen, familyOpenE:
 				// q.Open(...).DeferCleanup with a `func(T) error`
 				// cleanup (explicit or auto-inferred) emits a defer
-				// that slog.Errors the close-time err.
+				// that slog.Errors the close-time err. .WithScope
+				// routes cleanup through scope.Attach* (which uses
+				// q.LogCloseErr internally) so it doesn't pull slog
+				// into the user's file.
+				if c.ScopeArg != nil {
+					break
+				}
 				if c.CleanupRetErr || c.AutoCleanup == cleanupCloseErr {
 					needsSlog = true
 				}
@@ -1456,6 +1462,22 @@ func renderOpen(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, cou
 		// .NoDeferCleanup() — bubble check only, no defer cleanup.
 		return block, fmtUsed, nil
 	}
+	if sub.ScopeArg != nil {
+		// .WithScope([cleanup,] scope) — register the cleanup with the
+		// scope rather than wiring a function-local defer.
+		scopeText := exprTextSubst(fset, src, sub.ScopeArg, subs, subTexts)
+		attachCall, err := scopeAttachCall(sub, valueVar, scopeText, fset, src, subs, subTexts)
+		if err != nil {
+			return "", false, err
+		}
+		// Bubble q.ErrScopeClosed (or any other error from the scope
+		// — currently only ErrScopeClosed) so the caller doesn't keep
+		// using a resource the scope just disposed eagerly.
+		zerosForScope := append([]string(nil), zeros...)
+		zerosForScope[len(zerosForScope)-1] = errVar
+		attachBlock := fmt.Sprintf("if %s = %s; %s != nil {\n%s\treturn %s\n%s}", errVar, attachCall, errVar, indent, joinWith(zerosForScope, ", "), indent)
+		return block + "\n" + indent + attachBlock, fmtUsed, nil
+	}
 	var deferLine string
 	if sub.InferCleanup {
 		text, err := inferredDeferLine(sub, valueVar)
@@ -1475,6 +1497,34 @@ func renderOpen(fset *token.FileSet, src []byte, sh callShape, sub qSubCall, cou
 		}
 	}
 	return block + "\n" + indent + deferLine, fmtUsed, nil
+}
+
+// scopeAttachCall renders the scope.Attach* invocation for a
+// .WithScope terminal. Auto-cleanup dispatches to Attach (Close()) /
+// AttachE (Close() error) / AttachFn-with-close-thunk (chan); explicit
+// cleanup dispatches to AttachFn (func(T)) / AttachFnE (func(T) error).
+func scopeAttachCall(sub qSubCall, valueVar, scopeText string, fset *token.FileSet, src []byte, subs []qSubCall, subTexts []string) (string, error) {
+	if sub.InferCleanup {
+		switch sub.AutoCleanup {
+		case cleanupChanClose:
+			return fmt.Sprintf("(%s).AttachFn(%s, func() { close(%s) })", scopeText, valueVar, valueVar), nil
+		case cleanupCloseVoid:
+			return fmt.Sprintf("(%s).Attach(%s)", scopeText, valueVar), nil
+		case cleanupCloseErr:
+			return fmt.Sprintf("(%s).AttachE(%s)", scopeText, valueVar), nil
+		case cleanupUnknown:
+			// Typecheck pass didn't run (no importcfg) or didn't
+			// resolve T. Emit a placeholder that won't compile so
+			// the failure surfaces at build time rather than runtime.
+			return "", fmt.Errorf("q.Open(...).WithScope(scope): could not infer cleanup form for resource type — pass an explicit cleanup as the first arg")
+		}
+		return "", fmt.Errorf("q.Open(...).WithScope: unknown auto-cleanup kind %d", sub.AutoCleanup)
+	}
+	cleanupText := exprTextSubst(fset, src, sub.CleanupArg, subs, subTexts)
+	if sub.CleanupRetErr {
+		return fmt.Sprintf("(%s).AttachFnE(%s, func() error { return (%s)(%s) })", scopeText, valueVar, cleanupText, valueVar), nil
+	}
+	return fmt.Sprintf("(%s).AttachFn(%s, func() { (%s)(%s) })", scopeText, valueVar, cleanupText, valueVar), nil
 }
 
 // inferredDeferLine returns the defer line for a zero-arg

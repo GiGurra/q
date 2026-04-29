@@ -583,6 +583,28 @@ func (r OpenResult[T]) NoDeferCleanup() T {
 	return r.v
 }
 
+// WithScope bubbles err on failure; on success attaches the resource
+// to scope so the scope owns its lifetime — when the scope closes,
+// the cleanup fires.
+//
+// Two call shapes:
+//
+//   - WithScope(scope)            — auto-detect cleanup from T (same
+//     shapes DeferCleanup() infers: bidirectional/send-only chan,
+//     Close(), Close() error).
+//   - WithScope(cleanup, scope)   — explicit cleanup (func(T) or
+//     func(T) error).
+//
+// If the scope is already closed when the attach fires, the cleanup
+// runs eagerly and q.ErrScopeClosed is bubbled — different from
+// DeferCleanup which always succeeds. The `args` parameter is `...any`
+// so the source compiles for either shape; the preprocessor enforces
+// the (cleanup?, scope) ordering at build time.
+func (r OpenResult[T]) WithScope(args ...any) T {
+	panicUnrewritten("q.Open(...).WithScope")
+	return r.v
+}
+
 // OpenResultE is the chain-capable Open handle. Shape methods return
 // OpenResultE[T] so DeferCleanup can terminate the chain; DeferCleanup
 // itself returns T.
@@ -639,6 +661,15 @@ func (r OpenResultE[T]) DeferCleanup(cleanup ...any) T {
 // shape methods (Wrap/Wrapf/Err/ErrF/Catch) on q.OpenE.
 func (r OpenResultE[T]) NoDeferCleanup() T {
 	panicUnrewritten("q.OpenE(...).NoDeferCleanup")
+	return r.v
+}
+
+// WithScope bubbles the shaped error on failure; on success attaches
+// the resource to scope. Same semantics and call shapes as
+// q.OpenResult.WithScope, composed with the shape methods (Wrap /
+// Wrapf / Err / ErrF / Catch).
+func (r OpenResultE[T]) WithScope(args ...any) T {
+	panicUnrewritten("q.OpenE(...).WithScope")
 	return r.v
 }
 

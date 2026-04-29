@@ -133,6 +133,12 @@ func collectAutoCloseOpens(shapes []callShape) map[token.Pos]string {
 			if sc.NoDeferCleanup {
 				continue
 			}
+			if sc.ScopeArg != nil {
+				// .WithScope hands the lifetime to the scope — the
+				// resource may legitimately escape this function as
+				// long as it stays alive only until the scope closes.
+				continue
+			}
 			if sc.CleanupArg == nil && !sc.InferCleanup {
 				continue
 			}
