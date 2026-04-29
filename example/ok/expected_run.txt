@@ -1,0 +1,15 @@
+singleCall(1): ok=Ada
+singleCall(99): err=q: not ok
+singleCall(99).is(q.ErrNotOk): true
+twoArg(1): ok=Ada
+okEErr(99): err=not found
+okEErrF(99): err=missing 99
+okEWrap(99): err=user lookup failed
+okEWrapf(99): err=no user 99
+okECatch(99) [recovers via backfill]: ok=backfilled-99
+formDefine(1): ok=Ada
+formAssign(1): ok=Ada
+formDiscard(1): ok
+formDiscard(99): err=q: not ok
+formReturn(1): ok=Ada
+formHoist(1): Ada

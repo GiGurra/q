@@ -50,10 +50,16 @@ There is no source error on the not-ok branch, so `.ErrF` takes a thunk, and `.W
 | `.Catch(fn func() (T, error))`        | Recover with `(v, nil)` or bubble `(_, err)` |
 
 ```go
-v := q.OkE(users[id]).Err(ErrNotFound)
-v := q.OkE(users[id]).Wrapf("no user %d", id)
-v := q.OkE(users[id]).Catch(func() (User, error) { return backfill(id) })
+v := q.OkE(lookup(id)).Err(ErrNotFound)
+v := q.OkE(lookup(id)).Wrapf("no user %d", id)
+v := q.OkE(lookup(id)).Catch(func() (User, error) { return backfill(id) })
 ```
+
+(Map index `users[id]` returns `(T, bool)` only in the destructure
+position `v, ok := users[id]`. As an argument to another call it
+returns just `T`, so `q.OkE(users[id])` won't compile — feed it via
+a `(T, bool)`-returning function (`lookup(id)` here) or destructure
+first and pass `q.OkE(v, ok)` in the two-arg form.)
 
 ## Statement forms
 
