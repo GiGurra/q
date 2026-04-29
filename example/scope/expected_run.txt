@@ -1,0 +1,23 @@
+usingDeferCleanup: pre-return
+close: worker
+---
+close: ndc-worker
+---
+close: db
+---
+stream flush
+conn drain+close
+closeE: myDB
+close: myWorker
+---
+detached: detachable (cleanup unregistered)
+---
+close: child-leaf
+---
+close: late
+Attach after close: is(q.ErrScopeClosed)=true
+Detach after close: false
+---
+lifo: third
+lifo: second
+lifo: first

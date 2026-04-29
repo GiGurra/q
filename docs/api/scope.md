@@ -105,7 +105,7 @@ scope.AttachFn(myConn, func() { myConn.Drain(); myConn.Close() })
 scope.AttachFnE(myStream, func() error { return myStream.Flush() })
 ```
 
-Each Attach* call returns `error`: `q.ErrScopeClosed` if the scope has already closed (the caller is then expected to fire the cleanup directly).
+Each Attach* call returns `error`: `q.ErrScopeClosed` if the scope has already closed. In that case the cleanup is fired *eagerly* by the Attach call itself — the resource is already disposed by the time Attach returns; the error is informational, not a "you still need to fire it" signal.
 
 `*Scope` itself implements `Close()`, so subscopes nest naturally:
 
