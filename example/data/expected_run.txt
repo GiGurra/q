@@ -1,0 +1,27 @@
+mapDemo: [10 20 30]
+mapErrDemo: [1 2 3]
+mapErrFailing: err=strconv.Atoi: parsing "bad": invalid syntax
+mapErrViaTry: [1 2 3]
+filterDemo: [2 4]
+flatMapDemo: [a1 b1 a2 b2]
+groupByDemo[fruit]: [{x fruit 1} {z fruit 3}]
+groupByDemo[veg]: [{y veg 2}]
+mapValuesDemo[fruit]: 2
+mapValuesDemo[veg]: 1
+mapKeysDemo[A]: 1
+mapKeysDemo[B]: 2
+exists=true forAll=true find=2 ok=true
+Fold-sum=10 Reduce-sum=10 Fold-csv=x,y,z
+foldErrDemo: 60
+Distinct=[1 2 3 4] Take=[1 2 2] Drop=[3 3 3 4]
+Partition: yes=[2 4] no=[1 3 5]
+Chunk: [[1 2] [3 4] [5]]
+Sort: [1 1 2 3 4 5 9]
+SortBy: [{y a 2} {z b 3} {x c 1}]
+Sum=14 Min=1/ok=true Max=5/ok=true
+Zip: [{1 a} {2 b} {3 c}]
+ZipMap[1]: a
+ZipMap[2]: b
+ForEach: 1.2.3.
+ForEachErr: err=stop at bad
+pipeline: 155
