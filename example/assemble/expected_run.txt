@@ -1,0 +1,18 @@
+basicAssemble: server.cfg.DB=primary
+boot: ok cfg=primary
+nodeferShutdown: ok cfg=primary
+withScopeDemo: ok server.cfg=primary cache.db.cfg=primary
+bootErrored: err=missing db url
+inlineValueDemo: cfg=override
+ctxAsRecipe: region=eu-west-1
+brandedDemo: primary=Q@primary replica=Q@replica
+interfaceDemo: greet=hello
+permitNilDemo: cache=<nil>
+assembleAllDemo: [auth log metrics]
+assembleStructDemo: server.cfg=primary worker.db.cfg=primary stats.cfg=primary
+[q.Assemble] ctx provided
+[q.Assemble] step #2 (newConfig)
+[q.Assemble] step #3 (newDB)
+[q.Assemble] step #4 (newCache)
+[q.Assemble] step #5 (newServer)
+debugDemo: cfg=primary
