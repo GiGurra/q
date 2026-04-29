@@ -49,7 +49,7 @@ The Go compiler treats the result like any other slice literal — it can be fol
 
 ## Use cases
 
-### Codegen-free SQL row mapper
+### DB-tag → value mapping
 
 ```go
 type User struct {
@@ -58,22 +58,27 @@ type User struct {
     Email string `db:"email"`
 }
 
-func selectUser(id int) (User, error) {
-    cols := []string{
-        q.Tag[User]("ID", "db"),
-        q.Tag[User]("Name", "db"),
-        q.Tag[User]("Email", "db"),
+// Build a column-keyed row from a struct value, no reflect at runtime.
+// Each q.Tag call folds to its string literal at compile time.
+func rowOf(u User) map[string]any {
+    return map[string]any{
+        q.Tag[User]("ID", "db"):    u.ID,    // "user_id" → 7
+        q.Tag[User]("Name", "db"):  u.Name,  // "full_name" → "Ada"
+        q.Tag[User]("Email", "db"): u.Email, // "email" → "ada@..."
     }
-    query := q.PgSQL("SELECT " + cols[0] + ", " + cols[1] + ", " + cols[2] + " FROM users WHERE id = {id}")
-    // ... db.QueryRowContext(ctx, query.Query, query.Args...).Scan(...)
 }
 ```
 
+(For the SQL string itself, use [`q.PgSQL`](sql.md) on a literal — `q.PgSQL` doesn't accept string concatenation, so the column list lives in the literal directly.)
+
 ### Type-aware error messages
+
+`q.F` / `q.Ferr` placeholders are not re-scanned for nested `q.*` calls, so hoist the lookup into a variable first:
 
 ```go
 err := decode(b)
-return q.Ferr("decoding {q.TypeName[User]()}: {err}")
+typeName := q.TypeName[User]()
+return q.Ferr("decoding {typeName}: {err}")
 // → "decoding User: <err>"
 ```
 

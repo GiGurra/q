@@ -1,0 +1,11 @@
+Fields[User]: [ID Name Email]
+AllFields[User]: [ID Name Email pwd]
+TypeName[User]: User
+TypeName[*User]: User
+Tag[User](ID,json): "id"
+Tag[User](ID,db): "user_id"
+Tag[User](Name,db): "full_name"
+Tag[User](Email,db): ""
+rowOf.user_id=7 full_name=Ada missing-key("")=ada@example.com
+decodeErrFor: decoding User: EOF
+encode.ID=1 Name=Ada Email=ada@example.com len=3
