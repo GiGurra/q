@@ -24,6 +24,21 @@ import (
 // A directory without expected_run.txt is skipped — useful while authoring
 // a new example before pinning its output. CI does not let you forget,
 // because docs/api/<page>.md → example/<page>/ is the contract.
+// exampleBuildTag returns the build tag (if any) required by the
+// example/<name>/ package. Most examples are plain `package main` and
+// need no tag; a small set use APIs whose pre-rewrite source the Go
+// typechecker can't accept (e.g. q.Sealed synthesises marker methods
+// only visible after the toolexec pass), and those examples gate
+// themselves behind a tag so plain `go build ./...` and `golangci-lint
+// run ./...` skip them.
+func exampleBuildTag(name string) (string, bool) {
+	switch name {
+	case "sealed":
+		return "q_sealed_demo", true
+	}
+	return "", false
+}
+
 func TestExamples(t *testing.T) {
 	root := repoRoot()
 	exDir := filepath.Join(root, "example")
@@ -53,7 +68,15 @@ func TestExamples(t *testing.T) {
 			}
 			want := strings.TrimSpace(string(wantBytes))
 
-			cmd := exec.Command("go", "run", "-toolexec", qBin, "./example/"+name)
+			args := []string{"run", "-toolexec", qBin}
+			// Per-example build tags — gates examples whose pre-rewrite
+			// source can't typecheck under plain Go (e.g. q.Sealed
+			// synthesises marker methods only the toolexec build sees).
+			if tag, ok := exampleBuildTag(name); ok {
+				args = append(args, "-tags", tag)
+			}
+			args = append(args, "./example/"+name)
+			cmd := exec.Command("go", args...)
 			cmd.Dir = root
 			cmd.Env = append(os.Environ(), "GOCACHE="+goCache)
 			out, err := cmd.CombinedOutput()

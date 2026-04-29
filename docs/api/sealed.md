@@ -1,5 +1,16 @@
 # `q.Sealed` — interface-based sealed sum types
 
+> **Experimental.** q.Sealed works end-to-end under `-toolexec=q`,
+> but the synthesised marker methods are invisible to plain Go
+> tooling — `gopls`, `golangci-lint`, `staticcheck`, and any IDE
+> using them all paint red squiggles at every `chan Message <-
+> Ping{}` site, because the pre-rewrite source has Variant types
+> that don't implement Message. The runtime build is fine; the
+> editor experience is not. For day-to-day code where IDE comfort
+> matters, prefer [`q.OneOfN`](oneof.md), which carries variants
+> in a Tag/Value box that plain Go's typechecker is happy with.
+> See "IDE-clean opt-out" below for a partial mitigation.
+
 `q.Sealed` is the interface-based sibling of [`q.OneOfN`](oneof.md):
 each variant lives as its own type at runtime (no `Tag` / `Value`
 boxing) and the carrier is a marker interface that the variants
@@ -10,7 +21,8 @@ variant in a companion file.
 
 This is the right tool for **message-passing systems**: variants flow
 through `chan Message` as themselves, type switches dispatch
-naturally, and `q.Exhaustive` enforces coverage at build time.
+naturally, and `q.Exhaustive` enforces coverage at build time — at
+the cost noted in the experimental box above.
 
 ## At a glance
 
@@ -89,6 +101,25 @@ For each `var _ = q.Sealed[I](v1, v2, …)`:
 
 After step 3, each variant satisfies `I` — the type system enforces
 "only declared variants flow through I-typed slots."
+
+### IDE-clean opt-out: hand-written markers
+
+The synthesis pass skips any variant that already declares a method
+matching the marker (same name, no params, no results). So you can
+hand-write the marker yourself to keep the pre-rewrite source clean
+in editors / `golangci-lint`:
+
+```go
+type Ping struct{ ID int }
+func (Ping) message() {}                    // hand-written; gopls sees it
+
+var _ = q.Sealed[Message](Ping{}, /* … */)  // synthesis skipped for Ping
+```
+
+This trades the boilerplate-elimination win for the IDE-clean win.
+If both matter, `q.OneOfN` carries variants in a Tag/Value wrapper
+that has neither problem — at the cost of an extra `q.AsOneOf` /
+`.Value` hop at producer / consumer sites.
 
 ## Construction
 

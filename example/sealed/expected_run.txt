@@ -1,0 +1,9 @@
+handle: ping 1
+handle: pong 2
+handle: dc: timeout
+describe: ping 7
+describe: pong 8
+describe: dc: bye
+describePingOnly: only-ping 9
+describePingOnly: not a ping
+describePingOnly: not a ping

@@ -53,7 +53,10 @@ jobs:
           # Dedicated GOCACHE so the toolexec build never reuses a
           # stub-less pkg/q.a from the unrelated test runs above.
           GOCACHE="$HOME/.cache/q-build" go clean -cache
-          GOFLAGS="-toolexec=q" GOCACHE="$HOME/.cache/q-build" go build ./example/...
+          # `-tags=q_sealed_demo` opts in example/sealed, which is
+          # build-tag-gated because its pre-rewrite source uses
+          # synthesised marker methods plain Go can't typecheck.
+          GOFLAGS="-toolexec=q -tags=q_sealed_demo" GOCACHE="$HOME/.cache/q-build" go build ./example/...
 
   release:
     name: Release

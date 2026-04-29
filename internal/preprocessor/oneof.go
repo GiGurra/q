@@ -756,7 +756,15 @@ func resolveSealedDirective(fset *token.FileSet, sc *qSubCall, info *types.Info,
 		}
 		arms.Types = append(arms.Types, vt)
 		arms.Texts = append(arms.Texts, types.TypeString(vt, qualifier))
-		sc.SealedVariantNames = append(sc.SealedVariantNames, obj.Name())
+		// Only enqueue for marker-method synthesis if the variant
+		// doesn't already declare one. Hand-written markers let users
+		// keep their pre-rewrite source IDE-clean (no red squiggles
+		// from the Go-side typecheck not seeing the synthesised
+		// method); the synthesis pass would otherwise emit a
+		// duplicate-method compile error.
+		if !variantHasMarker(vt, sc.SealedMarkerName) {
+			sc.SealedVariantNames = append(sc.SealedVariantNames, obj.Name())
+		}
 	}
 	if len(arms.Types) == 0 {
 		return Diagnostic{
@@ -769,6 +777,47 @@ func resolveSealedDirective(fset *token.FileSet, sc *qSubCall, info *types.Info,
 
 	sealedMap[iNamed.Obj()] = arms
 	return Diagnostic{}, false
+}
+
+// variantHasMarker reports whether the variant type already declares
+// a method named markerName with no params and no results — i.e. the
+// user has hand-written the marker themselves so the synthesis pass
+// must skip it (or the Go compiler would see two declarations of the
+// same method on the same receiver).
+//
+// Checks both T and *T's method sets (Go promotes value-receiver
+// methods through pointer types). Param/result shapes other than
+// "no args, no results" don't count — they couldn't satisfy the
+// marker contract.
+func variantHasMarker(vt types.Type, markerName string) bool {
+	if markerName == "" {
+		return false
+	}
+	candidates := []types.Type{vt}
+	if _, isPtr := vt.(*types.Pointer); !isPtr {
+		candidates = append(candidates, types.NewPointer(vt))
+	}
+	for _, t := range candidates {
+		mset := types.NewMethodSet(t)
+		for i := 0; i < mset.Len(); i++ {
+			sel := mset.At(i)
+			if sel.Obj().Name() != markerName {
+				continue
+			}
+			fn, ok := sel.Obj().(*types.Func)
+			if !ok {
+				continue
+			}
+			sig, ok := fn.Type().(*types.Signature)
+			if !ok {
+				continue
+			}
+			if sig.Params().Len() == 0 && sig.Results().Len() == 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // variantIndex returns the 0-based position of t within arms, or -1

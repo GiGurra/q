@@ -204,9 +204,10 @@ Progress through `docs/api/<page>.md` ↔ `example/<page>/` 1:1 coverage. Each p
 - reflection.md
 - require.md
 - scope.md
+- sealed.md (marked experimental — IDE squiggles on pre-rewrite source; build-tag gated)
 
 ### Todo (api pages)
-sealed.md, slog.md, sql.md, string_case.md, tern.md, timeout.md, todo.md, trace.md
+slog.md, sql.md, string_case.md, tern.md, timeout.md, todo.md, trace.md
 
 ### Todo (top-level docs — lower priority, most snippets duplicate api pages)
 
