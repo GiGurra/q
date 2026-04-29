@@ -137,18 +137,6 @@ The persistent backlog for `q`. A cold-state reader can pick up here without re-
 
 - **#91 follow-up — additional `q.At` bubble terminals.** v1 ships `.OrError(err)` and `.OrE(call())` for the bubble shapes. Sibling vocabularies from the q.NotNilE chain are still pending: `.OrErrF(fn func() error)`, `.OrWrap(msg)`, `.OrWrapf(format, args…)`, `.OrCatch(fn func() (T, error))`. Same machinery as `.OrError` — just different ways of shaping the bubbled error. Park until users actually want them.
 
-### Cleanup-shape uniformity across q
-
-- **#99 — Cleanup-shape uniformity across q.** `q.Open(...).DeferCleanup(cleanup)` accepts `func(T)` and `func(T) error`, with the err-returning form rewritten to a `slog.Error`-wrapped defer. Other cleanup-accepting sites in q should accept the same two-shape vocabulary so users don't have to remember which API takes which shape:
-
-  - `q.Assemble[T](...).DeferCleanup(cleanup)` — currently zero-arg only (auto-cleanup); add explicit-cleanup support with the same two shapes.
-  - `q.NewScope().DeferCleanup(cleanup)` — same.
-  - Recipe-cleanup hooks in q.Assemble's recipe shape (`(T, func(), error)`) — the `func()` slot could be either `func()` or `func() error` from the recipe author's perspective; the rewriter would normalise.
-
-  Mechanism: extract `validateExplicitCleanup` + the `func(T) error` slog-wrap defer-line emission (landed for q.Open) into a reusable helper and call it from each cleanup-accepting site. Each site needs a parameter-shape switch on `...any` plus the corresponding `slog`-import wiring; the log message can be parameterised on the source ("q.Open / q.Assemble / q.Scope") so it names the offending site.
-
-  Out of scope: no-arg cleanups (`func()` / `func() error`) and arbitrary call expressions. q.Open's DeferCleanup is intentionally scoped to the resource it wraps — write `defer myCleanup()` at the call site if the cleanup doesn't need the resource.
-
 ## Doc-coverage progress
 
 Progress through `docs/api/<page>.md` ↔ `example/<page>/` 1:1 coverage. Each page ships in its own commit with the example mate + `expected_run.txt` + (when relevant) impl fixes that the doc-mirroring exposes. Tracked here so a cold-state reader can resume.
@@ -411,8 +399,6 @@ Progress through `docs/api/<page>.md` ↔ `example/<page>/` 1:1 coverage. Each p
 
   **When this matters:** if a real workload shows q.AtCompileTime decode time as a measurable startup-cost line item OR if the encoded JSON/Gob blob bloats the binary noticeably. Until then, the codec route earns its keep.
 
-- **#93 follow-up — q.FnParams: embedded struct propagation.** v1 of `q.FnParams` validates only direct field membership. Embedded structs are skipped — if `Inner` has the marker and `Outer` embeds `Inner`, `Outer` literals that don't go through Inner aren't validated. Decide whether the marker should propagate (and how — flatten vs. recursive validation) before users hit it in practice.
-
 ### Considered and dropped
 
 Don't re-propose these without new information — each was ruled out for a specific reason that's still live.
@@ -422,6 +408,8 @@ Don't re-propose these without new information — each was ruled out for a spec
 - **q.TryCatch** (block-scoped try/catch) — `.Catch(handler func(any))` has no return path, so caught panics can't flow into the enclosing function's error return. `q.Recover` / `q.RecoverE` already cover the useful function-boundary case.
 - **q.Must / q.MustE** — original rationale was "panicking is the opposite of what q exists to enable." Reconsidered when q.Assemble (always (T, error)) needed an escape hatch in main / init / tests where q.Try can't bubble; shipped as **q.Unwrap** / **q.UnwrapE** instead, with the explicit framing that they're for non-bubble call sites only and not a general-purpose error policy.
 - **q.Call / q.Named (named arguments)** — verbose at the call site (noisier than positional + comment), rewriter requires `*types.Signature` to expose param names which fails for any callee with unnamed params, and either "missing names → zero value" semantics turn signature additions into silent bugs OR strict-coverage variants make the surface even longer than struct-options-pattern Go already has. Doesn't earn its keep.
+- **Cleanup-shape uniformity across q** — extending `func(T)` / `func(T) error` to `q.Assemble[T](...).DeferCleanup` and `q.NewScope().DeferCleanup` looks like a uniformity win but the three sites are doing genuinely different things: q.Open wraps one resource (cleanup-arg is obvious), q.Assemble fires a chain of recipe-collected cleanups (an outer cleanup-arg is ad-hoc — recipes already provide cleanups), q.NewScope just defers `scope.Close()` (no resource for a `func(T)` to act on; `scope.Attach*` already covers per-resource registration). Forcing identical surface across the three would be cargo-cult consistency rather than real uniformity.
+- **q.FnParams embedded-struct propagation** — when an outer struct embeds a marked inner, the outer's literal could in principle validate the inner's required fields too. Rejected: embedding means "I want a default-zero version of this," not "I'm constructing this from scratch." Propagation would conflate naming a field with constructing a struct, breaking the natural embedding shape. The marker is intentionally type-level: only the struct that *directly* declares `_ q.FnParams` is checked. Documented in `docs/api/fnparams.md` Caveats.
 
 ## How this list is maintained
 
