@@ -212,9 +212,9 @@ Progress through `docs/api/<page>.md` ↔ `example/<page>/` 1:1 coverage. Each p
 ### Todo (api pages)
 (none — all docs/api/*.md pages have an example/<page>/ mate)
 
-### Todo (top-level docs — lower priority, most snippets duplicate api pages)
+### Todo (top-level docs)
 
-design.md, getting-started.md, index.md, typed-nil-guard.md
+(none — getting-started.md's Quick Start has an example/getting_started/ mate; design.md / index.md / typed-nil-guard.md are reference prose whose code snippets are covered by the per-API examples they point to)
 
 ### Resource lifetime + dependency injection
 

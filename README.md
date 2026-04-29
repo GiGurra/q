@@ -573,7 +573,7 @@ q.Snake("XMLHttpRequest")   // "xml_http_request"
 q.Camel("hello_world")      // "helloWorld"
 q.Pascal("hello_world")     // "HelloWorld"
 q.Kebab("HelloWorld")       // "hello-world"
-q.Upper(q.Snake("DBHost"))  // "DB_HOST"
+q.Upper("db_host")          // "DB_HOST"
 ```
 
 Each call site folds to a string literal at compile time. Useful for column names, env vars, URL slugs, JSON field names — the codegen-adjacent stuff Go forces you to spell out by hand. Inputs must be string literals; runtime values use the standard `strings` package.

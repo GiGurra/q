@@ -68,7 +68,7 @@ The original four bubble entries cover the dominant Go signatures:
 
 Subsequent additions follow the same shape: each new helper picks a distinct source signature and exposes a bare + chain pair. `q.Ok` / `q.OkE` for `(T, bool)`, `q.Recv` / `q.RecvE` and `q.As` / `q.AsE` as comma-ok specialisations, `q.Await*` / `q.Recv*Ctx` / `q.CheckCtx*` for context cancellation and futures, and so on. The bubble shape is the constant; what varies is the *trigger* (error, nil, not-ok, ctx, channel close) that fires it.
 
-**Why terminal `.Release` for Open (not `.WithDefer` earlier in the chain)?** `.DeferCleanup(cleanup)` has to *own* both the error-bubble path and the success-defer path. Making it a modifier in the middle of the chain would mean another method comes after it — but that method can't undo the defer registration, so Release's placement relative to other chain methods would matter. As the terminal, Release's position is unambiguous: error shaping happens first, defer registration on success is the last step.
+**Why terminal `.DeferCleanup` for Open (not `.WithDefer` earlier in the chain)?** `.DeferCleanup(cleanup)` has to *own* both the error-bubble path and the success-defer path. Making it a modifier in the middle of the chain would mean another method comes after it — but that method can't undo the defer registration, so `.DeferCleanup`'s placement relative to other chain methods would matter. As the terminal, its position is unambiguous: error shaping happens first, defer registration on success is the last step.
 
 **Why different entry verbs for the two source-monads (`Try` vs `NotNil`)?** Forced symmetry — `TryNil` — parses backwards in English. Same reason `Check` and `Open` aren't `TryError` and `TryManage`. The source signatures are genuinely different in shape, so different verbs read more honestly than enforced symmetry.
 
@@ -158,7 +158,7 @@ Examples of explicit rejections:
 - `q.TryE(call).Method(...)` where `call` is not itself a multi-return `(T, error)` expression — the AST path needs both pieces to type-check the chain.
 - A chain method that is not one of the recognized names. (Library evolution requires updating the rewriter and a fixture in the same change.)
 - `q.TryE(call).Wrapf(format, args…)` where `format` is not a string literal — the rewriter splices `: %w` into the format, which requires it to be a literal.
-- `q.Open(call).DeferCleanup(cleanup)` missing the `.Release` terminal — the scanner surfaces this as a diagnostic because the resulting `OpenResult[T]` would be a useless intermediate value.
+- `q.Open(call)` without one of the terminal `.DeferCleanup(cleanup)` / `.DeferCleanup()` / `.NoDeferCleanup()` calls — the scanner surfaces this as a diagnostic because the resulting `OpenResult[T]` would be a useless intermediate value.
 
 ### 4.3 What the rewriter must preserve
 
@@ -184,7 +184,7 @@ Cross-package cases (e.g. a user wraps `q.Try` in their own helper) are out of s
 
 Future / deferred:
 
-- A counterpart helper for cases where the bubble trigger is neither `(T, error)` nor `*T == nil` nor `error` alone. Possibilities: `q.IfNil(x)` for is-nil-as-failure on an interface or chan; `q.Ok(v, ok)` for the comma-ok pattern; `q.Recv(ch)` for channel close. Exact semantic to be agreed when there's a real motivating use case. Tracked as TODO #11.
+- Additional bubble triggers as the need surfaces — e.g. `q.IfNil(x)` for is-nil-as-failure on an interface or chan, where the `q.NotNilE(...).Err(ErrSomething)` shape feels heavy. Tracked as TODO #11.
 - Multi-LHS where q.* itself produces multiple T values (`v, w := q.Try2(call())`) — needs new runtime helpers. Incidental multi-LHS (where q.* is nested inside a multi-result RHS call) already works via hoist. Tracked as TODO #16, parked.
 - Optimisations like length-preserving rewrites if the position-drift impact in editors / CI becomes annoying.
 

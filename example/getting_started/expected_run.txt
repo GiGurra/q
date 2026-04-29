@@ -1,0 +1,2 @@
+42
+parseAndDouble(oops): err: strconv.Atoi: parsing "oops": invalid syntax
