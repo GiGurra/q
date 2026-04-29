@@ -1,0 +1,4 @@
+Store.Get(a)=1
+Store.Get(b)=2
+Store.size=102
+RWStore.Read(x)=42

@@ -59,9 +59,9 @@ On success: register the deferred cleanup so it fires when the enclosing functio
 For the common case (a `Closer`-shaped resource or a channel), let the preprocessor figure it out:
 
 ```go
-ch   := q.Open(makeChan()).DeferCleanup()        // → defer close(ch)
-file := q.Open(os.Open(path)).DeferCleanup()     // → defer func() { _ = file.Close() }()
-db   := q.Open(sql.Open(...)).DeferCleanup()     // → defer func() { _ = db.Close() }()
+ch   := q.Open(makeChan()).DeferCleanup()    // → defer close(ch)
+file := q.Open(os.Open(path)).DeferCleanup() // → deferred wrapper that slog.Errors any close-time err
+db   := q.Open(sql.Open(...)).DeferCleanup() // → same shape (Close() error → slog wrapper)
 ```
 
 The typecheck pass inspects the resource type T at compile time and dispatches:
