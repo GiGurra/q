@@ -1,0 +1,8 @@
+loadRow(7): row.ID=7
+loadRow(0): err=main.go:N: not found
+loadRow(0).is(ErrNotFound): true
+loadRowErr(0): err=main.go:N: custom err
+loadRowErrF(0): err=main.go:N: wrapped: not found
+loadRowWrap(0): err=main.go:N: loading user: not found
+loadRowWrapf(0): err=main.go:N: loading user 0: not found
+loadRowCatch(0): recovered row.ID=-1

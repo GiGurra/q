@@ -207,9 +207,10 @@ Progress through `docs/api/<page>.md` ↔ `example/<page>/` 1:1 coverage. Each p
 - tern.md
 - timeout.md
 - todo.md
+- trace.md
 
 ### Todo (api pages)
-trace.md
+(none — all docs/api/*.md pages have an example/<page>/ mate)
 
 ### Todo (top-level docs — lower priority, most snippets duplicate api pages)
 
