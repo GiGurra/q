@@ -146,6 +146,14 @@ func formAssign(s string) (int, error) {
 	return arr[0], nil
 }
 
+// v += q.Try(call())                                // compound assign
+// The hoist path preserves the user's compound op verbatim.
+func formCompoundAssign(s string) (int, error) {
+	v := 1
+	v += q.Try(strconv.Atoi(s))
+	return v, nil
+}
+
 //      q.Try(call())                                // discard (ExprStmt)
 func formDiscard(s string) error {
 	q.Try(strconv.Atoi(s))
@@ -248,6 +256,10 @@ func main() {
 	report("formDefine(21)", n, err)
 	n, err = formAssign("21")
 	report("formAssign(21)", n, err)
+	n, err = formCompoundAssign("21")
+	report("formCompoundAssign(21)", n, err)
+	n, err = formCompoundAssign("bad")
+	report("formCompoundAssign(bad)", n, err)
 	if err := formDiscard("21"); err != nil {
 		fmt.Printf("formDiscard(21): err=%s\n", err)
 	} else {

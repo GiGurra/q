@@ -1,0 +1,8 @@
+plusEq(7): 8
+plusEq(bad): err=strconv.Atoi: parsing "bad": invalid syntax
+minusEq(40): 60
+mulEq(3): 6
+indexedPlusEq(4): [5]
+mapPlusEq(3): k=8
+multiPlusEq(2,3): 5
+multiPlusEq(bad,3): err=strconv.Atoi: parsing "bad": invalid syntax

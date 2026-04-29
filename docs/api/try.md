@@ -112,6 +112,7 @@ Every position a plain Go expression fits in works for `q.Try` and `q.TryE`:
 ```go
 v := q.Try(call())                                // define
 v  = q.Try(call())                                // assign (incl. obj.field, arr[i])
+v += q.Try(call())                                // compound assign (any +=, -=, *=, /=, %= …)
      q.Try(call())                                // discard (ExprStmt)
 return q.Try(call()), nil                         // return-position
 x := f(q.Try(call()))                             // nested in another expression (hoist)

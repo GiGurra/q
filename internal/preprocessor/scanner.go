@@ -1604,8 +1604,14 @@ func importAliasFor(file *ast.File, importPath, defaultName string) string {
 func matchStatement(stmt ast.Stmt, alias string, fnType *ast.FuncType) (callShape, bool, error) {
 	switch s := stmt.(type) {
 	case *ast.AssignStmt:
+		// Direct-bind handles only `:=` and `=`. Compound assigns
+		// (`+=`, `*=`, etc.) fall through to the hoist path: every
+		// q.* on either side binds to a temp, then the original
+		// statement is re-emitted verbatim with each q.* span
+		// substituted by its temp. The user's compound op is
+		// preserved untouched.
 		if s.Tok != token.DEFINE && s.Tok != token.ASSIGN {
-			return callShape{}, false, nil
+			return matchHoist(stmt, fnType, alias, append(append([]ast.Expr(nil), s.Lhs...), s.Rhs...))
 		}
 		// Direct-bind eligibility: single LHS, single RHS, RHS IS a
 		// q.* call, LHS has no nested q.*. That's the tight one-line

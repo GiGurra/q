@@ -16,6 +16,8 @@ multiRecover.ok: ok=7
 constCatch(abc): ok=0
 formDefine(21): ok=21
 formAssign(21): ok=21
+formCompoundAssign(21): ok=22
+formCompoundAssign(bad): err=strconv.Atoi: parsing "bad": invalid syntax
 formDiscard(21): ok
 formDiscard(abc): err=strconv.Atoi: parsing "abc": invalid syntax
 formReturn(21): ok=21

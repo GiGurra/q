@@ -1,0 +1,10 @@
+whatQAwaitDoes: Ada
+awaitEWrapf(1): Ada
+awaitEWrapf(99): err=fetching user 99: not found
+awaitECatch(99): <anon> (anon)
+fanOut: total=10
+formDefine: Ada
+formAssign: Ada
+formDiscard: ok
+formReturn: Ada
+formHoist: Ada
