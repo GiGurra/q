@@ -1,0 +1,4 @@
+parseV2(in): panic=q.TODO main.go:N: schema v2 parser
+parseV3(in): panic=q.TODO main.go:N
+handle(a)=handled-a
+handle(z): panic=q.Unreachable main.go:N: tag was "z"
