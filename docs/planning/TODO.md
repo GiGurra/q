@@ -199,9 +199,10 @@ Progress through `docs/api/<page>.md` ↔ `example/<page>/` 1:1 coverage. Each p
 - oneof.md
 - par.md
 - recover.md
+- recv.md
 
 ### Todo (api pages)
-recv.md, recv_ctx.md, reflection.md, require.md, scope.md, sealed.md, slog.md, sql.md, string_case.md, tern.md, timeout.md, todo.md, trace.md
+recv_ctx.md, reflection.md, require.md, scope.md, sealed.md, slog.md, sql.md, string_case.md, tern.md, timeout.md, todo.md, trace.md
 
 ### Todo (top-level docs — lower priority, most snippets duplicate api pages)
 

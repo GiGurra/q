@@ -1,0 +1,15 @@
+recvDemo(open): ok body="hello" sentinel=false
+recvDemo(closed): err=q: channel closed
+recvDemo(closed).is(q.ErrChanClosed): true
+recvEWrap(closed): err=reading inbox
+recvEErr(closed): err=pipeline closed
+recvEErr(closed).is(ErrPipelineClosed): true
+recvECatch(closed) [recovers via sentinel]: ok body="" sentinel=true
+recvEErrF(closed): err=inbox: gone
+recvEWrapf(closed,inbox): err=inbox inbox closed
+formDefine(open): ok body="hello" sentinel=false
+formAssign(open): ok body="hello" sentinel=false
+formDiscard(open): ok
+formDiscard(closed): err=q: channel closed
+formReturn(open): ok body="hello" sentinel=false
+formHoist(open): hello
