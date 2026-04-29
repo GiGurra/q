@@ -1,0 +1,20 @@
+hello world
+hi world, 43 next
+upper: WORLD
+user 42 not found
+literal { and } braces
+{name} stays literal
+{ world }
+100% complete, 42% done
+name: Ada
+sum: 7
+upper: HELLO
+first: x
+got: [Linus]
+user 7 not found
+constant error
+flnDemo: processing 3 items for user Ada
+hi world
+hi world again
+hi forms-name
+hoist: hi world
