@@ -1,0 +1,10 @@
+describe(Red): warm
+describe(Green): natural
+describe(Blue): cool
+describeWithDefault(Color(99)): unknown
+warmCool(Red): warm-or-natural
+warmCool(Blue): cool
+switchWithInit: green
+describeStatus(Pending): pending
+describeStatus(Done@42): done@42
+describeStatus(Failed): failed: boom
