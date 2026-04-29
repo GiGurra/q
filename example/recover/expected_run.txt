@@ -1,0 +1,12 @@
+doWorkAuto(good): <nil>
+doWorkAuto(bad): q: recovered panic: boom [unwrap=boom stack-has-runtime=true]
+doWorkExplicit(bad): q: recovered panic: boom [unwrap=boom stack-has-runtime=true]
+doWorkMap(good): <nil>
+doWorkMap(bad): api 500: boom
+doWorkMapBusiness(): api 400: must be positive
+doWorkErr(bad): operation failed
+doWorkErr(bad).is(ErrFailed): true
+doWorkErrF(bad): custom wrap: value=boom
+doWorkWrap(bad): doWorkWrap: q: recovered panic: boom [unwrap=boom stack-has-runtime=true]
+doWorkWrapf(bad, 7): doWorkWrapf id=7: q: recovered panic: boom [unwrap=boom stack-has-runtime=true]
+doWorkAutoRecoverE(bad): api 500: boom

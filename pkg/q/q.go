@@ -683,10 +683,15 @@ func (e *PanicError) Error() string {
 //	    riskyPanics()
 //	    return nil
 //	}
-func Recover(errPtr *error) {
-	if r := recover(); r != nil {
-		*errPtr = &PanicError{Value: r, Stack: debug.Stack()}
+func Recover(errPtr ...*error) {
+	r := recover()
+	if r == nil {
+		return
 	}
+	if len(errPtr) == 0 {
+		panicUnrewritten("q.Recover")
+	}
+	*errPtr[0] = &PanicError{Value: r, Stack: debug.Stack()}
 }
 
 // RecoverE begins a RecoverE chain. The chain method decides how
@@ -708,8 +713,11 @@ func Recover(errPtr *error) {
 //	    riskyPanics()
 //	    return nil
 //	}
-func RecoverE(errPtr *error) RecoverResult {
-	return RecoverResult{errPtr: errPtr}
+func RecoverE(errPtr ...*error) RecoverResult {
+	if len(errPtr) == 0 {
+		return RecoverResult{}
+	}
+	return RecoverResult{errPtr: errPtr[0]}
 }
 
 // RecoverResult carries the errPtr through the q.RecoverE chain.
@@ -722,41 +730,65 @@ type RecoverResult struct {
 // Map runs fn on the recovered panic value; the returned error is
 // stored via errPtr. Use for custom panic-shape translation.
 func (r RecoverResult) Map(fn func(any) error) {
-	if rec := recover(); rec != nil {
-		*r.errPtr = fn(rec)
+	rec := recover()
+	if rec == nil {
+		return
 	}
+	if r.errPtr == nil {
+		panicUnrewritten("q.RecoverE(...).Map")
+	}
+	*r.errPtr = fn(rec)
 }
 
 // Err stores the supplied replacement error on panic, discarding
 // the original panic value and stack.
 func (r RecoverResult) Err(replacement error) {
-	if rec := recover(); rec != nil {
-		_ = rec
-		*r.errPtr = replacement
+	rec := recover()
+	if rec == nil {
+		return
 	}
+	if r.errPtr == nil {
+		panicUnrewritten("q.RecoverE(...).Err")
+	}
+	*r.errPtr = replacement
 }
 
 // ErrF transforms the default *PanicError wrapper via fn before
 // storing. Useful when the caller wants to prepend context but
 // still preserve the original panic metadata.
 func (r RecoverResult) ErrF(fn func(*PanicError) error) {
-	if rec := recover(); rec != nil {
-		*r.errPtr = fn(&PanicError{Value: rec, Stack: debug.Stack()})
+	rec := recover()
+	if rec == nil {
+		return
 	}
+	if r.errPtr == nil {
+		panicUnrewritten("q.RecoverE(...).ErrF")
+	}
+	*r.errPtr = fn(&PanicError{Value: rec, Stack: debug.Stack()})
 }
 
 // Wrap prefixes the default PanicError with msg via fmt.Errorf.
 func (r RecoverResult) Wrap(msg string) {
-	if rec := recover(); rec != nil {
-		*r.errPtr = fmt.Errorf("%s: %w", msg, &PanicError{Value: rec, Stack: debug.Stack()})
+	rec := recover()
+	if rec == nil {
+		return
 	}
+	if r.errPtr == nil {
+		panicUnrewritten("q.RecoverE(...).Wrap")
+	}
+	*r.errPtr = fmt.Errorf("%s: %w", msg, &PanicError{Value: rec, Stack: debug.Stack()})
 }
 
 // Wrapf prefixes the default PanicError with a formatted message.
 func (r RecoverResult) Wrapf(format string, args ...any) {
-	if rec := recover(); rec != nil {
-		*r.errPtr = fmt.Errorf(format+": %w", append(args, &PanicError{Value: rec, Stack: debug.Stack()})...)
+	rec := recover()
+	if rec == nil {
+		return
 	}
+	if r.errPtr == nil {
+		panicUnrewritten("q.RecoverE(...).Wrapf")
+	}
+	*r.errPtr = fmt.Errorf(format+": %w", append(args, &PanicError{Value: rec, Stack: debug.Stack()})...)
 }
 
 // Future is the promise-like handle returned by q.Async. Internal

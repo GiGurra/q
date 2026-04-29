@@ -198,9 +198,10 @@ Progress through `docs/api/<page>.md` ↔ `example/<page>/` 1:1 coverage. Each p
 - ok.md
 - oneof.md
 - par.md
+- recover.md
 
 ### Todo (api pages)
- async.md, atcompiletime.md, at.md, atom.md, await_ctx.md, await_multi.md, channel_multi.md, checkctx.md, convert.md, coro.md, data.md, debug.md, either.md, enums.md, exhaustive.md, fnparams.md, format.md, gen.md, generator.md, goroutine_id.md, lazy.md, lock.md, match.md, ok.md, oneof.md, par.md, recover.md, recv.md, recv_ctx.md, reflection.md, require.md, scope.md, sealed.md, slog.md, sql.md, string_case.md, tern.md, timeout.md, todo.md, trace.md
+recv.md, recv_ctx.md, reflection.md, require.md, scope.md, sealed.md, slog.md, sql.md, string_case.md, tern.md, timeout.md, todo.md, trace.md
 
 ### Todo (top-level docs — lower priority, most snippets duplicate api pages)
 
