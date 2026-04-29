@@ -1,6 +1,6 @@
-// example/check — q.Check and q.CheckE for functions returning just
-// error (file.Close, db.Ping, validate). Both are always expression
-// statements — they return nothing. Run with:
+// example/check mirrors docs/api/check.md one-to-one. Each section of
+// the doc has a matching function below, named after the snippet it
+// demonstrates. Run with:
 //
 //	go run -toolexec=q ./example/check
 package main
@@ -8,69 +8,64 @@ package main
 import (
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/GiGurra/q/pkg/q"
 )
 
-// ErrAlreadyClosed is the "benign" error we'll swallow below.
-var ErrAlreadyClosed = errors.New("already closed")
+// DB and File stand in for *sql.DB and *os.File so the q.Check snippets
+// can read identically to the doc without pulling in database/sql + a
+// driver or producing non-deterministic temp-path output. The shapes
+// (Ping/Close, both returning error; second Close returns os.ErrClosed)
+// match what the doc references.
+type DB struct {
+	failPing  bool
+	failClose bool
+}
 
-// closer returns one of three possibilities: nil (success),
-// ErrAlreadyClosed (benign), or a real error.
-func closer(mode string) error {
-	switch mode {
-	case "ok":
-		return nil
-	case "closed":
-		return ErrAlreadyClosed
+func (d *DB) Ping() error {
+	if d.failPing {
+		return errors.New("ping failed")
 	}
-	return errors.New("close failed: " + mode)
-}
-
-// bareCheck — bubble the captured err unchanged.
-func bareCheck(mode string) error {
-	q.Check(closer(mode))
 	return nil
 }
 
-// checkWithErr — substitute a constant error on the bubble.
-func checkWithErr(mode string) error {
-	q.CheckE(closer(mode)).Err(errors.New("replaced"))
+func (d *DB) Close() error {
+	if d.failClose {
+		return errors.New("close failed")
+	}
 	return nil
 }
 
-// checkWithWrap — attach a prefix via %w-wrapping.
-func checkWithWrap(mode string) error {
-	q.CheckE(closer(mode)).Wrap("shutting down")
+type File struct{ closed bool }
+
+func (f *File) Close() error {
+	if f.closed {
+		return os.ErrClosed
+	}
+	f.closed = true
 	return nil
 }
 
-// checkWithWrapf — like Wrap but with format args. Format must be
-// a string literal.
-func checkWithWrapf(mode string, id int) error {
-	q.CheckE(closer(mode)).Wrapf("shutting down id=%d", id)
+// ---------- "What q.Check does" ----------
+//
+//	q.Check(db.Ping())
+func whatQCheckDoes(db *DB) error {
+	q.Check(db.Ping())
 	return nil
 }
 
-// checkCatchSuppress — CheckE.Catch returning nil swallows the
-// error (execution falls through past the Check). Returning
-// non-nil bubbles that error in place of the original.
-func checkCatchSuppress(mode string) error {
-	q.CheckE(closer(mode)).Catch(func(e error) error {
-		if errors.Is(e, ErrAlreadyClosed) {
-			return nil // swallow benign errors
-		}
-		return e
-	})
-	return nil
-}
-
-// Realistic use: a shutdown sequence that wraps each step's error
-// but swallows "already closed" on cleanup.
-func shutdown(mode string) error {
-	q.CheckE(closer(mode)).Wrap("step 1")
-	q.CheckE(closer(mode)).Catch(func(e error) error {
-		if errors.Is(e, ErrAlreadyClosed) {
+// ---------- "Chain methods on q.CheckE / .Catch swallow-pattern" ----------
+//
+//	q.CheckE(file.Close()).Catch(func(e error) error {
+//	    if errors.Is(e, os.ErrClosed) {
+//	        return nil
+//	    }
+//	    return e
+//	})
+func catchSwallowAlreadyClosed(file *File) error {
+	q.CheckE(file.Close()).Catch(func(e error) error {
+		if errors.Is(e, os.ErrClosed) {
 			return nil
 		}
 		return e
@@ -78,36 +73,73 @@ func shutdown(mode string) error {
 	return nil
 }
 
+// ---------- "Examples / shutdown" ----------
+//
+//	func shutdown(db *sql.DB, file *os.File) error {
+//	    q.Check(db.Ping())
+//	    q.CheckE(file.Close()).Wrap("closing log")
+//	    q.Check(db.Close())
+//	    return nil
+//	}
+func shutdown(db *DB, file *File) error {
+	q.Check(db.Ping())
+	q.CheckE(file.Close()).Wrap("closing log")
+	q.Check(db.Close())
+	return nil
+}
+
+// ---------- Remaining CheckE terminals (Err / ErrF / Wrap / Wrapf) ----------
+// Doc lists them in a table; each exercised on the failing path so a
+// regressed terminal would show in the diff.
+
+func checkEErr(db *DB) error {
+	q.CheckE(db.Ping()).Err(errors.New("replaced"))
+	return nil
+}
+
+func checkEErrF(db *DB) error {
+	q.CheckE(db.Ping()).ErrF(func(e error) error { return fmt.Errorf("transformed: %w", e) })
+	return nil
+}
+
+func checkEWrap(db *DB) error {
+	q.CheckE(db.Ping()).Wrap("starting up")
+	return nil
+}
+
+func checkEWrapf(db *DB, id int) error {
+	q.CheckE(db.Ping()).Wrapf("starting up id=%d", id)
+	return nil
+}
+
+func show(label string, err error) {
+	if err != nil {
+		fmt.Printf("%s: err=%s\n", label, err)
+		return
+	}
+	fmt.Printf("%s: ok\n", label)
+}
+
 func main() {
-	cases := []struct {
-		name string
-		fn   func(string) error
-	}{
-		{"bareCheck", bareCheck},
-		{"checkWithErr", checkWithErr},
-		{"checkWithWrap", checkWithWrap},
-		{"checkCatchSuppress", checkCatchSuppress},
-		{"shutdown", shutdown},
-	}
+	// What q.Check does
+	show("whatQCheckDoes(ok)", whatQCheckDoes(&DB{}))
+	show("whatQCheckDoes(failPing)", whatQCheckDoes(&DB{failPing: true}))
 
-	for _, c := range cases {
-		for _, mode := range []string{"ok", "closed", "bad"} {
-			err := c.fn(mode)
-			if err != nil {
-				fmt.Printf("%-22s(%q) => err: %v\n", c.name, mode, err)
-			} else {
-				fmt.Printf("%-22s(%q) => ok\n", c.name, mode)
-			}
-		}
-	}
+	// Catch — swallow os.ErrClosed.
+	f := &File{}
+	show("catchSwallow(open file ok)", catchSwallowAlreadyClosed(f))
+	show("catchSwallow(already closed swallowed)", catchSwallowAlreadyClosed(f))
 
-	// Wrapf takes a separate signature so we exercise it alone.
-	for _, mode := range []string{"ok", "bad"} {
-		err := checkWithWrapf(mode, 42)
-		if err != nil {
-			fmt.Printf("%-22s(%q) => err: %v\n", "checkWithWrapf", mode, err)
-		} else {
-			fmt.Printf("%-22s(%q) => ok\n", "checkWithWrapf", mode)
-		}
-	}
+	// shutdown — the doc's full example, walked through the input
+	// permutations each bubble can fire on.
+	show("shutdown(all ok)", shutdown(&DB{}, &File{}))
+	show("shutdown(failPing)", shutdown(&DB{failPing: true}, &File{}))
+	show("shutdown(failClose on db)", shutdown(&DB{failClose: true}, &File{}))
+	show("shutdown(file already closed wrapped)", shutdown(&DB{}, &File{closed: true}))
+
+	// Remaining CheckE terminals — all on the failing path.
+	show("checkEErr(failPing)", checkEErr(&DB{failPing: true}))
+	show("checkEErrF(failPing)", checkEErrF(&DB{failPing: true}))
+	show("checkEWrap(failPing)", checkEWrap(&DB{failPing: true}))
+	show("checkEWrapf(failPing,42)", checkEWrapf(&DB{failPing: true}, 42))
 }

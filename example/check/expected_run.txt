@@ -1,0 +1,12 @@
+whatQCheckDoes(ok): ok
+whatQCheckDoes(failPing): err=ping failed
+catchSwallow(open file ok): ok
+catchSwallow(already closed swallowed): ok
+shutdown(all ok): ok
+shutdown(failPing): err=ping failed
+shutdown(failClose on db): err=close failed
+shutdown(file already closed wrapped): err=closing log: file already closed
+checkEErr(failPing): err=replaced
+checkEErrF(failPing): err=transformed: ping failed
+checkEWrap(failPing): err=starting up: ping failed
+checkEWrapf(failPing,42): err=starting up id=42: ping failed
