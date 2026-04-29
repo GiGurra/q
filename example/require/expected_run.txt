@@ -1,0 +1,6 @@
+encode(long): ok
+encode(short): err=main.go:N: header too short: q.Require failed
+encode(short).is(q.ErrRequireFailed): true
+decode(long): ok body="0123456789abcdef-extra"
+decode(short): v="" err=main.go:N: header too short: q.Require failed
+encodeNoMsg(short): err=main.go:N: q.Require failed
