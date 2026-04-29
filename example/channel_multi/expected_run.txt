@@ -1,0 +1,6 @@
+recvAnyExample: 2
+recvAnyECatchClosed: -1
+drainExample: [10 20 30]
+drainCtxExample: [1 2 3 4]
+drainAllExample: [[1 2] [3 4 5] [6]]
+drainAllCtxExample: [[1 2] [3 4]]
