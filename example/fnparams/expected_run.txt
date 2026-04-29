@@ -1,0 +1,6 @@
+loading /etc as yaml (timeout=0s, logger=false)
+connect.required: {host:db.example.com port:5432 db:prod tls:false}
+connect.with-opt: {host:db.example.com port:5432 db:prod tls:true}
+mixed: {_:{} A:hello B:0 C:false}
+positional: {_:{} X:1 Y:two Tag:false}
+server bound to :8080; primary db=primary:5432; 2 replicas; 1 named
