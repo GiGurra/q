@@ -1,6 +1,8 @@
 describe(pending): waiting
 describe(done): done at 12:34:56
 describe(failed): failed: timeout
+handle(Pending): waiting
+handle(Done): done at 12:34:56
 describeActivity(Idle): idle
 describeActivity(Working): working
 describeStatusValue(pending): waiting

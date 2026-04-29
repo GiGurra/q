@@ -26,3 +26,6 @@ coverage.txt
 
 # mkdocs build output
 /site/
+
+# Local Claude/agent scratch state
+.claude/

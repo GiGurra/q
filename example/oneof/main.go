@@ -40,6 +40,15 @@ func currentStatus(stage string, when time.Time) Status {
 	return q.AsOneOf[Status](Failed{Err: errors.New("timeout")})
 }
 
+// ---------- "Function input: passing a variant" ----------
+//
+//	func handle(s Status) { /* ... */ }
+//	handle(q.AsOneOf[Status](Pending{}))
+//	handle(q.AsOneOf[Status](Done{At: time.Now()}))
+func handle(s Status) string {
+	return describe(s)
+}
+
 // ---------- "Function input: accepting + dispatching a sum" ----------
 //
 //	func describe(s Status) {
@@ -122,6 +131,10 @@ func main() {
 	fmt.Printf("describe(pending): %s\n", describe(currentStatus("pending", when)))
 	fmt.Printf("describe(done): %s\n", describe(currentStatus("done", when)))
 	fmt.Printf("describe(failed): %s\n", describe(currentStatus("other", when)))
+
+	// Function input: variant wrapped at call site.
+	fmt.Printf("handle(Pending): %s\n", handle(q.AsOneOf[Status](Pending{})))
+	fmt.Printf("handle(Done): %s\n", handle(q.AsOneOf[Status](Done{At: when})))
 
 	// Atom variants.
 	fmt.Printf("describeActivity(Idle): %s\n", describeActivity(Activity{Tag: 1, Value: q.A[Idle]()}))

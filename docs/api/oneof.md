@@ -38,6 +38,25 @@ func currentStatus() Status {
 the typecheck pass validates `v`'s type matches one of `T`'s variants.
 A wrong variant type fails the build with a directed diagnostic.
 
+## Function input: passing a variant
+
+A function whose parameter type is the sum (`Status`) takes a `Status`
+value, not a bare variant. Wrap the variant with `q.AsOneOf` at the
+call site — same constructor as the return path:
+
+```go
+func handle(s Status) { /* ... */ }
+
+handle(q.AsOneOf[Status](Pending{}))
+handle(q.AsOneOf[Status](Done{At: time.Now()}))
+```
+
+`Status` is a defined type, not an interface, so the bare variant
+`Pending{}` won't satisfy the parameter; every variant has to go
+through `q.AsOneOf` to get the tag stamped on. (For the sibling
+shape where variants flow as themselves through `chan Message` /
+`func(Message)` with no per-call wrap, see [`q.Sealed`](sealed.md).)
+
 ## Function input: accepting + dispatching a sum
 
 The natural Go shape is a type switch on `.Value`. `q.Exhaustive`
