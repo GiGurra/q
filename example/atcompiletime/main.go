@@ -65,14 +65,15 @@ var CRC8 = q.AtCompileTime[[256]uint8](func() [256]uint8 {
 
 // ---------- "Capturing earlier q.AtCompileTime results" ----------
 //
-// Note: each q.AtCompileTime is its own top-level `var` declaration.
-// Grouped `var ( … )` blocks containing q.AtCompileTime entries are
-// not currently supported by the rewriter — see TODO #102.
-var Greeting = q.AtCompileTime[string](func() string { return "Hello" })
-var Farewell = q.AtCompileTime[string](func() string { return "Goodbye" })
-var Banner = q.AtCompileTime[string](func() string {
-	return Greeting + " / " + Farewell
-})
+// Grouped `var ( ... )` blocks work — each spec's substitution is
+// span-scoped to itself, so siblings don't stomp on each other.
+var (
+	Greeting = q.AtCompileTime[string](func() string { return "Hello" })
+	Farewell = q.AtCompileTime[string](func() string { return "Goodbye" })
+	Banner   = q.AtCompileTime[string](func() string {
+		return Greeting + " / " + Farewell
+	})
+)
 
 // ---------- "q.AtCompileTimeCode — a function value" ----------
 var Greet = q.AtCompileTimeCode[func(string) string](func() string {

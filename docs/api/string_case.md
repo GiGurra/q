@@ -45,21 +45,24 @@ The `Snake` / `Kebab` / `Camel` / `Pascal` family splits the input into words, t
 
 ## Use cases
 
+Both function-body and top-level `var` initializers are walked. Grouped `var ( ... )` blocks work too. (Regular `const` is *not* supported — Go's typechecker rejects function calls in const initializers before any rewrite happens.)
+
 ```go
-// Generated SQL column names from a Go field name:
-const userIDColumn = q.Snake("UserID")  // "user_id"
+// Top-level vars work:
+var (
+    userIDColumn = q.Snake("UserID")     // "user_id"
+    dbHostEnv    = q.Upper("db_host")    // "DB_HOST"
+)
 
-// Env vars from a config struct field:
-const dbHostEnv = q.Upper(q.Snake("DBHost"))  // "DB_HOST"
+func init() {
+    // URL slugs from a title:
+    url := "/posts/" + q.Kebab("My First Post")  // "/posts/my-first-post"
 
-// URL slugs from a title:
-url := "/posts/" + q.Kebab("My First Post")   // "/posts/my-first-post"
+    // JSON field names from Go identifiers:
+    fmt.Println(q.Camel("user_id"))              // "userId"
 
-// JSON field names from Go identifiers:
-fmt.Println(q.Camel("user_id"))              // "userId"
-
-// Matching a Stringer's output:
-fmt.Println(q.Pascal(q.EnumName[Color](c)))  // already PascalCase
+    _ = url
+}
 ```
 
 ## Why compile-time?
@@ -71,13 +74,16 @@ The transformations are deterministic and the inputs are known at compile time, 
 3. Runs the family-specific transform.
 4. Re-quotes and substitutes at the call site.
 
-The result is a `string` constant the Go compiler can use anywhere — including in `const` declarations (since q rewrites at the AST level before const evaluation):
+### Use `var`, not `const`
+
+The fold replaces the call with a string literal in the rewritten source, so the *value* is known at compile time. Function-body `:=`, package-level `var`, and grouped `var ( … )` blocks all work — but `const` does not, because Go's typechecker rejects function calls in const initializers before any rewrite has a chance to run:
 
 ```go
-const dbColumn = q.Snake("UserID")  // valid: q.Snake folds to "user_id" before const-checking
+var v = q.Snake("UserID")        // ✓ folds to var v = "user_id"
+const c = q.Snake("UserID")      // ✗ build error: q.Snake(...) is not constant
 ```
 
-Wait, no — `const` initializers in plain Go cannot contain function calls. But the rewriter happens BEFORE the const-evaluation pass, so by the time the compiler sees the file, `q.Snake("UserID")` has already become `"user_id"` — the const is valid. (The IDE will still highlight it as an error pre-rewrite, since gopls runs before toolexec. Same caveat as the rest of q's helpers.)
+If you need a true compile-time constant, use [`q.AtCompileTime`](atcompiletime.md) — it's the package-level escape hatch and accepts a closure, so any expression is fair game.
 
 ## Implementation notes
 

@@ -1303,7 +1303,10 @@ func scanTopLevelVarSpec(fset *token.FileSet, path string, gd *ast.GenDecl, alia
 		//   var X = q.AtCompileTime[T](...)
 		//   var X = q.AtCompileTimeCode[T](...)
 		// Each ValueSpec can declare multiple names, but for this
-		// shape we require single-name, single-value pairs.
+		// shape we require single-name, single-value pairs. Stmt
+		// points at the ValueSpec (not the enclosing GenDecl) so the
+		// rewriter's span substitution covers only this spec's bytes,
+		// not its siblings or the block's closing `)`.
 		if len(vs.Names) == 1 && len(vs.Values) == 1 {
 			if call, ok := vs.Values[0].(*ast.CallExpr); ok {
 				sub, matched, classifyErr := classifyQCall(call, alias)
@@ -1313,7 +1316,22 @@ func scanTopLevelVarSpec(fset *token.FileSet, path string, gd *ast.GenDecl, alia
 				}
 				if matched && (sub.Family == familyAtCompileTime || sub.Family == familyAtCompileTimeCode) {
 					*shapes = append(*shapes, callShape{
-						Stmt:    gd,
+						Stmt:    vs,
+						Form:    formDefine,
+						LHSExpr: vs.Names[0],
+						Calls:   []qSubCall{sub},
+					})
+					continue
+				}
+				// In-place fold families (q.Snake / q.Upper / q.SQL /
+				// q.Tag / q.TypeName / q.F / etc.) are call→literal
+				// substitutions that don't depend on the enclosing
+				// function's signature, so they're safe at top level.
+				// q.Try / q.Check / etc. need an enclosing error
+				// return and are correctly rejected by isInPlaceFamily.
+				if matched && isInPlaceFamily(sub.Family) {
+					*shapes = append(*shapes, callShape{
+						Stmt:    vs,
 						Form:    formDefine,
 						LHSExpr: vs.Names[0],
 						Calls:   []qSubCall{sub},
