@@ -8,6 +8,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/GiGurra/q/pkg/q"
@@ -134,7 +136,12 @@ func main() {
 		fmt.Printf("awaitAnyFirstSuccess: %d\n", w)
 	}
 	if _, err := awaitAnyAllFail(); err != nil {
-		fmt.Printf("awaitAnyAllFail: err=%s\n", err)
+		// errors.Join joins in goroutine-completion order (non-
+		// deterministic). Sort the lines so the example's stdout
+		// is stable across runs.
+		lines := strings.Split(err.Error(), "\n")
+		sort.Strings(lines)
+		fmt.Printf("awaitAnyAllFail: err=%s\n", strings.Join(lines, "\n"))
 	}
 
 	if vs, err := variadicSpread(); err != nil {

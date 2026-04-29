@@ -1,9 +1,9 @@
 awaitAllOk: [1 2 3]
 awaitAllErr: err=boom
 awaitAnyFirstSuccess: 7
-awaitAnyAllFail: err=c
-a
+awaitAnyAllFail: err=a
 b
+c
 variadicSpread: [10 20 30]
 fetchSizes: [1 2 3]
 awaitAllEWrap: err=gathering: nope
