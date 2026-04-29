@@ -1,0 +1,8 @@
+{"level":"INFO","msg":"loaded","userID":42}
+{"level":"INFO","msg":"located","file":"main.go","line":"N"}
+{"level":"INFO","msg":"located-combined","file":"main.go:N"}
+{"level":"INFO","msg":"debug","id":7,"user.Email":"ada@example.com","items[index]":"b","n*2":6}
+exprDemo: check failed at main.go:N: condition
+{"level":"INFO","msg":"processing","reqID":"abc-123","userID":99}
+{"level":"INFO","msg":"step done","reqID":"abc-123","userID":99,"traceID":"trace-7"}
+File()=main.go Expr(1+2)="1+2"
