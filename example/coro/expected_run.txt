@@ -1,0 +1,4 @@
+doublerDemo: 42, 200
+fibsDemo: [0 1 1 2 3 5 8 13 21 34]
+summerDemo: [10 30 60]
+twiceDemo: a=10 b=20 c=0 ok-after-done=false
