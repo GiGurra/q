@@ -1,0 +1,9 @@
+happyPath: {ID:1 Name:Ada}
+wideToPublic: {ID:7 Name:Linus Email:l@x}
+nestedDerivation: {ID:1 Name:Ada Address:{Street:Main City:Cph}}
+manualOverrides: {ID:1 Email:ada@x FullName:Ada Lovelace Source:v1}
+nestedOverride: {ID:2 Name:Linus Address:{Street:Helsinki City:Springfield}}
+fallibleConvert(1): {ID:1 Name:Ada Email:user1@example.com}
+fallibleConvert(99): err=not found
+fallibleConvertViaTry(2): {ID:2 Name:L Email:user2@example.com}
+mixingAll: {ID:3 FullName:Yann L Email:user3@example.com Source:v1 Address:{Street:Rue City:Reykjavík}}
