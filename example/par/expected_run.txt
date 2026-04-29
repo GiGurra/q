@@ -1,0 +1,13 @@
+default: [2 4 6 8 10]
+limit=2: [2 4 6 8 10]
+unbounded: [2 4 6 8 10]
+GetPar(ctx2)=2
+cancellation: err=context deadline exceeded
+parMapDemo: [10 20 30]
+parFilterDemo: [2 4]
+parForEachDemo: count=5
+parMapErrDemo: [1 2 3]
+parMapErrFailing: err=bad: bad
+parExists=true parForAll=true
+parGroupBy[f]=2
+parGroupBy[v]=2
