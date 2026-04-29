@@ -1,0 +1,18 @@
+themeWithFallback(full): dark
+themeWithFallback(noProfile): ocean-default
+themeWithFallback(allNil): light
+simpleFallback(full): Ada
+simpleFallback(allNil): anonymous
+multipleFallback(nil,nil,populated): global-default
+multipleFallback(set,_,_): opts-set
+multipleFallback(nil,nil,nil): https://example.com
+zeroTerminal(full): "Ada"
+zeroTerminal(allNil): ""
+orElsePlainExpr(set): 25
+orElsePlainExpr(nil-DB): 7
+nestedMethodRoot: dark
+loadTheme(full): dark
+loadTheme(allNil): err=theme missing
+resolveTheme(full): dark
+resolveTheme(allNil): disk-theme-3
+resolveTheme(allNilNoID): err=no user
