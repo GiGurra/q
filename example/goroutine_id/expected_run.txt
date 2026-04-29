@@ -1,0 +1,3 @@
+currentID > 0: true
+childID > 0: true
+child==current: false (expected false)
