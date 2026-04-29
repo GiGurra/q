@@ -1,0 +1,8 @@
+conditional(true): cfg=from-disk calls=1
+conditional(false): calls=0 (no eval)
+memoisation: total=30 sumCalls=1 (memoised)
+diagnostic: beforeForce=false afterForce=true
+handThunk: db.example:5432
+lazyEPairing: cfg=primary loadCalls=1
+cachedErrors: e1=boom e2=boom same-msg=true calls=1 (memoised)
+concurrentFirstEval: v=42 calls=1 (single eval)
