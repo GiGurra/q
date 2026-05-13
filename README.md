@@ -4,6 +4,8 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/GiGurra/q)](https://goreportcard.com/report/github.com/GiGurra/q)
 [![Docs](https://img.shields.io/badge/docs-gigurra.github.io%2Fq-blue)](https://gigurra.github.io/q/)
 
+<img width="800" height="446" alt="image" src="https://github.com/user-attachments/assets/0bb4f3b9-cc9a-4bfb-8deb-0d60ccde7e16" />
+
 > **Experimental** — APIs and internals may change. Use at your own risk.
 
 `q` is a `-toolexec` preprocessor that implements rejected Go language proposals. Most `q.*` calls are rewritten at compile time into ordinary Go — call sites read flat, generated code is identical to hand-written error forwarding, runtime overhead is zero.
